@@ -37,7 +37,7 @@ esac
 MARKER_DIR="/opt/kubui"
 MARKER_FILE="${MARKER_DIR}/.installed-tools"
 mkdir -p "${MARKER_DIR}"
-: > "${MARKER_FILE}"
+touch "${MARKER_FILE}"
 
 verify_sha256() {
     _file="$1"
@@ -50,6 +50,7 @@ verify_sha256() {
         rm -f "$_file"
         return 1
     fi
+    return 0
 }
 
 echo "kubui: installing kubectl, helm, and minikube for $ARCH ..."
