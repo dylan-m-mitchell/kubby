@@ -24,7 +24,7 @@ sudo apt-get install -y \
     python3-all \
     python3-venv \
     python3-pip \
-    python3-hatchling
+    python3-hatchling dpkg-dev
 
 # ── 2. Build ──────────────────────────────────────────────────────────────────
 echo "==> 2/2. Building the .deb"
