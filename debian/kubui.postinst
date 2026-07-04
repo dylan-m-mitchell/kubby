@@ -1,0 +1,81 @@
+#!/bin/sh
+# postinst script for kubui
+#
+# After the .deb itself is installed, this script downloads and installs
+# the three CLI tools that are NOT available via standard apt repos:
+#   - kubectl  (Kubernetes CLI)
+#   - helm     (Kubernetes package manager)
+#   - minikube (local Kubernetes cluster)
+#
+# podman is declared as a Depends in the control file, so apt installs it
+# automatically before this script runs.
+
+set -eu
+
+# Ensure /usr/local/bin is on PATH — dpkg's default postinst PATH often
+# omits it, which causes install scripts (like helm's) to fail their
+# post-install verification step.
+export PATH="/usr/local/bin:${PATH}"
+
+# Only run on initial configure (not on abort-upgrade, abort-remove, etc.)
+if [ "$1" != "configure" ]; then
+    exit 0
+fi
+
+ARCH="$(dpkg --print-architecture)"
+case "$ARCH" in
+    amd64)  KUBE_ARCH="amd64" ;;
+    arm64)  KUBE_ARCH="arm64" ;;
+    armhf)  KUBE_ARCH="arm"   ;;
+    *)
+        echo "kubui: unsupported architecture $ARCH — skipping CLI tool installation" >&2
+        echo "kubui: you can install kubectl, helm, and minikube manually." >&2
+        exit 0
+        ;;
+esac
+
+echo "kubui: installing kubectl, helm, and minikube for $ARCH ..."
+
+# ── kubectl ──────────────────────────────────────────────────────────
+if ! command -v kubectl >/dev/null 2>&1; then
+    echo "kubui: downloading kubectl ..."
+    KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
+    KUBECTL_TMP="$(mktemp)"
+    curl -fsSLo "${KUBECTL_TMP}" \
+        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${KUBE_ARCH}/kubectl"
+    mv "${KUBECTL_TMP}" /usr/local/bin/kubectl
+    chmod 0755 /usr/local/bin/kubectl
+    echo "kubui: kubectl ${KUBECTL_VERSION} installed to /usr/local/bin/kubectl"
+else
+    echo "kubui: kubectl already installed ($(kubectl version --client --short 2>/dev/null || echo 'unknown version'))"
+fi
+
+# ── helm ─────────────────────────────────────────────────────────────
+if ! command -v helm >/dev/null 2>&1; then
+    echo "kubui: downloading helm ..."
+    HELM_TMP="$(mktemp)"
+    curl -fsSL -o "${HELM_TMP}" https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
+    chmod 700 "${HELM_TMP}"
+    HELM_INSTALL_DIR=/usr/local/bin "${HELM_TMP}"
+    rm -f "${HELM_TMP}"
+    echo "kubui: helm installed"
+else
+    echo "kubui: helm already installed ($(helm version --short 2>/dev/null || echo 'unknown version'))"
+fi
+
+# ── minikube ─────────────────────────────────────────────────────────
+if ! command -v minikube >/dev/null 2>&1; then
+    echo "kubui: downloading minikube ..."
+    MINIKUBE_TMP="$(mktemp)"
+    curl -fsSLo "${MINIKUBE_TMP}" \
+        "https://storage.googleapis.com/minikube/releases/latest/minikube-linux-${KUBE_ARCH}"
+    mv "${MINIKUBE_TMP}" /usr/local/bin/minikube
+    chmod 0755 /usr/local/bin/minikube
+    echo "kubui: minikube installed to /usr/local/bin/minikube"
+else
+    echo "kubui: minikube already installed ($(minikube version --short 2>/dev/null || echo 'unknown version'))"
+fi
+
+echo "kubui: all CLI tools ready. Run 'kubui --check' to verify."
+
+exit 0

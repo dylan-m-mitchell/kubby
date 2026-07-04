@@ -2,39 +2,66 @@
 
 A GUI tool for managing local Kubernetes cluster resources.
 
-## Quick start
+## Install
 
 ```bash
-uv run kubui            # opens the GUI
-uv run kubui --check    # prints install status of all managed tools (no GUI)
-uv run kubui --debug    # right-click → Inspect opens DevTools
+sudo apt install ./kubui_*.deb
 ```
 
-`uv run main.py` works too (delegates to the same entry point).
+That's it. apt handles all dependencies automatically:
 
-## Step 1 — first-run tool installation
+| Dependency | How it's handled |
+|---|---|
+| **podman**, **curl**, GTK/WebKit libs | Installed by apt via `Depends` |
+| **kubectl**, **helm**, **minikube** | Downloaded by the post-install script |
 
-The GUI ships with four required CLIs:
+To uninstall:
 
-| Tool      | Role                                                |
-|-----------|-----------------------------------------------------|
-| minikube  | local Kubernetes cluster                            |
-| helm      | Kubernetes package manager                         |
-| podman    | daemonless container engine (minikube driver)      |
-| kubectl   | official Kubernetes CLI                             |
+```bash
+sudo apt remove kubui      # keeps kubectl, helm, minikube
+sudo apt purge kubui       # removes everything
+```
 
-At first launch kubui detects which are missing and lets you install each
-missing tool with one click. Installation uses the host's package manager
-(apt, dnf, pacman, zypper, or Linuxbrew) with `pkexec` (graphical polkit
-prompt) for elevation.
+## Usage
+
+```bash
+kubui                # launch the GUI
+kubui --check        # print tool status (no GUI)
+kubui --debug        # enable DevTools (right-click → Inspect)
+```
+
+## Managed CLIs
+
+| Tool      | Role                                           |
+|-----------|------------------------------------------------|
+| minikube  | local Kubernetes cluster                       |
+| helm      | Kubernetes package manager                     |
+| podman    | daemonless container engine (minikube driver)  |
+| kubectl   | official Kubernetes CLI                        |
+
+## Building from source
+
+If you're developing kubui and need to rebuild the `.deb`:
+
+```bash
+bash build-deb.sh
+```
+
+This installs the build toolchain, packages the app into a `.deb`, and prints the
+install command. Run from the project root.
+
+For rapid iteration without packaging:
+
+```bash
+uv run kubui            # run from source
+uv run kubui --check    # tool status
+```
 
 ## Requirements
 
-- Linux desktop session with:
-  - **display server** (X11 or Wayland)
-  - **WebKit2GTK 4.0 or 4.1** (preinstalled on most Debian/Ubuntu/Fedora/Arch systems)
-  - **Polkit** for graphical install elevation (`pkexec`)
-- Python ≥ 3.12
+- **Ubuntu 24.04+** (or Debian-based system with apt)
+- Linux desktop session with a display server (X11 or Wayland)
+- WebKit2GTK 4.1 (installed automatically by apt)
 
 ## Layout
 
@@ -52,12 +79,17 @@ kubui/
     app.js           # frontend logic
     style.css        # dark webview theme
 main.py              # legacy thin launcher
-pyproject.toml       # uv project, [project.scripts] entry point
+pyproject.toml       # project config + entry point
+build-deb.sh         # developer: build the .deb from source
+debian/              # Debian packaging
+  control            # package metadata + runtime dependencies
+  rules              # build rules (venv bundling via dh)
+  kubui.postinst     # downloads kubectl, helm, minikube
+  kubui.postrm       # cleanup on purge
 ```
 
 ## Roadmap
 
-The codebase is sized for incremental growth. Step 1 covers the dependency
-detection/installation flow; subsequent steps will add cluster lifecycle
-(create/start/stop minikube), in-cluster views (pods, deployments,
-services), and helm release management — all reachable from this same UI.
+Step 1 covers the dependency detection/installation flow; subsequent steps
+will add cluster lifecycle (create/start/stop minikube), in-cluster views
+(pods, deployments, services), and helm release management.

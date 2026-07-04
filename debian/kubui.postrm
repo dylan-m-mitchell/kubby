@@ -1,0 +1,23 @@
+#!/bin/sh
+# postrm script for kubui
+
+set -e
+
+case "$1" in
+    purge)
+        echo "kubui: removing /opt/kubui ..."
+        rm -rf /opt/kubui
+        # Remove any kubectl/helm/minikube we installed to /usr/local/bin
+        # Only on full purge; on remove they stay (user may want them).
+        for bin in kubectl helm; do
+            if [ -f "/usr/local/bin/${bin}" ]; then
+                echo "kubui: removing /usr/local/bin/${bin}"
+                rm -f "/usr/local/bin/${bin}"
+            fi
+        done
+        ;;
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+esac
+
+exit 0
