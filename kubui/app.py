@@ -329,7 +329,18 @@ def _is_missing_deps_exception(err: Exception) -> bool:
     backend error ever escapes as plain ImportError.
     """
     msg = str(err)
-    return "QT or GTK" in msg or "No module named" in msg
+    pywebview_marker_phrases = (
+        "QT or GTK",
+        "can't import GTK",
+        "can't import Qt",
+        "No module named 'gi'",
+        "No module named 'gi.repository'",
+        "No module named 'gtk'",
+        "No module named 'qtpy'",
+        "No module named 'PyQt",
+        "No module named 'PySide",
+    )
+    return any(phrase in msg for phrase in pywebview_marker_phrases)
 
 
 def _probe_native_deps() -> str | None:

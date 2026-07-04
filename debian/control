@@ -1,7 +1,7 @@
 Source: kubui
 Section: utils
 Priority: optional
-Maintainer: Dylan <dylan@example.com>
+Maintainer: Dylan <dlnmtchll@gmail.com>
 Build-Depends: debhelper-compat (= 13),
                dh-python,
                python3-all,
@@ -9,7 +9,7 @@ Build-Depends: debhelper-compat (= 13),
                python3-pip,
                python3-hatchling
 Standards-Version: 4.6.2
-Homepage: https://github.com/dylan/kubui
+Homepage: https://github.com/dylan-m-mitchell/kubui
 
 Package: kubui
 Architecture: any

@@ -8,7 +8,11 @@ MARKER_FILE="/opt/kubui/.installed-tools"
 case "$1" in
     purge)
         # Remove CLI tool symlinks from /usr/bin (the actual binaries
-        # live under /opt/kubui/ which is removed at the end).
+        # live under /opt/kubui/ which is removed at the end). Only
+        # touch symlinks kubui itself created — verified by checking the
+        # symlink target is exactly /opt/kubui/bin/<name>. Symlinks the
+        # user repointed to something else are left alone so we never
+        # delete an unrelated link.
         if [ -f "${MARKER_FILE}" ]; then
             while IFS= read -r bin; do
                 [ -z "$bin" ] && continue
@@ -16,8 +20,10 @@ case "$1" in
                     kubectl|helm|minikube) ;;
                     *) echo "kubui: ignoring unexpected marker entry: $bin" >&2; continue ;;
                 esac
-                if [ -L "/usr/bin/${bin}" ]; then
-                    echo "kubui: removing /usr/bin/${bin} symlink"
+                if [ -L "/usr/bin/${bin}" ] && \
+                   readlink "/usr/bin/${bin}" >/dev/null 2>&1 && \
+                   [ "$(readlink "/usr/bin/${bin}")" = "/opt/kubui/bin/${bin}" ]; then
+                    echo "kubui: removing /usr/bin/${bin} kubui-managed symlink"
                     rm -f "/usr/bin/${bin}"
                 fi
             done < "${MARKER_FILE}"

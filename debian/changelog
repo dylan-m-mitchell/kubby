@@ -1,7 +1,11 @@
 kubui (0.1.0-1) unstable; urgency=medium
 
   * Initial Debian packaging.
-  * Bundles kubectl, helm, and minikube as post-install downloads.
+  * Downloads kubectl, helm, and minikube with SHA256 verification during
+    post-installation. Set KUBUI_SKIP_TOOL_DOWNLOAD=1 to skip downloads on
+    offline or proxied systems.
   * Declares podman, GTK3, WebKit2, and GI as system dependencies.
+  * postinst and postrm only manage /usr/bin symlinks that kubui itself
+    created (verified by symlink target), never user-managed binaries.
 
- -- Dylan <dylan@example.com>  Fri, 04 Jul 2025 12:00:00 +0000
+ -- Dylan <dlnmtchll@gmail.com>  Fri, 04 Jul 2025 12:00:00 +0000
