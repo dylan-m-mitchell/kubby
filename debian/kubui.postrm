@@ -7,10 +7,8 @@ MARKER_FILE="/opt/kubui/.installed-tools"
 
 case "$1" in
     purge)
-        echo "kubui: removing /opt/kubui ..."
-        # Only remove CLI tools that kubui itself installed (tracked via
-        # the marker file written by postinst).  This avoids deleting
-        # user-managed binaries that happen to live in /usr/local/bin.
+        # Remove CLI tool symlinks from /usr/bin (the actual binaries
+        # live under /opt/kubui/ which is removed at the end).
         if [ -f "${MARKER_FILE}" ]; then
             while IFS= read -r bin; do
                 [ -z "$bin" ] && continue
@@ -18,14 +16,15 @@ case "$1" in
                     kubectl|helm|minikube) ;;
                     *) echo "kubui: ignoring unexpected marker entry: $bin" >&2; continue ;;
                 esac
-                if [ -f "/usr/local/bin/${bin}" ]; then
-                    echo "kubui: removing /usr/local/bin/${bin}"
-                    rm -f "/usr/local/bin/${bin}"
+                if [ -L "/usr/bin/${bin}" ]; then
+                    echo "kubui: removing /usr/bin/${bin} symlink"
+                    rm -f "/usr/bin/${bin}"
                 fi
             done < "${MARKER_FILE}"
         else
-            echo "kubui: no marker file found — skipping CLI tool removal"
+            echo "kubui: no marker file found — skipping CLI tool cleanup"
         fi
+        echo "kubui: removing /opt/kubui ..."
         rm -rf /opt/kubui
         ;;
     remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)

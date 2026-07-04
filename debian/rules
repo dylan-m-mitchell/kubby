@@ -23,9 +23,9 @@ override_dh_auto_build:
 	# --no-deps: install only kubui's own code here; runtime dependency
 	# pywebview is installed in a separate step below (requires network).
 	$(VENV_BUILD)/bin/pip install --no-cache-dir --no-build-isolation --no-deps .
-	# Install runtime dependencies not available as Debian packages.
-	# pywebview is not packaged in Debian/Ubuntu, so we fetch it from PyPI.
-	$(VENV_BUILD)/bin/pip install --no-cache-dir 'pywebview>=6.2.1'
+	# Install runtime dependencies from vendored wheels (no network needed).
+	# pywebview is not packaged in Debian/Ubuntu, so we vendor the wheel.
+	$(VENV_BUILD)/bin/pip install --no-cache-dir --no-index --find-links=debian/vendor 'pywebview>=6.2.1'
 
 # ── install ──────────────────────────────────────────────────────────
 # Symlink the pip-generated entry-point into /usr/bin so the user can

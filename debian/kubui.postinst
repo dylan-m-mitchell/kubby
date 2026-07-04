@@ -7,15 +7,14 @@
 #   - helm     (Kubernetes package manager)
 #   - minikube (local Kubernetes cluster)
 #
+# Tools are installed into /opt/kubui/bin/ (a package-owned directory)
+# with symlinks under /usr/bin/ so they appear on the default PATH.
 # podman is declared as a Depends in the control file, so apt installs it
 # automatically before this script runs.
 
 set -eu
 
-# Ensure /usr/local/bin is on PATH — dpkg's default postinst PATH often
-# omits it, which causes install scripts (like helm's) to fail their
-# post-install verification step.
-export PATH="/usr/local/bin:${PATH}"
+export PATH="/opt/kubui/bin:/usr/local/bin:${PATH}"
 
 # Only run on initial configure (not on abort-upgrade, abort-remove, etc.)
 if [ "$1" != "configure" ]; then
@@ -34,9 +33,9 @@ case "$ARCH" in
         ;;
 esac
 
-MARKER_DIR="/opt/kubui"
-MARKER_FILE="${MARKER_DIR}/.installed-tools"
-mkdir -p "${MARKER_DIR}"
+TOOL_DIR="/opt/kubui/bin"
+MARKER_FILE="/opt/kubui/.installed-tools"
+mkdir -p "${TOOL_DIR}"
 touch "${MARKER_FILE}"
 
 verify_sha256() {
@@ -51,6 +50,24 @@ verify_sha256() {
         return 1
     fi
     return 0
+}
+
+install_binary() {
+    # install_binary <tmp_file> <tool_name>
+    # Moves binary into /opt/kubui/bin/ and creates /usr/bin symlink.
+    _tmp="$1"
+    _name="$2"
+    mv "$_tmp" "${TOOL_DIR}/${_name}"
+    chmod 0755 "${TOOL_DIR}/${_name}"
+    # Only create symlink if the target doesn't exist, is a symlink
+    # we own, or is missing entirely.  Warn if a non-symlink exists.
+    if [ -e "/usr/bin/${_name}" ] && [ ! -L "/usr/bin/${_name}" ]; then
+        echo "kubui: WARNING: /usr/bin/${_name} exists and is not a symlink — skipping" >&2
+    else
+        ln -sf "/opt/kubui/bin/${_name}" "/usr/bin/${_name}"
+    fi
+    echo "kubui: ${_name} installed to ${TOOL_DIR}/${_name}"
+    echo "$_name" >> "${MARKER_FILE}"
 }
 
 echo "kubui: installing kubectl, helm, and minikube for $ARCH ..."
@@ -68,30 +85,34 @@ if ! command -v kubectl >/dev/null 2>&1; then
     EXPECTED_SHA="$(cat "${KUBECTL_SHA}" | cut -d' ' -f1)"
     verify_sha256 "${KUBECTL_TMP}" "${EXPECTED_SHA}"
     rm -f "${KUBECTL_SHA}"
-    mv "${KUBECTL_TMP}" /usr/local/bin/kubectl
-    chmod 0755 /usr/local/bin/kubectl
-    echo "kubui: kubectl ${KUBECTL_VERSION} installed to /usr/local/bin/kubectl"
-    echo "kubectl" >> "${MARKER_FILE}"
+    install_binary "${KUBECTL_TMP}" kubectl
+    echo "kubui: kubectl ${KUBECTL_VERSION}"
 else
     echo "kubui: kubectl already installed ($(kubectl version --client --short 2>/dev/null || echo 'unknown version'))"
 fi
 
 # ── helm ─────────────────────────────────────────────────────────────
-# Download and run the official Helm installer script.    # Pin to a specific commit for reproducibility; the script itself
-    # handles architecture detection and binary checksum verification.
+# Download the helm binary tarball directly and verify its SHA256.
+# No remote scripts are executed.
 if ! command -v helm >/dev/null 2>&1; then
     echo "kubui: downloading helm ..."
+    HELM_VERSION="v4.2.2"
     HELM_TMP="$(mktemp)"
-    # Pin to a specific commit for reproducibility; the script itself
-    # handles architecture detection and binary checksum verification.
-    # helm v4.2.2 (2026-07-04) — update this SHA when bumping helm.
-    HELM_SCRIPT_REF="543b94d673a4aafbd142dc3bd249eacb25b44b6a"
-    curl -fsSL -o "${HELM_TMP}" "https://raw.githubusercontent.com/helm/helm/${HELM_SCRIPT_REF}/scripts/get-helm-4"
-    chmod 700 "${HELM_TMP}"
-    HELM_INSTALL_DIR=/usr/local/bin "${HELM_TMP}"
+    HELM_SHA_FILE="$(mktemp)"
+    curl -fsSLo "${HELM_TMP}" \
+        "https://get.helm.sh/helm-${HELM_VERSION}-linux-${KUBE_ARCH}.tar.gz"
+    curl -fsSLo "${HELM_SHA_FILE}" \
+        "https://get.helm.sh/helm-${HELM_VERSION}-linux-${KUBE_ARCH}.tar.gz.sha256"
+    EXPECTED_SHA="$(cat "${HELM_SHA_FILE}" | cut -d' ' -f1)"
+    verify_sha256 "${HELM_TMP}" "${EXPECTED_SHA}"
+    rm -f "${HELM_SHA_FILE}"
+    # Extract the helm binary from the tarball.
+    HELM_EXTRACT="$(mktemp -d)"
+    tar -xzf "${HELM_TMP}" -C "${HELM_EXTRACT}"
     rm -f "${HELM_TMP}"
-    echo "kubui: helm installed"
-    echo "helm" >> "${MARKER_FILE}"
+    install_binary "${HELM_EXTRACT}/linux-${KUBE_ARCH}/helm" helm
+    rm -rf "${HELM_EXTRACT}"
+    echo "kubui: helm ${HELM_VERSION}"
 else
     echo "kubui: helm already installed ($(helm version --short 2>/dev/null || echo 'unknown version'))"
 fi
@@ -103,7 +124,7 @@ if ! command -v minikube >/dev/null 2>&1; then
     MINIKUBE_TMP="$(mktemp)"
     curl -fsSLo "${MINIKUBE_TMP}" \
         "https://storage.googleapis.com/minikube/releases/${MINIKUBE_VERSION}/minikube-linux-${KUBE_ARCH}"
-    # Verify checksum if available.
+    # Verify checksum — fail closed if unavailable.
     MINIKUBE_SHA="$(mktemp)"
     if curl -fsSLo "${MINIKUBE_SHA}" \
         "https://storage.googleapis.com/minikube/releases/${MINIKUBE_VERSION}/minikube-linux-${KUBE_ARCH}.sha256" 2>/dev/null; then
@@ -111,13 +132,12 @@ if ! command -v minikube >/dev/null 2>&1; then
         verify_sha256 "${MINIKUBE_TMP}" "${EXPECTED_SHA}"
     else
         echo "kubui: ERROR: could not fetch minikube checksum — aborting install for safety" >&2
+        rm -f "${MINIKUBE_TMP}" "${MINIKUBE_SHA}"
         exit 1
     fi
     rm -f "${MINIKUBE_SHA}"
-    mv "${MINIKUBE_TMP}" /usr/local/bin/minikube
-    chmod 0755 /usr/local/bin/minikube
-    echo "kubui: minikube ${MINIKUBE_VERSION} installed to /usr/local/bin/minikube"
-    echo "minikube" >> "${MARKER_FILE}"
+    install_binary "${MINIKUBE_TMP}" minikube
+    echo "kubui: minikube ${MINIKUBE_VERSION}"
 else
     echo "kubui: minikube already installed ($(minikube version --short 2>/dev/null || echo 'unknown version'))"
 fi
