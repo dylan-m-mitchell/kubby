@@ -26,6 +26,6 @@ Description: GUI tool for managing local Kubernetes cluster resources
  local Kubernetes clusters. It detects, installs, and manages CLI tools
  including minikube, helm, podman, and kubectl, all from a single window.
  .
- This package bundles all required CLI tools (kubectl, helm, minikube)
- and declares podman as a system dependency. Run `kubui` to launch the
+ This package downloads required CLI tools (kubectl, helm, minikube)
+ during post-installation and declares podman as a system dependency. Run `kubui` to launch the
  GUI or `kubui --check` to print tool status.
