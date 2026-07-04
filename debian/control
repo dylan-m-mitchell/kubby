@@ -20,7 +20,8 @@ Depends: ${shlibs:Depends},
          gir1.2-gtk-3.0,
          gir1.2-webkit2-4.1,
          podman,
-         curl
+         curl,
+         openssl
 Description: GUI tool for managing local Kubernetes cluster resources
  kubui is a desktop application that provides a native GUI for managing
  local Kubernetes clusters. It detects, installs, and manages CLI tools

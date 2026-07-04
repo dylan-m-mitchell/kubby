@@ -110,7 +110,8 @@ if ! command -v minikube >/dev/null 2>&1; then
         EXPECTED_SHA="$(cat "${MINIKUBE_SHA}")"
         verify_sha256 "${MINIKUBE_TMP}" "${EXPECTED_SHA}"
     else
-        echo "kubui: WARNING: could not fetch minikube checksum — skipping verification" >&2
+        echo "kubui: ERROR: could not fetch minikube checksum — aborting install for safety" >&2
+        exit 1
     fi
     rm -f "${MINIKUBE_SHA}"
     mv "${MINIKUBE_TMP}" /usr/local/bin/minikube
