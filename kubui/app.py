@@ -18,8 +18,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import webview
-
 from kubui.installer import detector, linux, tools as tools_mod
 
 log = logging.getLogger("kubui")
@@ -226,10 +224,48 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: UI assets missing at {INDEX_HTML}", file=sys.stderr)
         return 2
 
+    # Short-circuit BEFORE pywebview tries its platform backends:
+    # `webview/guilib.py` iterates GTK → QT → CEF in turn, writing
+    # `print(..., file=sys.stderr)` tracebacks for each failure, and then
+    # raises a generic `WebViewException` (NOT an `ImportError`) once all
+    # backends have failed. We probe the two well-known backends ourselves
+    # up-front so the user sees ONE clean install hint instead of a wall
+    # of stderr tracebacks. The `try/except` arms further down remain as
+    # a backstop for the rare case where a backend imports OK but later
+    # init() fails — `_is_missing_deps_exception()` re-routes those to
+    # the same install hint.
+    missing = _probe_native_deps()
+    if missing is not None:
+        return _missing_native_deps(ImportError(missing))
+
+    # pywebview is imported lazily so a missing native binding (the GTK
+    # Python bindings `gi` / `gtk` / `webkit2gtk`) surfaces here as an
+    # actionable install hint instead of a startup traceback.
+    try:
+        import webview
+    except ImportError as e:
+        return _missing_native_deps(e)
+
+    # pywebview 6.x's platform-backend dispatcher (webview/guilib.py)
+    # calls its own `logger.exception(...)` from inside WebViewException
+    # even when WE catch the resulting exception downstream. That writes
+    # the underlying ImportError traceback to stderr via the root logger
+    # *before* our `except Exception` arm runs here, which would otherwise
+    # wash a real traceback over the user's terminal before our friendly
+    # install hint scrolls in. Silence the `webview` logger for the
+    # remainder of this process — `main()` returns on both error and
+    # happy paths, and the GUI loop runs its own logging once started.
+    logging.getLogger("webview").setLevel(logging.CRITICAL + 1)
+
     api = KubuiAPI()
     try:
         # file:// URLs work natively with pywebview on GTK/WKWebView/WebView2.
         # Relative paths in index.html (./app.js, ./style.css) resolve correctly.
+        # `create_window` itself does NOT load any platform backend —
+        # that happens later, in `guilib.initialize()` invoked from
+        # `webview.start()` below. We keep this `try` here because the
+        # same call will still surface real display/session failures on
+        # systems where all dependencies are present.
         window = webview.create_window(
             title="kubui",
             url=f"file://{INDEX_HTML}",
@@ -239,7 +275,15 @@ def main(argv: list[str] | None = None) -> int:
             min_size=(760, 520),
             resizable=True,
         )
+    except ImportError as e:
+        # Defensive: even if `_probe_native_deps` was happy, a backend
+        # `ImportError` could in principle escape `create_window` — route
+        # those to the install-hint helper rather than the generic
+        # display-missing message below.
+        return _missing_native_deps(e)
     except Exception as e:
+        if _is_missing_deps_exception(e):
+            return _missing_native_deps(e)
         print(
             f"error: failed to create window: {e}\n"
             "(are you running on a desktop session with a display?)",
@@ -248,8 +292,91 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     api.bind_window(window)
-    webview.start(debug=args.debug)
+    try:
+        # THIS is where pywebview 6.x actually loads a platform backend:
+        # `webview.start(...)` -> `guilib.initialize(gui)` ->
+        # `import_gtk()` / `import_qt()` / `import_cef()`. If none of the
+        # backends succeed, pywebview prints per-backend tracebacks to
+        # stderr via `print(..., file=...)` and ultimately raises
+        # `WebViewException`. The pre-flight probe above should have
+        # caught the common "no bindings at all" case before we ever
+        # get here, but this `try` remains as a backstop.
+        webview.start(debug=args.debug)
+    except ImportError as e:
+        return _missing_native_deps(e)
+    except Exception as e:
+        if _is_missing_deps_exception(e):
+            return _missing_native_deps(e)
+        print(
+            f"error: failed to start webview: {e}\n"
+            "(are you running on a desktop session with a display?)",
+            file=sys.stderr,
+        )
+        return 1
     return 0
+
+
+def _is_missing_deps_exception(err: Exception) -> bool:
+    """True if `err` looks like a missing-deps failure from pywebview.
+
+    pywebview wraps backend ImportErrors inside its own
+    `webview.util.WebViewException`, whose message looks like::
+
+        "You must have either QT or GTK with Python extensions installed
+         in order to use pywebview."
+
+    We also accept the raw ``"No module named '...'"`` form in case a
+    backend error ever escapes as plain ImportError.
+    """
+    msg = str(err)
+    return "QT or GTK" in msg or "No module named" in msg
+
+
+def _probe_native_deps() -> str | None:
+    """Return None if at least one recognized pywebview backend is importable.
+
+    pywebview 6.x's platform-backend dispatcher (webview/guilib.py)
+    iterates GTK → QT → CEF, writing noisy `print(..., file=sys.stderr)`
+    "X cannot be loaded" tracebacks when each backend fails to import,
+    and ultimately raises a generic `WebViewException`. We probe the two
+    well-known backends (GTK uses `gi`, Qt uses `qtpy`) and short-circuit
+    BEFORE letting pywebview try, so the user gets ONE clean install
+    hint instead of a wall of tracebacks.
+
+    Returns:
+        str | None: None when at least one backend is importable, else a
+            message string suitable as the `err` argument to
+            `_missing_native_deps()`.
+    """
+    try:
+        import gi  # noqa: F401
+        return None
+    except ImportError:
+        pass
+    try:
+        import qtpy  # type: ignore[import-not-found]  # noqa: F401
+        return None
+    except ImportError:
+        pass
+    return "neither GTK (`gi`) nor Qt (`qtpy`) Python bindings are importable"
+
+
+def _missing_native_deps(err: Exception) -> int:
+    print(
+        f"error: kubui's GUI dependencies are missing: {err}\n"
+        "pywebview's GTK backend needs OS-level GTK + WebKit2GTK bindings.\n"
+        "Install the packages for your distro:\n\n"
+        "  Debian/Ubuntu  sudo apt-get install -y "
+        "python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-webkit2-4.1\n"
+        "                  (Debian 11 / Ubuntu 20.04 or 22.04: use gir1.2-webkit2-4.0 instead)\n"
+        "  Fedora/RHEL    sudo dnf install -y "
+        "python3-gobject gtk3 webkit2gtk4.1\n"
+        "  Arch           sudo pacman -S --needed "
+        "python-gobject gtk3 webkit2gtk-4.1\n\n"
+        "Then re-run `kubui`.",
+        file=sys.stderr,
+    )
+    return 1
 
 
 if __name__ == "__main__":
