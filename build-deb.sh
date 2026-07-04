@@ -30,7 +30,7 @@ sudo apt-get install -y \
 echo "==> 2/2. Building the .deb"
 dpkg-buildpackage -us -uc -b
 
-DEB_FILE="$(ls -1 ../kubui_*.deb 2>/dev/null | head -1)"
+DEB_FILE="$(ls -1 ../kubui_*.deb 2>/dev/null | head -1 || true)"
 if [[ -z "$DEB_FILE" ]]; then
     echo "error: .deb not found after build" >&2
     exit 1
