@@ -1,0 +1,256 @@
+"""kubui entry point — opens a native window backed by the OS's webview.
+
+Public surface:
+- `main(argv=None)`: parses CLI args, opens the GUI (or runs --check).
+- `KubuiAPI`: instance passed to pywebview as `js_api`; methods are exposed to
+  the HTML/JS frontend as `window.pywebview.api.<method_name>`.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import platform
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import webview
+
+from kubui.installer import detector, linux, tools as tools_mod
+
+log = logging.getLogger("kubui")
+
+PKG_DIR = Path(__file__).resolve().parent
+UI_DIR = PKG_DIR / "ui"
+INDEX_HTML = UI_DIR / "index.html"
+
+
+class KubuiAPI:
+    """Methods exposed to the JS frontend as `window.pywebview.api.<name>`.
+
+    pywebview exposes any public method on this class. Private methods (those
+    starting with `_`) are not exposed. Calls from JS return Promises.
+    """
+
+    def __init__(self) -> None:
+        self._window: webview.Window | None = None
+
+    def bind_window(self, window: webview.Window) -> None:
+        self._window = window
+
+    def _emit_log(self, line: str) -> None:
+        """Push a log line to the frontend via `window.evaluate_js`."""
+        if self._window is None:
+            return
+        try:
+            self._window.evaluate_js(
+                f"window.kubui && window.kubui.appendLog({json.dumps(line)})"
+            )
+        except Exception:
+            log.exception("failed to push log line to window")
+
+    # ----- public API methods (callable from JS) -----
+
+    def system_info(self) -> dict[str, Any]:
+        """Return host info so the UI can label package manager / elevation path."""
+        pm_label = "(unknown)"
+        try:
+            _pm_key, pm_label = linux.detect_package_manager()
+        except Exception as e:
+            pm_label = f"unsupported ({e})"
+        return {
+            "platform": platform.system(),
+            "release": platform.release(),
+            "python": platform.python_version(),
+            "package_manager_label": pm_label,
+            "elevation": linux.describe_elevation_method(),
+        }
+
+    def get_status(self) -> list[dict[str, Any]]:
+        """Return current install status of every managed tool."""
+        statuses: list[dict[str, Any]] = []
+        for key, tool in tools_mod.TOOLS.items():
+            installed, version, path = detector.detect(tool)
+            statuses.append(
+                {
+                    "key": key,
+                    "label": tool.label,
+                    "description": tool.description,
+                    "website": tool.website,
+                    "installed": installed,
+                    "version": version,
+                    "path": path,
+                }
+            )
+        return statuses
+
+    def install_tool(self, key: str) -> dict[str, Any]:
+        """Install the given tool. Streams command output to the UI log.
+
+        Returns a dict with `ok: bool`, optional `version`, optional `error`, and
+        the full `log` joined as a string for convenience. Lines are also pushed
+        live via `_emit_log`.
+        """
+        tool = tools_mod.TOOLS.get(key)
+        if tool is None:
+            return {"ok": False, "error": f"Unknown tool: {key!r}"}
+
+        log_lines: list[str] = []
+
+        def emit(line: str) -> None:
+            log_lines.append(line)
+            self._emit_log(line)
+
+        try:
+            pm_key, pm_label = linux.detect_package_manager()
+        except Exception as e:
+            emit(f"! {e}")
+            return {"ok": False, "log": "\n".join(log_lines), "error": str(e)}
+
+        commands = tool.install_commands.get(pm_key)
+        if not commands:
+            msg = f"No install procedure defined for package manager: {pm_label}"
+            emit(f"! {msg}")
+            return {"ok": False, "log": "\n".join(log_lines), "error": msg}
+
+        emit(f"Using package manager: {pm_label}")
+        emit(f"Will run {len(commands)} command(s) with elevation via "
+             f"{linux.describe_elevation_method()}.")
+
+        for cmd in commands:
+            emit(f"$ {' '.join(cmd)}")
+            try:
+                result = linux.run_elevated(cmd)
+            except FileNotFoundError as e:
+                msg = f"command not found: {e.filename}"
+                emit(f"! {msg}")
+                return {"ok": False, "log": "\n".join(log_lines), "error": msg}
+            except subprocess.TimeoutExpired:
+                emit("! command timed out")
+                return {
+                    "ok": False,
+                    "log": "\n".join(log_lines),
+                    "error": "install timed out",
+                }
+            if result.stdout.strip():
+                emit(result.stdout.rstrip())
+            if result.stderr.strip():
+                emit(result.stderr.rstrip())
+            if result.returncode != 0:
+                emit(f"! command failed with exit code {result.returncode}")
+                return {
+                    "ok": False,
+                    "log": "\n".join(log_lines),
+                    "error": f"exit code {result.returncode}",
+                }
+
+        # Post-install verification — re-detect on PATH.
+        installed, version, path = detector.detect(tool)
+        if not installed:
+            emit("! post-install check failed: tool still not on PATH")
+            return {
+                "ok": False,
+                "log": "\n".join(log_lines),
+                "error": "post-install verification failed",
+            }
+        emit(f"✓ installed at {path}" + (f" (version {version})" if version else ""))
+        return {
+            "ok": True,
+            "log": "\n".join(log_lines),
+            "version": version,
+            "path": path,
+        }
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="kubui",
+        description="GUI tool for managing local Kubernetes cluster resources.",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Print install status for all managed tools and exit (no GUI).",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable pywebview DevTools (right-click → Inspect).",
+    )
+    return parser.parse_args(argv)
+
+
+def _print_check_report() -> int:
+    print("kubui self-check")
+    print("================")
+    print(f"project:      {PKG_DIR.parent}")
+    print(f"python:       {platform.python_version()}")
+    print(f"platform:     {platform.system()} {platform.release()}")
+    try:
+        _pm, label = linux.detect_package_manager()
+        print(f"package mgr:  {label}")
+    except Exception as e:
+        print(f"package mgr:  unsupported ({e})")
+    print(f"elevation:    {linux.describe_elevation_method()}")
+    print()
+    print("Managed tools")
+    print("-------------")
+    width = max(len(t.label) for t in tools_mod.TOOLS.values()) + 1
+    for _key, tool in tools_mod.TOOLS.items():
+        installed, version, path = detector.detect(tool)
+        if installed:
+            status = f"installed ({version or 'unknown'}) at {path}"
+        else:
+            status = "NOT FOUND"
+        print(f"  {tool.label:<{width}} {status}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw = sys.argv[1:] if argv is None else argv
+    args = _parse_args(raw)
+
+    if args.check:
+        return _print_check_report()
+
+    if not INDEX_HTML.exists():
+        print(f"error: UI assets missing at {INDEX_HTML}", file=sys.stderr)
+        return 2
+
+    api = KubuiAPI()
+    try:
+        # file:// URLs work natively with pywebview on GTK/WKWebView/WebView2.
+        # Relative paths in index.html (./app.js, ./style.css) resolve correctly.
+        window = webview.create_window(
+            title="kubui",
+            url=f"file://{INDEX_HTML}",
+            js_api=api,
+            width=980,
+            height=680,
+            min_size=(760, 520),
+            resizable=True,
+        )
+    except Exception as e:
+        print(
+            f"error: failed to create window: {e}\n"
+            "(are you running on a desktop session with a display?)",
+            file=sys.stderr,
+        )
+        return 1
+
+    api.bind_window(window)
+    webview.start(debug=args.debug)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
