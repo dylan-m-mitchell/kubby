@@ -350,15 +350,18 @@ def _probe_native_deps() -> str | None:
     """
     try:
         import gi  # noqa: F401
+        gi.require_version("Gtk", "3.0")
+        gi.require_version("WebKit2", "4.1")
+        from gi.repository import Gtk, WebKit2  # noqa: F401
         return None
-    except ImportError:
+    except (ImportError, ValueError):
         pass
     try:
         import qtpy  # type: ignore[import-not-found]  # noqa: F401
         return None
     except ImportError:
         pass
-    return "neither GTK (`gi`) nor Qt (`qtpy`) Python bindings are importable"
+    return "neither GTK (`gi`+Gtk+WebKit2) nor Qt (`qtpy`) Python bindings are importable"
 
 
 def _missing_native_deps(err: Exception) -> int:

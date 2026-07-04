@@ -3,18 +3,26 @@
 
 set -e
 
+MARKER_FILE="/opt/kubui/.installed-tools"
+
 case "$1" in
     purge)
         echo "kubui: removing /opt/kubui ..."
+        # Only remove CLI tools that kubui itself installed (tracked via
+        # the marker file written by postinst).  This avoids deleting
+        # user-managed binaries that happen to live in /usr/local/bin.
+        if [ -f "${MARKER_FILE}" ]; then
+            while IFS= read -r bin; do
+                [ -z "$bin" ] && continue
+                if [ -f "/usr/local/bin/${bin}" ]; then
+                    echo "kubui: removing /usr/local/bin/${bin}"
+                    rm -f "/usr/local/bin/${bin}"
+                fi
+            done < "${MARKER_FILE}"
+        else
+            echo "kubui: no marker file found — skipping CLI tool removal"
+        fi
         rm -rf /opt/kubui
-        # Remove any kubectl/helm/minikube we installed to /usr/local/bin
-        # Only on full purge; on remove they stay (user may want them).
-        for bin in kubectl helm; do
-            if [ -f "/usr/local/bin/${bin}" ]; then
-                echo "kubui: removing /usr/local/bin/${bin}"
-                rm -f "/usr/local/bin/${bin}"
-            fi
-        done
         ;;
     remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
         ;;

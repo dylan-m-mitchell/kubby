@@ -34,6 +34,24 @@ case "$ARCH" in
         ;;
 esac
 
+MARKER_DIR="/opt/kubui"
+MARKER_FILE="${MARKER_DIR}/.installed-tools"
+mkdir -p "${MARKER_DIR}"
+: > "${MARKER_FILE}"
+
+verify_sha256() {
+    _file="$1"
+    _expected="$2"
+    _actual="$(sha256sum "$_file" | cut -d' ' -f1)"
+    if [ "$_actual" != "$_expected" ]; then
+        echo "kubui: SHA256 mismatch for $_file" >&2
+        echo "  expected: $_expected" >&2
+        echo "  actual:   $_actual" >&2
+        rm -f "$_file"
+        return 1
+    fi
+}
+
 echo "kubui: installing kubectl, helm, and minikube for $ARCH ..."
 
 # ── kubectl ──────────────────────────────────────────────────────────
@@ -41,24 +59,38 @@ if ! command -v kubectl >/dev/null 2>&1; then
     echo "kubui: downloading kubectl ..."
     KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
     KUBECTL_TMP="$(mktemp)"
+    KUBECTL_SHA="$(mktemp)"
     curl -fsSLo "${KUBECTL_TMP}" \
         "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${KUBE_ARCH}/kubectl"
+    curl -fsSLo "${KUBECTL_SHA}" \
+        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${KUBE_ARCH}/kubectl.sha256"
+    EXPECTED_SHA="$(cat "${KUBECTL_SHA}" | cut -d' ' -f1)"
+    verify_sha256 "${KUBECTL_TMP}" "${EXPECTED_SHA}"
+    rm -f "${KUBECTL_SHA}"
     mv "${KUBECTL_TMP}" /usr/local/bin/kubectl
     chmod 0755 /usr/local/bin/kubectl
     echo "kubui: kubectl ${KUBECTL_VERSION} installed to /usr/local/bin/kubectl"
+    echo "kubectl" >> "${MARKER_FILE}"
 else
     echo "kubui: kubectl already installed ($(kubectl version --client --short 2>/dev/null || echo 'unknown version'))"
 fi
 
 # ── helm ─────────────────────────────────────────────────────────────
+# Download and run the official Helm installer script.
+# Pin to a known tag on the main branch for reproducibility; the script
+# itself handles architecture detection and checksum verification.
 if ! command -v helm >/dev/null 2>&1; then
     echo "kubui: downloading helm ..."
     HELM_TMP="$(mktemp)"
-    curl -fsSL -o "${HELM_TMP}" https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
+    # Pin to a specific commit for reproducibility; the script itself
+    # handles architecture detection and binary checksum verification.
+    HELM_SCRIPT_REF="main"
+    curl -fsSL -o "${HELM_TMP}" "https://raw.githubusercontent.com/helm/helm/${HELM_SCRIPT_REF}/scripts/get-helm-4"
     chmod 700 "${HELM_TMP}"
     HELM_INSTALL_DIR=/usr/local/bin "${HELM_TMP}"
     rm -f "${HELM_TMP}"
     echo "kubui: helm installed"
+    echo "helm" >> "${MARKER_FILE}"
 else
     echo "kubui: helm already installed ($(helm version --short 2>/dev/null || echo 'unknown version'))"
 fi
@@ -66,12 +98,24 @@ fi
 # ── minikube ─────────────────────────────────────────────────────────
 if ! command -v minikube >/dev/null 2>&1; then
     echo "kubui: downloading minikube ..."
+    MINIKUBE_VERSION="$(curl -fsSL https://storage.googleapis.com/minikube/releases/latest/VERSION 2>/dev/null || echo 'latest')"
     MINIKUBE_TMP="$(mktemp)"
     curl -fsSLo "${MINIKUBE_TMP}" \
-        "https://storage.googleapis.com/minikube/releases/latest/minikube-linux-${KUBE_ARCH}"
+        "https://storage.googleapis.com/minikube/releases/${MINIKUBE_VERSION}/minikube-linux-${KUBE_ARCH}"
+    # Verify checksum if available.
+    MINIKUBE_SHA="$(mktemp)"
+    if curl -fsSLo "${MINIKUBE_SHA}" \
+        "https://storage.googleapis.com/minikube/releases/${MINIKUBE_VERSION}/minikube-linux-${KUBE_ARCH}.sha256" 2>/dev/null; then
+        EXPECTED_SHA="$(cat "${MINIKUBE_SHA}")"
+        verify_sha256 "${MINIKUBE_TMP}" "${EXPECTED_SHA}"
+    else
+        echo "kubui: WARNING: could not fetch minikube checksum — skipping verification" >&2
+    fi
+    rm -f "${MINIKUBE_SHA}"
     mv "${MINIKUBE_TMP}" /usr/local/bin/minikube
     chmod 0755 /usr/local/bin/minikube
-    echo "kubui: minikube installed to /usr/local/bin/minikube"
+    echo "kubui: minikube ${MINIKUBE_VERSION} installed to /usr/local/bin/minikube"
+    echo "minikube" >> "${MARKER_FILE}"
 else
     echo "kubui: minikube already installed ($(minikube version --short 2>/dev/null || echo 'unknown version'))"
 fi

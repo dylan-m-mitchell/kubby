@@ -29,6 +29,10 @@ override_dh_auto_build:
 override_dh_auto_install:
 	mkdir -p $(VENV_DEST)
 	cp -a $(VENV_BUILD)/* $(VENV_DEST)/
+	# Rewrite venv shebangs: the copied scripts still reference the
+	# build-time python path; fix them to use the installed venv path.
+	find $(VENV_DEST)/bin -maxdepth 1 -type f -exec grep -l '^#!.*$(VENV_BUILD)' {} + 2>/dev/null | \
+		xargs -r sed -i '1s|^#!.*python[0-9.]*|#!/opt/$(PKG_NAME)/bin/python3|'
 	mkdir -p debian/$(PKG_NAME)/usr/bin
 	ln -sf /opt/$(PKG_NAME)/bin/kubui debian/$(PKG_NAME)/usr/bin/kubui
 
