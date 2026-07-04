@@ -14,6 +14,10 @@ case "$1" in
         if [ -f "${MARKER_FILE}" ]; then
             while IFS= read -r bin; do
                 [ -z "$bin" ] && continue
+                case "$bin" in
+                    kubectl|helm|minikube) ;;
+                    *) echo "kubui: ignoring unexpected marker entry: $bin" >&2; continue ;;
+                esac
                 if [ -f "/usr/local/bin/${bin}" ]; then
                     echo "kubui: removing /usr/local/bin/${bin}"
                     rm -f "/usr/local/bin/${bin}"
