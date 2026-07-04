@@ -19,7 +19,7 @@ To uninstall:
 
 ```bash
 sudo apt remove kubui      # keeps kubectl, helm, minikube
-sudo apt purge kubui       # removes everything
+sudo apt purge kubui       # removes /opt/kubui; also removes /usr/local/bin/{kubectl,helm} if present (minikube is not removed)
 ```
 
 ## Usage
