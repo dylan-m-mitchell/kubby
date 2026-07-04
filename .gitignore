@@ -1,0 +1,29 @@
+# uv-managed Python project
+.venv/
+venv/
+env/
+
+# Python build/cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+*.whl
+*.tar.gz
+.Python
+
+# Test/cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# IDE / OS
+.env
+.env.local
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
