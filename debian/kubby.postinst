@@ -1,0 +1,147 @@
+#!/bin/sh
+# postinst script for kubby
+#
+# After the .deb itself is installed, this script downloads and installs
+# the three CLI tools that are NOT available via standard apt repos:
+#   - kubectl  (Kubernetes CLI)
+#   - helm     (Kubernetes package manager)
+#   - minikube (local Kubernetes cluster)
+#
+# Tools are installed into /opt/kubby/bin/ (a package-owned directory)
+# with symlinks under /usr/bin/ so they appear on the default PATH.
+# podman is declared as a Depends in the control file, so apt installs it
+# automatically before this script runs.
+
+set -eu
+
+export PATH="/opt/kubby/bin:/usr/local/bin:${PATH}"
+
+# Only run on initial configure (not on abort-upgrade, abort-remove, etc.)
+if [ "$1" != "configure" ]; then
+    exit 0
+fi
+
+ARCH="$(dpkg --print-architecture)"
+case "$ARCH" in
+    amd64)  KUBE_ARCH="amd64" ;;
+    arm64)  KUBE_ARCH="arm64" ;;
+    armhf)  KUBE_ARCH="arm"   ;;
+    *)
+        echo "kubby: unsupported architecture $ARCH — skipping CLI tool installation" >&2
+        echo "kubby: you can install kubectl, helm, and minikube manually." >&2
+        exit 0
+        ;;
+esac
+
+TOOL_DIR="/opt/kubby/bin"
+MARKER_FILE="/opt/kubby/.installed-tools"
+mkdir -p "${TOOL_DIR}"
+touch "${MARKER_FILE}"
+
+verify_sha256() {
+    _file="$1"
+    _expected="$2"
+    _actual="$(sha256sum "$_file" | cut -d' ' -f1)"
+    if [ "$_actual" != "$_expected" ]; then
+        echo "kubby: SHA256 mismatch for $_file" >&2
+        echo "  expected: $_expected" >&2
+        echo "  actual:   $_actual" >&2
+        rm -f "$_file"
+        return 1
+    fi
+    return 0
+}
+
+install_binary() {
+    # install_binary <tmp_file> <tool_name>
+    # Moves binary into /opt/kubby/bin/ and creates /usr/bin symlink.
+    _tmp="$1"
+    _name="$2"
+    mv "$_tmp" "${TOOL_DIR}/${_name}"
+    chmod 0755 "${TOOL_DIR}/${_name}"
+    # Only create symlink if the target doesn't exist, is a symlink
+    # we own, or is missing entirely.  Warn if a non-symlink exists.
+    if [ -e "/usr/bin/${_name}" ] && [ ! -L "/usr/bin/${_name}" ]; then
+        echo "kubby: WARNING: /usr/bin/${_name} exists and is not a symlink — skipping" >&2
+    else
+        ln -sf "/opt/kubby/bin/${_name}" "/usr/bin/${_name}"
+    fi
+    echo "kubby: ${_name} installed to ${TOOL_DIR}/${_name}"
+    echo "$_name" >> "${MARKER_FILE}"
+}
+
+echo "kubby: installing kubectl, helm, and minikube for $ARCH ..."
+
+# ── kubectl ──────────────────────────────────────────────────────────
+if ! command -v kubectl >/dev/null 2>&1; then
+    echo "kubby: downloading kubectl ..."
+    KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
+    KUBECTL_TMP="$(mktemp)"
+    KUBECTL_SHA="$(mktemp)"
+    curl -fsSLo "${KUBECTL_TMP}" \
+        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${KUBE_ARCH}/kubectl"
+    curl -fsSLo "${KUBECTL_SHA}" \
+        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${KUBE_ARCH}/kubectl.sha256"
+    EXPECTED_SHA="$(cat "${KUBECTL_SHA}" | cut -d' ' -f1)"
+    verify_sha256 "${KUBECTL_TMP}" "${EXPECTED_SHA}"
+    rm -f "${KUBECTL_SHA}"
+    install_binary "${KUBECTL_TMP}" kubectl
+    echo "kubby: kubectl ${KUBECTL_VERSION}"
+else
+    echo "kubby: kubectl already installed ($(kubectl version --client --short 2>/dev/null || echo 'unknown version'))"
+fi
+
+# ── helm ─────────────────────────────────────────────────────────────
+# Download the helm binary tarball directly and verify its SHA256.
+# No remote scripts are executed.
+if ! command -v helm >/dev/null 2>&1; then
+    echo "kubby: downloading helm ..."
+    HELM_VERSION="v4.2.2"
+    HELM_TMP="$(mktemp)"
+    HELM_SHA_FILE="$(mktemp)"
+    curl -fsSLo "${HELM_TMP}" \
+        "https://get.helm.sh/helm-${HELM_VERSION}-linux-${KUBE_ARCH}.tar.gz"
+    curl -fsSLo "${HELM_SHA_FILE}" \
+        "https://get.helm.sh/helm-${HELM_VERSION}-linux-${KUBE_ARCH}.tar.gz.sha256"
+    EXPECTED_SHA="$(cat "${HELM_SHA_FILE}" | cut -d' ' -f1)"
+    verify_sha256 "${HELM_TMP}" "${EXPECTED_SHA}"
+    rm -f "${HELM_SHA_FILE}"
+    # Extract the helm binary from the tarball.
+    HELM_EXTRACT="$(mktemp -d)"
+    tar -xzf "${HELM_TMP}" -C "${HELM_EXTRACT}"
+    rm -f "${HELM_TMP}"
+    install_binary "${HELM_EXTRACT}/linux-${KUBE_ARCH}/helm" helm
+    rm -rf "${HELM_EXTRACT}"
+    echo "kubby: helm ${HELM_VERSION}"
+else
+    echo "kubby: helm already installed ($(helm version --short 2>/dev/null || echo 'unknown version'))"
+fi
+
+# ── minikube ─────────────────────────────────────────────────────────
+if ! command -v minikube >/dev/null 2>&1; then
+    echo "kubby: downloading minikube ..."
+    MINIKUBE_VERSION="$(curl -fsSL https://storage.googleapis.com/minikube/releases/latest/VERSION 2>/dev/null || echo 'latest')"
+    MINIKUBE_TMP="$(mktemp)"
+    curl -fsSLo "${MINIKUBE_TMP}" \
+        "https://storage.googleapis.com/minikube/releases/${MINIKUBE_VERSION}/minikube-linux-${KUBE_ARCH}"
+    # Verify checksum — fail closed if unavailable.
+    MINIKUBE_SHA="$(mktemp)"
+    if curl -fsSLo "${MINIKUBE_SHA}" \
+        "https://storage.googleapis.com/minikube/releases/${MINIKUBE_VERSION}/minikube-linux-${KUBE_ARCH}.sha256" 2>/dev/null; then
+        EXPECTED_SHA="$(cat "${MINIKUBE_SHA}")"
+        verify_sha256 "${MINIKUBE_TMP}" "${EXPECTED_SHA}"
+    else
+        echo "kubby: ERROR: could not fetch minikube checksum — aborting install for safety" >&2
+        rm -f "${MINIKUBE_TMP}" "${MINIKUBE_SHA}"
+        exit 1
+    fi
+    rm -f "${MINIKUBE_SHA}"
+    install_binary "${MINIKUBE_TMP}" minikube
+    echo "kubby: minikube ${MINIKUBE_VERSION}"
+else
+    echo "kubby: minikube already installed ($(minikube version --short 2>/dev/null || echo 'unknown version'))"
+fi
+
+echo "kubby: all CLI tools ready. Run 'kubby --check' to verify."
+
+exit 0

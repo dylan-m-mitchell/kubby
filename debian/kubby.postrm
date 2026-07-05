@@ -1,0 +1,34 @@
+#!/bin/sh
+# postrm script for kubby
+
+set -e
+
+MARKER_FILE="/opt/kubby/.installed-tools"
+
+case "$1" in
+    purge)
+        # Remove CLI tool symlinks from /usr/bin (the actual binaries
+        # live under /opt/kubby/ which is removed at the end).
+        if [ -f "${MARKER_FILE}" ]; then
+            while IFS= read -r bin; do
+                [ -z "$bin" ] && continue
+                case "$bin" in
+                    kubectl|helm|minikube) ;;
+                    *) echo "kubby: ignoring unexpected marker entry: $bin" >&2; continue ;;
+                esac
+                if [ -L "/usr/bin/${bin}" ]; then
+                    echo "kubby: removing /usr/bin/${bin} symlink"
+                    rm -f "/usr/bin/${bin}"
+                fi
+            done < "${MARKER_FILE}"
+        else
+            echo "kubby: no marker file found — skipping CLI tool cleanup"
+        fi
+        echo "kubby: removing /opt/kubby ..."
+        rm -rf /opt/kubby
+        ;;
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+esac
+
+exit 0
