@@ -8,11 +8,11 @@ Public surface:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
 import platform
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -301,7 +301,11 @@ def main(argv: list[str] | None = None) -> int:
         # `WebViewException`. The pre-flight probe above should have
         # caught the common "no bindings at all" case before we ever
         # get here, but this `try` remains as a backstop.
-        webview.start(debug=args.debug)
+        if args.debug:
+            webview.start(debug=True)
+        else:
+            with _suppress_c_stderr():
+                webview.start(debug=False)
     except ImportError as e:
         return _missing_native_deps(e)
     except Exception as e:
@@ -314,6 +318,26 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     return 0
+
+
+@contextlib.contextmanager
+def _suppress_c_stderr():
+    """Temporarily redirect fd 2 (C-level stderr) to /dev/null.
+
+    Used around ``webview.start()`` to swallow harmless Mesa ZINK warnings
+    (e.g. ``MESA: error: ZINK: failed to choose pdev``) that the Python
+    ``redirect_stderr`` context manager cannot capture because they are
+    written directly by the C library.
+    """
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    old_stderr = os.dup(2)
+    os.dup2(devnull, 2)
+    os.close(devnull)
+    try:
+        yield
+    finally:
+        os.dup2(old_stderr, 2)
+        os.close(old_stderr)
 
 
 def _is_missing_deps_exception(err: Exception) -> bool:
