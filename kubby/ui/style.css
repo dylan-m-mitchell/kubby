@@ -80,16 +80,6 @@ body {
   font-weight: 500;
 }
 
-.meta {
-  flex: 1;
-  color: var(--text-dim);
-  font-size: 12px;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 /* ---------- tabs ---------- */
 
 .tabs {
@@ -186,6 +176,7 @@ main {
   display: flex;
   flex-direction: column;
   gap: 22px;
+  min-height: 0;
 }
 
 .cards {
@@ -259,7 +250,7 @@ main {
   border-radius: 999px;
   text-transform: lowercase;
   flex-shrink: 0;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 .badge.ok {
@@ -287,7 +278,7 @@ main {
   color: var(--text-dim);
   font-size: 12px;
   text-decoration: none;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   transition: color 120ms;
 }
 
@@ -355,7 +346,7 @@ main {
   padding: 14px 16px;
   background: #0d1320;
   color: #b8c8e0;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   line-height: 1.55;
   white-space: pre-wrap;
@@ -411,7 +402,7 @@ main {
 .modal .note {
   font-size: 11px;
   color: var(--text-muted);
-  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   margin-top: 12px;
   padding: 8px 10px;
   background: rgba(50, 108, 229, 0.05);
@@ -458,6 +449,8 @@ main {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  flex: 1;
+  min-height: 0;
 }
 
 .tab-panel[hidden] {
@@ -496,7 +489,7 @@ main {
   margin: 0;
   color: var(--text-muted);
   font-size: 13px;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   max-width: 500px;
   word-break: break-word;
 }
@@ -513,7 +506,7 @@ main {
   border-radius: 4px;
   padding: 2px 6px;
   font-size: 12px;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--accent);
 }
 
@@ -596,7 +589,7 @@ main {
   font-weight: 700;
   color: var(--text);
   line-height: 1.1;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 .metric-label {
@@ -655,107 +648,82 @@ main {
   font-weight: 600;
   color: var(--text);
   flex: 1;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 .node-roles {
   font-size: 11px;
   color: var(--text-muted);
-  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-/* namespace pills */
+/* ---------- namespace blocks (expandable) ---------- */
 
-.ns-pills {
+.ns-block {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  animation: fade-in 300ms ease-out backwards;
+}
+
+.ns-block + .ns-block {
+  margin-top: 8px;
+}
+
+.ns-header {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: flex-start;
-}
-
-.ns-wrapper {
-  position: relative;
-}
-
-.ns-pill {
-  font-size: 11px;
-  font-weight: 500;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
-  transition: border-color 120ms, color 120ms, background 120ms;
-  cursor: pointer;
-  display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 10px;
+  padding: 12px 16px;
+  cursor: pointer;
+  transition: background 120ms;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
 }
 
-.ns-pill:hover {
-  border-color: var(--accent);
-  color: var(--text);
+.ns-header:hover {
+  background: rgba(50, 108, 229, 0.05);
 }
 
-.ns-pill[aria-expanded="true"] {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--text);
-  border-radius: 999px 999px 0 0;
-  border-bottom-color: var(--accent-soft);
-}
-
-.ns-count {
-  font-size: 10px;
-  font-weight: 600;
-  background: rgba(50, 108, 229, 0.15);
-  color: var(--accent);
-  border-radius: 999px;
-  padding: 1px 5px;
-  min-width: 16px;
+.ns-chevron {
+  font-size: 12px;
+  color: var(--text-muted);
+  width: 14px;
   text-align: center;
+  transition: color 120ms;
 }
 
-.ns-pill[aria-expanded="true"] .ns-count {
-  background: rgba(50, 108, 229, 0.25);
+.ns-block.expanded .ns-chevron {
+  color: var(--accent);
 }
 
-/* pod list (expandable from namespace pill) */
+.ns-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  flex: 1;
+}
 
-.pod-list {
+.pod-table {
   display: none;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-top: none;
-  border-radius: 0 0 8px 8px;
-  min-width: 220px;
-  max-height: 240px;
-  overflow-y: auto;
-  animation: expand-in 200ms ease-out;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  border-top: 1px solid var(--border-soft);
 }
 
-.ns-wrapper.expanded .pod-list {
+.ns-block.expanded .pod-table {
   display: block;
-}
-
-@keyframes expand-in {
-  from {
-    opacity: 0;
-    transform: translateY(-4px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
 }
 
 .pod-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
+  gap: 12px;
+  padding: 8px 16px 8px 40px;
   border-bottom: 1px solid var(--border-soft);
 }
 
@@ -764,9 +732,9 @@ main {
 }
 
 .pod-name {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-dim);
-  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   flex: 1;
   white-space: nowrap;
   overflow: hidden;
@@ -774,8 +742,8 @@ main {
 }
 
 .pod-row .badge {
-  font-size: 9px;
-  padding: 2px 6px;
+  font-size: 10px;
+  padding: 2px 7px;
 }
 
 .pod-row .badge.warn {
@@ -784,10 +752,10 @@ main {
   border: 1px solid rgba(210, 153, 34, 0.3);
 }
 
-.pod-empty {
-  font-size: 11px;
+.pod-empty-row {
+  padding: 10px 16px 10px 40px;
+  font-size: 12px;
   color: var(--text-muted);
-  padding: 8px 12px;
   font-style: italic;
 }
 

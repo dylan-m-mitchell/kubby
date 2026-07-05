@@ -3,7 +3,7 @@
 
   const kubby = {
     els: {},
-    state: { info: null, tools: [], cluster: null, activeTab: "cluster" },
+    state: { tools: [], cluster: null, activeTab: "cluster" },
 
     init() {
       this.cache();
@@ -25,7 +25,6 @@
         tabDocs: id("tab-docs"),
         clusterContent: id("cluster-content"),
         cards: id("cards"),
-        meta: id("meta"),
         refresh: id("refresh"),
         toast: id("toast"),
       };
@@ -81,9 +80,7 @@
         this.els.clusterContent.innerHTML = "";
         this.els.clusterContent.appendChild(this._skeleton(2));
 
-        this.state.info = await window.pywebview.api.system_info();
         this.state.tools = await window.pywebview.api.get_status();
-        this.renderMeta();
         // Always load cluster on startup (it's the default tab)
         await this.loadCluster();
         this.renderDocsCards();
@@ -103,14 +100,7 @@
       }
     },
 
-    renderMeta() {
-      const info = this.state.info;
-      const pm = info.package_manager_label || "no package manager";
-      const elv = info.elevation || "";
-      this.els.meta.textContent = `${info.platform} · ${pm} · ${elv}`;
-    },
-
-    // ---------- Cluster tab ----------
+    // ---------- Cluster tab (table view) ----------
 
     renderCluster() {
       const el = this.els.clusterContent;
@@ -128,15 +118,16 @@
         return;
       }
 
-      // Hero row
+      // Status bar + metrics
       el.appendChild(this._clusterHero(c));
-      // Metric cards
       el.appendChild(this._clusterMetrics(c));
+
       // Nodes table
       if (c.nodes && c.nodes.length) {
         el.appendChild(this._clusterNodes(c.nodes));
       }
-      // Namespaces
+
+      // Namespaces with expandable pod lists
       if (c.namespaces && c.namespaces.length) {
         el.appendChild(this._clusterNamespaces(c.namespaces));
       }
@@ -146,7 +137,7 @@
       const wrap = document.createElement("div");
       wrap.className = "cluster-offline";
       wrap.innerHTML = `
-        <div class="offline-icon">⎈</div>
+        <div class="offline-icon">🐾</div>
         <h2>No cluster connected</h2>
         <p class="offline-error">${this._esc(error || "Could not reach any Kubernetes cluster")}</p>
         <p class="offline-hint">Start a cluster with <code>minikube start</code> or connect to one, then hit Re-check.</p>
@@ -197,6 +188,8 @@
       return grid;
     },
 
+    // ---- Table views ----
+
     _clusterNodes(nodes) {
       const section = document.createElement("div");
       section.className = "cluster-section";
@@ -229,50 +222,51 @@
       h3.textContent = "Namespaces";
       section.appendChild(h3);
 
-      const pills = document.createElement("div");
-      pills.className = "ns-pills";
       for (const ns of namespaces) {
-        const wrapper = document.createElement("div");
-        wrapper.className = "ns-wrapper";
+        const nsBlock = document.createElement("div");
+        nsBlock.className = "ns-block";
 
-        const pill = document.createElement("button");
-        pill.className = "ns-pill";
-        pill.type = "button";
+        // Namespace header (clickable to expand pods)
+        const header = document.createElement("button");
+        header.className = "ns-header";
+        header.type = "button";
         const podCount = (ns.pods || []).length;
-        pill.innerHTML = `${this._esc(ns.name)} <span class="ns-count">${podCount}</span>`;
-        // Default to expanded so pods are visible without clicking
-        wrapper.classList.add("expanded");
-        pill.setAttribute("aria-expanded", "true");
-        pill.onclick = function () {
-          const isExpanded = wrapper.classList.toggle("expanded");
-          pill.setAttribute("aria-expanded", String(isExpanded));
+        header.innerHTML = `
+          <span class="ns-chevron">▸</span>
+          <span class="ns-name">${this._esc(ns.name)}</span>
+          <span class="badge info">${podCount} pod${podCount !== 1 ? "s" : ""}</span>
+        `;
+        header.onclick = function () {
+          const expanded = nsBlock.classList.toggle("expanded");
+          const chevron = header.querySelector(".ns-chevron");
+          chevron.textContent = expanded ? "▾" : "▸";
         };
-        wrapper.appendChild(pill);
+        nsBlock.appendChild(header);
 
-        if (ns.pods && ns.pods.length) {
-          const podList = document.createElement("div");
-          podList.className = "pod-list";
-          for (const pod of ns.pods) {
+        // Pod table (hidden by default)
+        const podTable = document.createElement("div");
+        podTable.className = "pod-table";
+        const pods = ns.pods || [];
+        if (pods.length === 0) {
+          const empty = document.createElement("div");
+          empty.className = "pod-empty-row";
+          empty.textContent = "No pods";
+          podTable.appendChild(empty);
+        } else {
+          for (const pod of pods) {
             const row = document.createElement("div");
             row.className = "pod-row";
-            const statusClass = pod.status === "Running" ? "ok" : pod.status === "Succeeded" ? "ok" : "warn";
+            const statusClass = (pod.status === "Running" || pod.status === "Succeeded") ? "ok" : "warn";
             row.innerHTML = `
               <span class="pod-name">${this._esc(pod.name)}</span>
               <span class="badge ${statusClass}">${this._esc(pod.status)}</span>
             `;
-            podList.appendChild(row);
+            podTable.appendChild(row);
           }
-          wrapper.appendChild(podList);
-        } else {
-          const empty = document.createElement("div");
-          empty.className = "pod-list pod-empty";
-          empty.textContent = "no pods";
-          wrapper.appendChild(empty);
         }
-
-        pills.appendChild(wrapper);
+        nsBlock.appendChild(podTable);
+        section.appendChild(nsBlock);
       }
-      section.appendChild(pills);
       return section;
     },
 
