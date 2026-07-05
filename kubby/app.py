@@ -96,13 +96,17 @@ class KubbyAPI:
         - context (str|None): active kubectl context name
         - version (str|None): server Kubernetes version
         - nodes (list[dict]): list of {name, status, roles}
-        - namespaces (list[str]): namespace names
+        - namespaces (list[dict]): list of {name, pods: [{name, status}]}
         - pod_count (int): total pods across all namespaces
         """
-        def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
-            return subprocess.run(
-                args, capture_output=True, text=True, timeout=10,
-            )
+        def _run(args: list[str], timeout: int = 15) -> subprocess.CompletedProcess[str] | None:
+            try:
+                return subprocess.run(
+                    args, capture_output=True, text=True, timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                log.warning("kubectl timed out: %s", " ".join(args))
+                return None
 
         # Check if kubectl is available
         if not shutil.which("kubectl"):
@@ -110,14 +114,14 @@ class KubbyAPI:
 
         # Get current context
         ctx = _run(["kubectl", "config", "current-context"])
-        if ctx.returncode != 0:
-            return {"running": False, "error": ctx.stderr.strip() or "no current context"}
+        if ctx is None or ctx.returncode != 0:
+            return {"running": False, "error": (ctx.stderr.strip() if ctx else "timeout") or "no current context"}
         context = ctx.stdout.strip()
 
         # Try to reach the cluster
-        ver = _run(["kubectl", "version", "--client=false", "-o", "json"])
-        if ver.returncode != 0:
-            return {"running": False, "error": ver.stderr.strip() or "cannot reach cluster", "context": context}
+        ver = _run(["kubectl", "version", "-o", "json"])
+        if ver is None or ver.returncode != 0:
+            return {"running": False, "error": (ver.stderr.strip() if ver else "timeout") or "cannot reach cluster", "context": context}
 
         version = None
         try:
@@ -126,39 +130,67 @@ class KubbyAPI:
         except (json.JSONDecodeError, KeyError):
             pass
 
-        # Fetch nodes, namespaces, and pods in a single kubectl call to
-        # minimise subprocess overhead (each call can take ~1-2s on minikube).
-        nodes: list[dict[str, Any]] = []
-        namespaces: list[str] = []
-        pod_count = 0
+        # Fetch each resource type separately for reliability. A single bulk
+        # `kubectl get nodes,namespaces,pods` call can return partial results
+        # or silently omit items depending on the cluster / kubectl version.
+        # Separate calls also give us per-namespace pod breakdown.
 
-        bulk = _run([
-            "kubectl", "get", "nodes,namespaces,pods", "-A", "-o", "json",
-        ])
-        if bulk.returncode == 0:
+        # --- nodes ---
+        nodes: list[dict[str, Any]] = []
+        nodes_resp = _run(["kubectl", "get", "nodes", "-o", "json"])
+        if nodes_resp and nodes_resp.returncode == 0:
             try:
-                bulk_data = json.loads(bulk.stdout)
-                for item in bulk_data.get("items", []):
-                    kind = item.get("kind", "")
-                    if kind == "Node":
-                        name = item["metadata"]["name"]
-                        roles: list[str] = []
-                        for lbl in item["metadata"].get("labels", {}):
-                            if lbl.startswith("node-role.kubernetes.io/"):
-                                role = lbl.split("/", 1)[1]
-                                if role:
-                                    roles.append(role)
-                        status = "Unknown"
-                        for cond in item.get("status", {}).get("conditions", []):
-                            if cond.get("type") == "Ready":
-                                status = "Ready" if cond.get("status") == "True" else "NotReady"
-                        nodes.append({"name": name, "status": status, "roles": roles})
-                    elif kind == "Namespace":
-                        namespaces.append(item["metadata"]["name"])
-                    elif kind == "Pod":
-                        pod_count += 1
+                for item in json.loads(nodes_resp.stdout).get("items", []):
+                    name = item["metadata"]["name"]
+                    roles: list[str] = []
+                    for lbl in item["metadata"].get("labels", {}):
+                        if lbl.startswith("node-role.kubernetes.io/"):
+                            role = lbl.split("/", 1)[1]
+                            if role:
+                                roles.append(role)
+                    status = "Unknown"
+                    for cond in item.get("status", {}).get("conditions", []):
+                        if cond.get("type") == "Ready":
+                            status = "Ready" if cond.get("status") == "True" else "NotReady"
+                    nodes.append({"name": name, "status": status, "roles": roles})
             except (json.JSONDecodeError, KeyError):
                 pass
+
+        # --- namespaces ---
+        ns_names: list[str] = []
+        ns_resp = _run(["kubectl", "get", "namespaces", "-o", "json"])
+        if ns_resp and ns_resp.returncode == 0:
+            try:
+                for item in json.loads(ns_resp.stdout).get("items", []):
+                    ns_names.append(item["metadata"]["name"])
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+        # --- pods ---
+        pods_by_ns: dict[str, list[dict[str, str]]] = {}
+        pod_count = 0
+        pods_resp = _run(["kubectl", "get", "pods", "-A", "-o", "json"])
+        if pods_resp and pods_resp.returncode == 0:
+            try:
+                for item in json.loads(pods_resp.stdout).get("items", []):
+                    ns = item["metadata"]["namespace"]
+                    pod_name = item["metadata"]["name"]
+                    phase = item.get("status", {}).get("phase", "Unknown")
+                    pods_by_ns.setdefault(ns, []).append(
+                        {"name": pod_name, "status": phase}
+                    )
+                    pod_count += 1
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+        # Build namespace list with per-namespace pod data, preserving the
+        # order returned by kubectl (alphabetical).
+        namespaces: list[dict[str, Any]] = []
+        for ns in ns_names:
+            namespaces.append({
+                "name": ns,
+                "pods": pods_by_ns.get(ns, []),
+            })
 
         return {
             "running": True,

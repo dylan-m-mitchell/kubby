@@ -178,9 +178,10 @@
       const nodes = (c.nodes || []).length;
       const ready = (c.nodes || []).filter((n) => n.status === "Ready").length;
       const namespaceCount = (c.namespaces || []).length;
+      const podCount = c.pod_count ?? ((c.namespaces || []).reduce((sum, ns) => sum + (ns.pods || []).length, 0));
       const metrics = [
         { label: "Nodes", value: `${ready}/${nodes}`, sub: "ready" },
-        { label: "Pods", value: c.pod_count ?? "—", sub: "total" },
+        { label: "Pods", value: podCount, sub: "total" },
         { label: "Namespaces", value: namespaceCount, sub: "total" },
       ];
       for (const m of metrics) {
@@ -231,10 +232,45 @@
       const pills = document.createElement("div");
       pills.className = "ns-pills";
       for (const ns of namespaces) {
-        const pill = document.createElement("span");
+        const wrapper = document.createElement("div");
+        wrapper.className = "ns-wrapper";
+
+        const pill = document.createElement("button");
         pill.className = "ns-pill";
-        pill.textContent = ns;
-        pills.appendChild(pill);
+        pill.type = "button";
+        const podCount = (ns.pods || []).length;
+        pill.innerHTML = `${this._esc(ns.name)} <span class="ns-count">${podCount}</span>`;
+        // Default to expanded so pods are visible without clicking
+        wrapper.classList.add("expanded");
+        pill.setAttribute("aria-expanded", "true");
+        pill.onclick = function () {
+          const isExpanded = wrapper.classList.toggle("expanded");
+          pill.setAttribute("aria-expanded", String(isExpanded));
+        };
+        wrapper.appendChild(pill);
+
+        if (ns.pods && ns.pods.length) {
+          const podList = document.createElement("div");
+          podList.className = "pod-list";
+          for (const pod of ns.pods) {
+            const row = document.createElement("div");
+            row.className = "pod-row";
+            const statusClass = pod.status === "Running" ? "ok" : pod.status === "Succeeded" ? "ok" : "warn";
+            row.innerHTML = `
+              <span class="pod-name">${this._esc(pod.name)}</span>
+              <span class="badge ${statusClass}">${this._esc(pod.status)}</span>
+            `;
+            podList.appendChild(row);
+          }
+          wrapper.appendChild(podList);
+        } else {
+          const empty = document.createElement("div");
+          empty.className = "pod-list pod-empty";
+          empty.textContent = "no pods";
+          wrapper.appendChild(empty);
+        }
+
+        pills.appendChild(wrapper);
       }
       section.appendChild(pills);
       return section;
