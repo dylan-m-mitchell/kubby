@@ -92,12 +92,12 @@ class KubbyAPI:
 
         Returns a dict with:
         - running (bool): whether a cluster is reachable
-- error (str|None): error message if not running
-- context (str|None): active kubectl context name
-- version (str|None): server Kubernetes version
-- nodes (list[dict]): list of {name, status, roles}
-- namespaces (list[str]): namespace names
-- pod_count (int): total pods across all namespaces
+        - error (str|None): error message if not running
+        - context (str|None): active kubectl context name
+        - version (str|None): server Kubernetes version
+        - nodes (list[dict]): list of {name, status, roles}
+        - namespaces (list[str]): namespace names
+        - pod_count (int): total pods across all namespaces
         """
         def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
             return subprocess.run(
