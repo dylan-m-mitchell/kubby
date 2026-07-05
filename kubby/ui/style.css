@@ -186,6 +186,7 @@ main {
   display: flex;
   flex-direction: column;
   gap: 22px;
+  min-height: 0;
 }
 
 .cards {
@@ -458,6 +459,8 @@ main {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  flex: 1;
+  min-height: 0;
 }
 
 .tab-panel[hidden] {
@@ -671,11 +674,12 @@ main {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
 }
 
 .graph-container {
   flex: 1;
-  min-height: 0;
+  min-height: 200px;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);

@@ -408,6 +408,13 @@
         },
       });
 
+      // Handle container sizing: Cytoscape may init before the flex layout
+      // gives the container its final dimensions.
+      requestAnimationFrame(function () {
+        cy.resize();
+        cy.fit(undefined, 30);
+      });
+
       // Click namespace to expand/collapse pods (dynamically add/remove)
       cy.on("tap", 'node[type="namespace"]', function (evt) {
         const nsNode = evt.target;
