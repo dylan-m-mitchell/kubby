@@ -219,9 +219,12 @@
             label: n.name,
             status: n.status,
             roles: (n.roles || []).join(", ") || "worker",
-            parent: "cluster",
             type: "knode",
           },
+        });
+        // Edge: cluster → k8s node
+        elements.push({
+          data: { source: "cluster", target: nodeId, type: "ns-edge" },
         });
       }
 
@@ -239,9 +242,12 @@
           },
         });
 
-        // Edge: cluster → namespace
+        // Edge: k8s node → namespace (or cluster → namespace if no nodes)
+        const edgeSource = (c.nodes && c.nodes.length)
+          ? `node:${c.nodes[0].name}`
+          : "cluster";
         elements.push({
-          data: { source: "cluster", target: nsId, type: "ns-edge" },
+          data: { source: edgeSource, target: nsId, type: "ns-edge" },
         });
 
         // Pod nodes (initially hidden — collapsed by default)
@@ -271,27 +277,26 @@
         maxZoom: 3,
         wheelSensitivity: 0.2,
         style: [
-          // Cluster compound node
+          // Cluster root node
           {
             selector: 'node[type="cluster"]',
             style: {
-              "background-color": "rgba(50, 108, 229, 0.08)",
+              "background-color": "rgba(50, 108, 229, 0.12)",
               "border-color": "#326ce5",
               "border-width": 2,
-              "border-opacity": 0.4,
               label: "data(label)",
               color: "#93a4ba",
-              "font-size": 11,
-              "font-weight": 600,
-              "text-valign": "top",
-              "text-margin-y": 8,
+              "font-size": 13,
+              "font-weight": 700,
+              "text-valign": "center",
               "text-transform": "uppercase",
               "letter-spacing": "1px",
               shape: "round-rectangle",
-              padding: 30,
+              width: 160,
+              height: 50,
             },
           },
-          // K8s node (inside cluster compound)
+          // K8s node
           {
             selector: 'node[type="knode"]',
             style: {
