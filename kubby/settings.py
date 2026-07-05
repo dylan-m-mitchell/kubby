@@ -9,6 +9,7 @@ Currently only the ``minikube`` section is exposed in the UI. Future helpers
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import tempfile
@@ -60,7 +61,7 @@ def load() -> dict[str, Any]:
     Always returns a fresh, fully-populated dict — callers may mutate freely.
     Missing file, OSError, or JSONDecodeError all collapse to "all defaults".
     """
-    defaults = {"minikube": dict(DEFAULT_MINIKUBE)}
+    defaults = {"minikube": copy.deepcopy(DEFAULT_MINIKUBE)}
     if not CONFIG_FILE.exists():
         return defaults
     try:
@@ -87,7 +88,7 @@ def save(settings: dict[str, Any]) -> None:
         raise ValueError("settings must be a JSON object")
     mk = settings.get("minikube")
     if not isinstance(mk, dict):
-        mk = dict(DEFAULT_MINIKUBE)
+        mk = copy.deepcopy(DEFAULT_MINIKUBE)
         settings = {**settings, "minikube": mk}
 
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)

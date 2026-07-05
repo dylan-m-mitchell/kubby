@@ -186,16 +186,18 @@ class KubbyAPI:
         """Append a missing-driver issue if the driver binary isn't on PATH.
 
         minikube's ``none`` driver doesn't need an external binary so it's
-        exempt. ``kvm2`` actually needs qemu/virsh but checking that level
-        isn't worth it — minikube errors clearly if QEMU isn't usable.
+        exempt. For other drivers we look up the *actual* binary minikube
+        invokes (``docker``, ``podman``, ``qemu-kvm`` for the kvm2 driver)
+        — not the driver name itself, which is rarely a real executable.
         """
         if driver == "none":
             return
-        needs_external = {"docker", "podman", "kvm2"}
-        if driver in needs_external and not shutil.which(driver):
+        driver_binaries = {"docker": "docker", "podman": "podman", "kvm2": "qemu-kvm"}
+        binary = driver_binaries.get(driver, driver)
+        if not shutil.which(binary):
             issues.append(
-                f"Driver '{driver}' is not on PATH — install it from the "
-                f"Docs tab so minikube can use it."
+                f"Driver '{driver}' needs '{binary}' on PATH — install it "
+                f"from the Docs tab so minikube can use it."
             )
 
     def _kick_job(self, action: str) -> dict[str, Any]:
@@ -242,40 +244,65 @@ class KubbyAPI:
         self._emit_log(f"$ {' '.join(argv)}")
         ok = False
         err: str | None = None
+        proc: subprocess.Popen[str] | None = None
         try:
             try:
-                result = subprocess.run(
+                # Stream stdout/stderr incrementally so the UI sees live
+                # progress during long-running commands like `minikube start`.
+                # We use Popen with line-buffered text mode and a reader
+                # thread per stream, then wait() in this thread.
+                proc = subprocess.Popen(
                     argv,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
+                    bufsize=1,
                     encoding="utf-8",
                     # minikube output occasionally includes non-UTF8 bytes
                     # (ANSI escapes, stray locale flag) — replace with U+FFFD
                     # instead of letting UnicodeDecodeError escape this worker.
                     errors="replace",
-                    timeout=900,  # minikube start can take several minutes
                 )
+
+                def _drain(stream) -> None:
+                    for line in iter(stream.readline, ""):
+                        self._emit_log(line.rstrip("\\r\\n"))
+
+                t_out = threading.Thread(target=_drain, args=(proc.stdout,), daemon=True)
+                t_err = threading.Thread(target=_drain, args=(proc.stderr,), daemon=True)
+                t_out.start()
+                t_err.start()
+
+                try:
+                    returncode = proc.wait(timeout=900)  # 15 min
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    # proc.kill() sends SIGKILL — the child is guaranteed
+                    # to die. Bare wait() reaps it so its pipes get EOF
+                    # and the reader threads can terminate; once that
+                    # happens the threads return from iter() immediately
+                    # so a bare join() (no timeout) is sufficient.
+                    proc.wait()
+                    t_out.join()
+                    t_err.join()
+                    msg = "minikube command timed out (15 min)"
+                    self._emit_log(f"! {msg}")
+                    err = msg
+                else:
+                    t_out.join()
+                    t_err.join()
+                    if returncode == 0:
+                        self._emit_log(f"✓ minikube {action} succeeded")
+                        ok = True
+                    else:
+                        self._emit_log(
+                            f"! minikube {action} failed (exit {returncode})"
+                        )
+                        err = f"exit code {returncode}"
             except FileNotFoundError:
                 msg = "minikube binary not found on PATH"
                 self._emit_log(f"! {msg}")
                 err = msg
-            except subprocess.TimeoutExpired:
-                msg = "minikube command timed out (15 min)"
-                self._emit_log(f"! {msg}")
-                err = msg
-            else:
-                if result.stdout.strip():
-                    self._emit_log(result.stdout.rstrip())
-                if result.stderr.strip():
-                    self._emit_log(result.stderr.rstrip())
-                if result.returncode == 0:
-                    self._emit_log(f"✓ minikube {action} succeeded")
-                    ok = True
-                else:
-                    self._emit_log(
-                        f"! minikube {action} failed (exit {result.returncode})"
-                    )
-                    err = f"exit code {result.returncode}"
         except Exception as e:
             log.exception("minikube job raised unexpectedly")
             self._emit_log(f"! unexpected error: {e}")

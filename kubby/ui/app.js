@@ -412,13 +412,18 @@
           payload.action
         );
         this.showToast("minikube " + verb, "ok");
+        // Success: discard the streaming log and reload cluster state.
+        this.state.logBuffer = [];
+        this.els.logPanel = null;
+        this.loadCluster();
       } else {
         const err = (payload && payload.error) || "unknown error";
         this.showToast("minikube " + (payload && payload.action) + " failed: " + err, "err");
+        // Failure: keep the log panel + buffer visible so the user can
+        // read minikube diagnostics. Defer loadCluster() until the user
+        // dismisses or re-tries.
+        this.renderCluster();
       }
-      this.state.logBuffer = [];
-      this.els.logPanel = null;
-      this.loadCluster();
     },
 
     /** Idempotent guard: refuse new jobs while one is already running. */
@@ -521,6 +526,74 @@
       return root;
     },
 
+    /**
+     * Wire up minimal dialog semantics (role, aria-modal), focus trap,
+     * and Escape-to-dismiss for a modal that lives inside `back` (the
+     * backdrop). Returns a wrapped close function that also restores
+     * focus to the previously-active element. Callers funnel their
+     * backdrop/Cancel dismissals through the returned function so
+     * focus restoration is consistent.
+     */
+    _setupModalA11y(modal) {
+      modal.setAttribute("role", "dialog");
+      modal.setAttribute("aria-modal", "true");
+      const previouslyFocused = document.activeElement;
+      const focusables = () =>
+        modal.querySelectorAll(
+          "a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex=\"-1\"])"
+        );
+      const initial = focusables()[0];
+      if (initial) {
+        initial.focus();
+      } else {
+        modal.tabIndex = -1;
+        modal.focus();
+      }
+      // `currentCloseFn` is set by the returned wrapper below. The
+      // Escape handler invokes it so any dismiss path (backdrop click,
+      // Cancel, Confirm) closes the modal the same way.
+      let currentCloseFn = null;
+      const onKey = (e) => {
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          if (currentCloseFn) currentCloseFn();
+          return;
+        }
+        if (e.key !== "Tab") return;
+        const items = Array.from(focusables());
+        if (items.length === 0) {
+          e.preventDefault();
+          return;
+        }
+        const first = items[0];
+        const last = items[items.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      };
+      // Attach keydown to document (not backdrop) so Escape still works
+      // when focus has drifted outside the modal entirely.
+      document.addEventListener("keydown", onKey);
+      // Returned wrapper: callers invoke this with the per-path closeFn
+      // (e.g. `() => done(false)` for cancel, `() => done(true)` for
+      // confirm). All dismiss paths funnel through the same cleanup
+      // (remove listener + restore focus) so the confirm button also
+      // restores focus to the trigger that opened the modal.
+      return (closeFn) => {
+        currentCloseFn = () => {
+          document.removeEventListener("keydown", onKey);
+          closeFn();
+          if (previouslyFocused && previouslyFocused.focus) {
+            try { previouslyFocused.focus(); } catch (_) { /* element gone */ }
+          }
+        };
+      };
+    },
+
     _openSettings() {
       const root = this._ensureModalRoot();
       const settings = (this.state.minikubeSettings || { minikube: {} }).minikube;
@@ -584,8 +657,10 @@
       const addons = new Set(settings.addons || []);
       modal.querySelectorAll("[data-addon]").forEach((cb) => { cb.checked = addons.has(cb.dataset.addon); });
       const close = () => { root.innerHTML = ""; };
-      back.addEventListener("click", (e) => { if (e.target === back) close(); });
-      modal.querySelector('[data-action="cancel"]').addEventListener("click", close);
+      const a11yClose = this._setupModalA11y(modal);
+      a11yClose(close);
+      back.addEventListener("click", (e) => { if (e.target === back) a11yClose(close); });
+      modal.querySelector('[data-action="cancel"]').addEventListener("click", () => a11yClose(close));
       modal.querySelector('[data-action="save"]').addEventListener("click", () => {
         const errEl = modal.querySelector("#kubby-settings-error");
         errEl.hidden = true;
@@ -620,7 +695,7 @@
           return window.pywebview.api.get_minikube_prerequisites().then((p) => {
             this.state.minikubePrereqs = p;
             this.showToast("Settings saved", "warn");
-            close();
+            a11yClose(close);
             this.renderCluster();
           });
         }).catch((e) => { errEl.textContent = String(e); errEl.hidden = false; });
@@ -647,9 +722,11 @@
       back.appendChild(modal);
       root.appendChild(back);
       const close = () => { root.innerHTML = ""; };
-      modal.querySelector('[data-action="close"]').addEventListener("click", close);
-      modal.querySelector('[data-action="settings"]').addEventListener("click", () => { close(); this._openSettings(); });
-      back.addEventListener("click", (e) => { if (e.target === back) close(); });
+      const a11yClose = this._setupModalA11y(modal);
+      a11yClose(close);
+      modal.querySelector('[data-action="close"]').addEventListener("click", () => a11yClose(close));
+      modal.querySelector('[data-action="settings"]').addEventListener("click", () => { a11yClose(close); this._openSettings(); });
+      back.addEventListener("click", (e) => { if (e.target === back) a11yClose(close); });
     },
 
     _confirm(opts) {
@@ -670,9 +747,11 @@
         back.appendChild(modal);
         root.appendChild(back);
         const done = (val) => { root.innerHTML = ""; resolve(val); };
-        back.addEventListener("click", (e) => { if (e.target === back) done(false); });
-        modal.querySelector('[data-action="cancel"]').addEventListener("click", () => done(false));
-        modal.querySelector('[data-action="confirm"]').addEventListener("click", () => done(true));
+        const a11yDone = this._setupModalA11y(modal);
+        a11yDone(() => done(false));
+        back.addEventListener("click", (e) => { if (e.target === back) a11yDone(() => done(false)); });
+        modal.querySelector('[data-action="cancel"]').addEventListener("click", () => a11yDone(() => done(false)));
+        modal.querySelector('[data-action="confirm"]').addEventListener("click", () => a11yDone(() => done(true)));
       });
     },
 
