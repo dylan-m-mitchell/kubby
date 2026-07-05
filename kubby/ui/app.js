@@ -228,7 +228,7 @@
         });
       }
 
-      // Namespaces + pods
+      // Namespaces (pods are added dynamically on click)
       for (const ns of (c.namespaces || [])) {
         const nsId = `ns:${ns.name}`;
         const pods = ns.pods || [];
@@ -239,6 +239,8 @@
             podCount: pods.length,
             type: "namespace",
             expanded: false,
+            // Store pod data for dynamic expansion
+            _pods: pods,
           },
         });
 
@@ -249,25 +251,6 @@
         elements.push({
           data: { source: edgeSource, target: nsId, type: "ns-edge" },
         });
-
-        // Pod nodes (initially hidden — collapsed by default)
-        for (const pod of pods) {
-          const podId = `pod:${ns.name}:${pod.name}`;
-          elements.push({
-            data: {
-              id: podId,
-              label: pod.name,
-              status: pod.status,
-              parentNS: nsId,
-              type: "pod",
-            },
-            classes: "hidden-pod",
-          });
-          elements.push({
-            data: { source: nsId, target: podId, type: "pod-edge" },
-            classes: "hidden-edge",
-          });
-        }
       }
 
       const cy = cytoscape({
@@ -389,11 +372,6 @@
               height: 32,
             },
           },
-          // Hidden pods (collapsed)
-          {
-            selector: ".hidden-pod",
-            style: { display: "none" },
-          },
           // Edges: k8s node → namespace
           {
             selector: 'edge[type="ns-edge"]',
@@ -406,7 +384,7 @@
               "curve-style": "bezier",
             },
           },
-          // Edges: namespace → pod (visible when expanded)
+          // Edges: namespace → pod (dynamically added)
           {
             selector: 'edge[type="pod-edge"]',
             style: {
@@ -417,11 +395,6 @@
               "arrow-scale": 0.7,
               "curve-style": "bezier",
             },
-          },
-          // Hidden edges (collapsed)
-          {
-            selector: ".hidden-edge",
-            style: { display: "none" },
           },
         ],
         layout: {
@@ -435,40 +408,57 @@
         },
       });
 
-      // Click namespace to expand/collapse pods
+      // Click namespace to expand/collapse pods (dynamically add/remove)
       cy.on("tap", 'node[type="namespace"]', function (evt) {
         const nsNode = evt.target;
         const nsId = nsNode.id();
         const isExpanded = nsNode.data("expanded");
-
-        const podsToToggle = cy.nodes().filter(function (n) {
-          return n.data("parentNS") === nsId;
-        });
-        const edgesToToggle = cy.edges().filter(function (e) {
-          return e.data("source") === nsId && e.data("type") === "pod-edge";
-        });
+        const podData = nsNode.data("_pods") || [];
 
         if (isExpanded) {
-          podsToToggle.addClass("hidden-pod");
-          edgesToToggle.addClass("hidden-edge");
+          // Remove pod nodes and edges from graph
+          const podsToRemove = cy.nodes().filter(function (n) {
+            return n.data("parentNS") === nsId;
+          });
+          cy.remove(podsToRemove); // also removes connected edges
           nsNode.data("expanded", false);
           nsNode.style("border-color", "#243042");
         } else {
-          podsToToggle.removeClass("hidden-pod");
-          edgesToToggle.removeClass("hidden-edge");
+          // Add pod nodes and edges to graph
+          const newEles = [];
+          for (var i = 0; i < podData.length; i++) {
+            var pod = podData[i];
+            var podId = "pod:" + nsNode.data("label") + ":" + pod.name;
+            newEles.push({
+              group: "nodes",
+              data: {
+                id: podId,
+                label: pod.name,
+                status: pod.status,
+                parentNS: nsId,
+                type: "pod",
+              },
+            });
+            newEles.push({
+              group: "edges",
+              data: { source: nsId, target: podId, type: "pod-edge" },
+            });
+          }
+          cy.add(newEles);
           nsNode.data("expanded", true);
           nsNode.style("border-color", "#326ce5");
-          // Re-layout to accommodate new nodes
-          cy.layout({
-            name: "breadthfirst",
-            directed: true,
-            roots: "#cluster",
-            spacingFactor: 1.2,
-            padding: 20,
-            animate: true,
-            animationDuration: 300,
-          }).run();
         }
+
+        // Re-layout
+        cy.layout({
+          name: "breadthfirst",
+          directed: true,
+          roots: "#cluster",
+          spacingFactor: 1.2,
+          padding: 20,
+          animate: true,
+          animationDuration: 300,
+        }).run();
       });
 
       // Hover tooltip for pods (appended to the wrapper, not the Cytoscape container)
