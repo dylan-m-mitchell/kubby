@@ -1,5 +1,5 @@
 set -e
 
-sudo dpkg --purge kubby
+sudo dpkg --purge kubby || true
 sudo ./build-deb.sh
-sudo apt install ../*.deb
+sudo apt install -y ../*.deb

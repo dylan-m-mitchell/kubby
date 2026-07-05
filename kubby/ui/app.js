@@ -227,8 +227,9 @@
         nsBlock.className = "ns-block";
 
         // Namespace header (clickable to expand pods)
-        const header = document.createElement("div");
+        const header = document.createElement("button");
         header.className = "ns-header";
+        header.type = "button";
         const podCount = (ns.pods || []).length;
         header.innerHTML = `
           <span class="ns-chevron">▸</span>
