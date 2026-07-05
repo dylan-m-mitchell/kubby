@@ -779,3 +779,224 @@ main {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--border-soft);
 }
+
+/* ---------- minikube management (Start / Settings / Stop / Delete) ---------- */
+
+/* Offline-screen CTA buttons + running-job log panel mounted at the
+   cluster offline screen. */
+
+.offline-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+.cluster-offline .offline-hint {
+  max-width: 480px;
+  line-height: 1.5;
+}
+
+/* Cluster hero button row shown in the online cluster view. */
+
+.hero-right {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.hero-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: 4px;
+}
+
+.hero-actions button {
+  font-size: 12px;
+  padding: 5px 10px;
+}
+
+button.danger {
+  color: var(--err);
+}
+
+button.danger:hover:not(:disabled) {
+  background: rgba(248, 81, 73, 0.12);
+  border-color: rgba(248, 81, 73, 0.4);
+}
+
+button.danger.primary {
+  background: var(--err);
+  border-color: var(--err);
+  color: white;
+  box-shadow: 0 0 0 1px rgba(248, 81, 73, 0.2), 0 6px 18px rgba(248, 81, 73, 0.35);
+}
+
+button.danger.primary:hover:not(:disabled) {
+  background: #e8453e;
+  border-color: #e8453e;
+}
+
+.hero-log-wrap {
+  margin-top: 12px;
+}
+
+.hero-log-wrap .log-panel {
+  margin-top: 0;
+}
+
+/* ---------- settings modal form ---------- */
+
+.modal.modal-wide {
+  width: min(540px, 92vw);
+}
+
+.modal .settings-path {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 11px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--accent);
+  word-break: break-all;
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: none;
+  padding: 0;
+  margin: 0;
+}
+
+.form-field.form-field-row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.form-field.form-field-row .form-label {
+  flex: 1;
+  margin: 0;
+}
+
+.form-field.form-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.form-field.form-checkbox .form-label {
+  margin: 0;
+}
+
+.form-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.form-input {
+  font: inherit;
+  font-size: 13px;
+  background: var(--bg-elev);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 10px;
+  transition: border 120ms, background 120ms;
+  width: 100%;
+}
+
+.form-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--bg);
+  box-shadow: 0 0 0 3px rgba(50, 108, 229, 0.18);
+}
+
+.form-input-small {
+  width: 110px;
+}
+
+.form-help {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.form-help code {
+  background: var(--bg-elev);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 11px;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  color: var(--accent);
+}
+
+.form-addons {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+}
+
+.form-addons label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.form-addons input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
+.form-error {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  background: rgba(248, 81, 73, 0.08);
+  border: 1px solid rgba(248, 81, 73, 0.3);
+  border-radius: 6px;
+  color: var(--err);
+  font-size: 12px;
+}
+
+.prereq-list {
+  margin: 6px 0 12px;
+  padding-left: 20px;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.prereq-list li {
+  margin-bottom: 4px;
+}
+
+.modal-note code {
+  background: var(--bg-elev);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  color: var(--accent);
+}

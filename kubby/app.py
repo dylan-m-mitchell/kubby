@@ -16,10 +16,18 @@ import platform
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
-from kubby.installer import detector, linux, tools as tools_mod
+from kubby import settings as settings_mod
+
+from kubby.installer import (
+    detector,
+    linux,
+    minikube as minikube_mod,
+    tools as tools_mod,
+)
 
 log = logging.getLogger("kubby")
 
@@ -37,6 +45,12 @@ class KubbyAPI:
 
     def __init__(self) -> None:
         self._window: webview.Window | None = None
+        # Track the currently-running worker thread for minikube start/stop/delete
+        # so we (a) reject double-clicks and (b) keep `_current_job_kind`
+        # available for any synchronous status checks from JS.
+        self._minikube_thread: threading.Thread | None = None
+        self._minikube_lock = threading.Lock()
+        self._current_job_kind: str | None = None
 
     def bind_window(self, window: webview.Window) -> None:
         self._window = window
@@ -86,6 +100,199 @@ class KubbyAPI:
                 }
             )
         return statuses
+
+    # ---------- minikube management ----------
+
+    def get_minikube_settings(self) -> dict[str, Any]:
+        """Return persisted minikube settings, merged with defaults.
+
+        Always returns a fully-populated dict so the UI can render the form
+        even on a fresh install (no settings file yet).
+        """
+        return settings_mod.load()
+
+    def save_minikube_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Validate and persist minikube settings to disk.
+
+        Returns ``{"ok": True}`` on success or ``{"ok": False, "error": ...}``
+        on OSError/ValueError. Per-field validation lives in the UI layer.
+        """
+        try:
+            settings_mod.save(settings)
+            return {"ok": True}
+        except (OSError, ValueError) as e:
+            return {"ok": False, "error": str(e)}
+
+    def get_minikube_prerequisites(self) -> dict[str, Any]:
+        """Pre-flight check for ``minikube start``.
+
+        Returns a dict with:
+        - ``ok`` (bool): True when no blockers found
+        - ``issues`` (list[str]): human-readable list of problems
+        - ``settings_path`` (str): where settings live, for the UI to display
+
+        Covers minikube + kubectl on PATH and, for non-``auto`` drivers, that
+        the driver binary itself is on PATH. Daemon-level health (e.g. is
+        docker actually running?) is left to minikube's own error output,
+        which we stream back live.
+        """
+        settings = settings_mod.load()["minikube"]
+        issues: list[str] = []
+
+        if not shutil.which("minikube"):
+            issues.append(
+                "minikube is not installed — install it from the Docs tab."
+            )
+        if not shutil.which("kubectl"):
+            issues.append(
+                "kubectl is not installed — install it from the Docs tab."
+            )
+
+        driver = (settings.get("driver") or "").strip()
+        if driver and driver not in ("auto",):
+            self._check_driver_binary(driver, issues)
+        else:
+            # Empty / auto: at least one of docker / podman should be present,
+            # otherwise minikube will pick a driver we may not have configured.
+            if not (shutil.which("docker") or shutil.which("podman")):
+                issues.append(
+                    "Neither docker nor podman is installed — minikube "
+                    "needs at least one as a container driver."
+                )
+
+        return {
+            "ok": not issues,
+            "issues": issues,
+            "settings_path": str(settings_mod.CONFIG_FILE),
+        }
+
+    def start_minikube(self) -> dict[str, Any]:
+        """Kick off ``minikube start`` using the persisted settings."""
+        return self._kick_job("start")
+
+    def stop_minikube(self) -> dict[str, Any]:
+        """Kick off ``minikube stop`` in a worker thread."""
+        return self._kick_job("stop")
+
+    def delete_minikube(self) -> dict[str, Any]:
+        """Kick off ``minikube delete`` in a worker thread.
+
+        The UI is responsible for showing a confirm dialog BEFORE calling
+        this — this method does the destructive thing as soon as invoked.
+        """
+        return self._kick_job("delete")
+
+    def _check_driver_binary(self, driver: str, issues: list[str]) -> None:
+        """Append a missing-driver issue if the driver binary isn't on PATH.
+
+        minikube's ``none`` driver doesn't need an external binary so it's
+        exempt. ``kvm2`` actually needs qemu/virsh but checking that level
+        isn't worth it — minikube errors clearly if QEMU isn't usable.
+        """
+        if driver == "none":
+            return
+        needs_external = {"docker", "podman", "kvm2"}
+        if driver in needs_external and not shutil.which(driver):
+            issues.append(
+                f"Driver '{driver}' is not on PATH — install it from the "
+                f"Docs tab so minikube can use it."
+            )
+
+    def _kick_job(self, action: str) -> dict[str, Any]:
+        """Build argv from settings and dispatch to a worker thread.
+
+        Rejects re-entry while another job is active so the user can't
+        trigger stop + delete simultaneously from a double-click.
+        """
+        with self._minikube_lock:
+            if self._minikube_thread is not None and self._minikube_thread.is_alive():
+                kind = self._current_job_kind or "another command"
+                return {
+                    "ok": False,
+                    "error": f"a {kind} is already in progress — wait for it to finish",
+                }
+            settings = settings_mod.load()["minikube"]
+            if action == "start":
+                argv = minikube_mod.start_args(settings)
+            elif action == "stop":
+                argv = minikube_mod.stop_args()
+            elif action == "delete":
+                argv = minikube_mod.delete_args()
+            else:
+                return {"ok": False, "error": f"unknown action: {action!r}"}
+
+            self._current_job_kind = action
+            thread = threading.Thread(
+                target=self._run_minikube_job,
+                args=(action, argv),
+                daemon=True,
+                name=f"kubby-minikube-{action}",
+            )
+            self._minikube_thread = thread
+            thread.start()
+            return {"ok": True, "started": True, "action": action}
+
+    def _run_minikube_job(self, action: str, argv: list[str]) -> None:
+        """Worker thread body: run ``argv`` and stream results.
+
+        Always notifies JS of completion (success or failure) via
+        ``window.kubby.onClusterActionDone``. Even on exception the
+        ``finally``-guard clears state so the next ``_kick_job`` can run.
+        """
+        self._emit_log(f"$ {' '.join(argv)}")
+        ok = False
+        err: str | None = None
+        try:
+            try:
+                result = subprocess.run(
+                    argv,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    # minikube output occasionally includes non-UTF8 bytes
+                    # (ANSI escapes, stray locale flag) — replace with U+FFFD
+                    # instead of letting UnicodeDecodeError escape this worker.
+                    errors="replace",
+                    timeout=900,  # minikube start can take several minutes
+                )
+            except FileNotFoundError:
+                msg = "minikube binary not found on PATH"
+                self._emit_log(f"! {msg}")
+                err = msg
+            except subprocess.TimeoutExpired:
+                msg = "minikube command timed out (15 min)"
+                self._emit_log(f"! {msg}")
+                err = msg
+            else:
+                if result.stdout.strip():
+                    self._emit_log(result.stdout.rstrip())
+                if result.stderr.strip():
+                    self._emit_log(result.stderr.rstrip())
+                if result.returncode == 0:
+                    self._emit_log(f"✓ minikube {action} succeeded")
+                    ok = True
+                else:
+                    self._emit_log(
+                        f"! minikube {action} failed (exit {result.returncode})"
+                    )
+                    err = f"exit code {result.returncode}"
+        except Exception as e:
+            log.exception("minikube job raised unexpectedly")
+            self._emit_log(f"! unexpected error: {e}")
+            err = str(e)
+        finally:
+            with self._minikube_lock:
+                self._current_job_kind = None
+            completion = {"ok": ok, "error": err, "action": action}
+            try:
+                if self._window is not None:
+                    self._window.evaluate_js(
+                        "window.kubby && window.kubby"
+                        f".onClusterActionDone({json.dumps(completion)})"
+                    )
+            except Exception:
+                log.exception("failed to notify JS of minikube job completion")
+
 
     def get_cluster_info(self) -> dict[str, Any]:
         """Return information about the current Kubernetes cluster.

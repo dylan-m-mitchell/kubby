@@ -3,7 +3,7 @@
 
   const kubby = {
     els: {},
-    state: { tools: [], cluster: null, activeTab: "cluster" },
+    state: { tools: [], cluster: null, activeTab: "cluster", minikubeSettings: null, minikubePrereqs: null, minikubeJobRunning: false, minikubeJobKind: null, logBuffer: [], },
 
     init() {
       this.cache();
@@ -28,6 +28,11 @@
         refresh: id("refresh"),
         toast: id("toast"),
       };
+      // Log panel + modal root are created lazily on first need; clear
+      // them here so a stale reference from a previous render doesn't
+      // get reused if appendLog fires before render.
+      this.els.logPanel = null;
+      this.els.modalRoot = null;
     },
 
     bindEvents() {
@@ -37,6 +42,13 @@
         if (!btn) return;
         this.switchTab(btn.dataset.tab);
       });
+      // Delegated handler for the minikube buttons (Start / Settings /
+      // Stop / Delete) — we re-render on every state change, so attaching
+      // per-render listeners is more fragile than delegation.
+      this.els.clusterContent.addEventListener(
+        "click",
+        (e) => this._onClusterClick(e),
+      );
     },
 
     switchTab(tab) {
@@ -83,6 +95,20 @@
         this.state.tools = await window.pywebview.api.get_status();
         // Always load cluster on startup (it's the default tab)
         await this.loadCluster();
+        // Fetch minikube settings + prereqs in parallel; failures are
+        // tolerated so the offline CTA can still render with a generic
+        // placeholder.
+        try {
+          const [s, p] = await Promise.all([
+            window.pywebview.api.get_minikube_settings(),
+            window.pywebview.api.get_minikube_prerequisites(),
+          ]);
+          this.state.minikubeSettings = s;
+          this.state.minikubePrereqs = p;
+        } catch (e) {
+          console.warn("minikube state fetch failed", e);
+        }
+        this.renderCluster();
         this.renderDocsCards();
         this.hideToast();
       } catch (err) {
@@ -343,7 +369,328 @@
 
     /** Called from Python via evaluate_js — kept for API compatibility. */
     appendLog(line) {
-      // No-op: install log panel was removed when install buttons were dropped.
+      this.state.logBuffer.push(line);
+      const MAX_LINES = 800;
+      if (this.state.logBuffer.length > MAX_LINES) {
+        this.state.logBuffer.splice(0, this.state.logBuffer.length - MAX_LINES);
+      }
+      if (this.els.logPanel && document.body.contains(this.els.logPanel)) {
+        const log = this.els.logPanel.querySelector(".log");
+        if (log) {
+          log.textContent = this.state.logBuffer.join("\n");
+          this._scrollLogToBottom();
+        }
+      }
+    },
+
+    /**
+     * Called from Python when a minikube start/stop/delete job finishes.
+     */
+    onClusterActionDone(payload) {
+      this.state.minikubeJobRunning = false;
+      this.state.minikubeJobKind = null;
+      if (payload && payload.ok) {
+        const verb = (
+          payload.action === "start"  ? "started" :
+          payload.action === "stop"   ? "stopped" :
+          payload.action === "delete" ? "deleted" :
+          payload.action
+        );
+        this.showToast("minikube " + verb, "ok");
+      } else {
+        const err = (payload && payload.error) || "unknown error";
+        this.showToast("minikube " + (payload && payload.action) + " failed: " + err, "err");
+      }
+      this.state.logBuffer = [];
+      this.els.logPanel = null;
+      this.loadCluster();
+    },
+
+    /** Idempotent guard: refuse new jobs while one is already running. */
+    _canStartJob() {
+      return !this.state.minikubeJobRunning;
+    },
+
+    async _startCluster() {
+      if (!this._canStartJob()) return;
+      try {
+        await this._refreshMinikubeState();
+      } catch (e) {
+        this.showToast("Could not check prerequisites: " + e, "err");
+        return;
+      }
+      const prereqs = this.state.minikubePrereqs;
+      if (prereqs && !prereqs.ok) {
+        this._showPrereqModal(prereqs);
+        return;
+      }
+      this._beginJobUi("start");
+      try {
+        const res = await window.pywebview.api.start_minikube();
+        if (!res || !res.ok) {
+          this.showToast("Could not start minikube: " + (res && res.error ? res.error : "unknown error"), "err");
+          this._endJobUi();
+        }
+      } catch (e) {
+        this.showToast("minikube start failed: " + e, "err");
+        this._endJobUi();
+      }
+    },
+
+    async _stopCluster() {
+      if (!this._canStartJob()) return;
+      this._beginJobUi("stop");
+      try {
+        const res = await window.pywebview.api.stop_minikube();
+        if (!res || !res.ok) {
+          this.showToast("Could not stop minikube: " + (res && res.error ? res.error : "unknown error"), "err");
+          this._endJobUi();
+        }
+      } catch (e) {
+        this.showToast("minikube stop failed: " + e, "err");
+        this._endJobUi();
+      }
+    },
+
+    async _deleteCluster() {
+      if (!this._canStartJob()) return;
+      const ok = await this._confirm({
+        title: "Delete minikube cluster?",
+        body: "This removes the cluster and any workloads you had running on it. The minikube binary stays installed.",
+        confirmLabel: "Delete cluster",
+      });
+      if (!ok) return;
+      this._beginJobUi("delete");
+      try {
+        const res = await window.pywebview.api.delete_minikube();
+        if (!res || !res.ok) {
+          this.showToast("Could not delete: " + (res && res.error ? res.error : "unknown error"), "err");
+          this._endJobUi();
+        }
+      } catch (e) {
+        this.showToast("minikube delete failed: " + e, "err");
+        this._endJobUi();
+      }
+    },
+
+    _beginJobUi(kind) {
+      this.state.minikubeJobRunning = true;
+      this.state.minikubeJobKind = kind;
+      this.state.logBuffer = [];
+      this.renderCluster();
+    },
+
+    _endJobUi() {
+      this.state.minikubeJobRunning = false;
+      this.state.minikubeJobKind = null;
+      this.renderCluster();
+    },
+
+    async _refreshMinikubeState() {
+      const [s, p] = await Promise.all([
+        window.pywebview.api.get_minikube_settings(),
+        window.pywebview.api.get_minikube_prerequisites(),
+      ]);
+      this.state.minikubeSettings = s;
+      this.state.minikubePrereqs = p;
+    },
+
+    _ensureModalRoot() {
+      if (this.els.modalRoot && document.body.contains(this.els.modalRoot)) {
+        return this.els.modalRoot;
+      }
+      const root = document.createElement("div");
+      root.id = "kubby-modal-root";
+      document.body.appendChild(root);
+      this.els.modalRoot = root;
+      return root;
+    },
+
+    _openSettings() {
+      const root = this._ensureModalRoot();
+      const settings = (this.state.minikubeSettings || { minikube: {} }).minikube;
+      root.innerHTML = "";
+      const back = document.createElement("div");
+      back.className = "modal-backdrop";
+      const modal = document.createElement("div");
+      modal.className = "modal modal-wide";
+      modal.innerHTML =
+        '<h2>minikube settings</h2>' +
+        '<p>Settings are saved to <span class="settings-path"></span> and persist across launches.</p>' +
+        '<form id="kubby-settings-form" class="settings-form">' +
+          '<label class="form-field"><span class="form-label">Driver</span>' +
+            '<select name="driver" class="form-input">' +
+              '<option value="">automatic (let minikube pick)</option>' +
+              '<option value="docker">docker</option>' +
+              '<option value="podman">podman</option>' +
+              '<option value="kvm2">kvm2 (Linux, requires QEMU)</option>' +
+              '<option value="none">none (Linux only)</option>' +
+            '</select>' +
+            '<span class="form-help">Container or VM driver. Defaults to whatever minikube auto-detects.</span>' +
+          '</label>' +
+          '<label class="form-field form-field-row"><span class="form-label">CPUs</span>' +
+            '<input name="cpus" type="text" class="form-input form-input-small" placeholder="2" />' +
+          '</label>' +
+          '<label class="form-field form-field-row"><span class="form-label">Memory</span>' +
+            '<input name="memory" type="text" class="form-input form-input-small" placeholder="2g" />' +
+          '</label>' +
+          '<label class="form-field form-field-row"><span class="form-label">Kubernetes version</span>' +
+            '<input name="kubernetes_version" type="text" class="form-input form-input-small" placeholder="latest stable" />' +
+          '</label>' +
+          '<label class="form-field form-checkbox">' +
+            '<input name="rootless" type="checkbox" />' +
+            '<span class="form-label">Run as rootless (no sudo for the VM)</span>' +
+          '</label>' +
+          '<fieldset class="form-field">' +
+            '<legend class="form-label">Addons</legend>' +
+            '<div class="form-addons">' +
+              '<label><input type="checkbox" data-addon="default" /> default (storage, dashboard)</label>' +
+              '<label><input type="checkbox" data-addon="ingress" /> ingress (NGINX controller)</label>' +
+              '<label><input type="checkbox" data-addon="metrics-server" /> metrics-server</label>' +
+            '</div>' +
+            '<span class="form-help">Addons are enabled at <code>minikube start</code> time. Defaults to <code>default</code>.</span>' +
+          '</fieldset>' +
+          '<div class="form-error" id="kubby-settings-error" hidden></div>' +
+        '</form>' +
+        '<div class="modal-actions">' +
+          '<button type="button" class="ghost" data-action="cancel">Cancel</button>' +
+          '<button type="button" class="primary" data-action="save">Save</button>' +
+        '</div>';
+      back.appendChild(modal);
+      root.appendChild(back);
+      modal.querySelector(".settings-path").textContent =
+        (this.state.minikubePrereqs && this.state.minikubePrereqs.settings_path) ||
+        "~/.config/kubby/settings.json";
+      modal.querySelector('select[name="driver"]').value = settings.driver || "";
+      modal.querySelector('input[name="cpus"]').value = settings.cpus || "";
+      modal.querySelector('input[name="memory"]').value = settings.memory || "";
+      modal.querySelector('input[name="kubernetes_version"]').value = settings.kubernetes_version || "";
+      modal.querySelector('input[name="rootless"]').checked = !!settings.rootless;
+      const addons = new Set(settings.addons || []);
+      modal.querySelectorAll("[data-addon]").forEach((cb) => { cb.checked = addons.has(cb.dataset.addon); });
+      const close = () => { root.innerHTML = ""; };
+      back.addEventListener("click", (e) => { if (e.target === back) close(); });
+      modal.querySelector('[data-action="cancel"]').addEventListener("click", close);
+      modal.querySelector('[data-action="save"]').addEventListener("click", () => {
+        const errEl = modal.querySelector("#kubby-settings-error");
+        errEl.hidden = true;
+        const cpus = modal.querySelector('input[name="cpus"]').value.trim();
+        const memory = modal.querySelector('input[name="memory"]').value.trim();
+        if (cpus && !/^\d+(\.\d+)?$/.test(cpus)) {
+          errEl.textContent = "CPUs must be a positive number like '2' or '2.5' (or empty)";
+          errEl.hidden = false; return;
+        }
+        if (memory && !/^\d+(\.\d+)?\s*(m|mi|mb|g|gi|gb)?$/i.test(memory)) {
+          errEl.textContent = 'Memory must look like "2g", "4096mb", "2048Mi" (or empty)';
+          errEl.hidden = false; return;
+        }
+        const addonNames = [];
+        modal.querySelectorAll("[data-addon]").forEach((cb) => { if (cb.checked) addonNames.push(cb.dataset.addon); });
+        const newSettings = {
+          minikube: {
+            ...((this.state.minikubeSettings || {}).minikube || {}),
+            driver: modal.querySelector('select[name="driver"]').value,
+            cpus, memory,
+            kubernetes_version: modal.querySelector('input[name="kubernetes_version"]').value.trim(),
+            rootless: modal.querySelector('input[name="rootless"]').checked,
+            addons: addonNames,
+          },
+        };
+        window.pywebview.api.save_minikube_settings(newSettings).then((res) => {
+          if (!res || !res.ok) {
+            errEl.textContent = (res && res.error) || "save failed";
+            errEl.hidden = false; return null;
+          }
+          this.state.minikubeSettings = newSettings;
+          return window.pywebview.api.get_minikube_prerequisites().then((p) => {
+            this.state.minikubePrereqs = p;
+            this.showToast("Settings saved", "warn");
+            close();
+            this.renderCluster();
+          });
+        }).catch((e) => { errEl.textContent = String(e); errEl.hidden = false; });
+      });
+    },
+
+    _showPrereqModal(prereqs) {
+      const root = this._ensureModalRoot();
+      root.innerHTML = "";
+      const back = document.createElement("div");
+      back.className = "modal-backdrop";
+      const modal = document.createElement("div");
+      modal.className = "modal";
+      const items = prereqs.issues.map((s) => "<li>" + this._esc(s) + "</li>").join("");
+      modal.innerHTML =
+        '<h2>Cannot start minikube yet</h2>' +
+        '<p>A few prerequisites are missing:</p>' +
+        '<ul class="prereq-list">' + items + '</ul>' +
+        '<p class="modal-note">Open the <code>Docs</code> tab to install the missing tools, then come back here.</p>' +
+        '<div class="modal-actions">' +
+          '<button type="button" class="ghost" data-action="settings">Open settings</button>' +
+          '<button type="button" class="primary" data-action="close">OK</button>' +
+        '</div>';
+      back.appendChild(modal);
+      root.appendChild(back);
+      const close = () => { root.innerHTML = ""; };
+      modal.querySelector('[data-action="close"]').addEventListener("click", close);
+      modal.querySelector('[data-action="settings"]').addEventListener("click", () => { close(); this._openSettings(); });
+      back.addEventListener("click", (e) => { if (e.target === back) close(); });
+    },
+
+    _confirm(opts) {
+      return new Promise((resolve) => {
+        const root = this._ensureModalRoot();
+        root.innerHTML = "";
+        const back = document.createElement("div");
+        back.className = "modal-backdrop";
+        const modal = document.createElement("div");
+        modal.className = "modal";
+        modal.innerHTML =
+          '<h2>' + this._esc(opts.title) + '</h2>' +
+          '<p>' + this._esc(opts.body) + '</p>' +
+          '<div class="modal-actions">' +
+            '<button type="button" class="ghost" data-action="cancel">Cancel</button>' +
+            '<button type="button" class="primary danger" data-action="confirm">' + this._esc(opts.confirmLabel || "Confirm") + '</button>' +
+          '</div>';
+        back.appendChild(modal);
+        root.appendChild(back);
+        const done = (val) => { root.innerHTML = ""; resolve(val); };
+        back.addEventListener("click", (e) => { if (e.target === back) done(false); });
+        modal.querySelector('[data-action="cancel"]').addEventListener("click", () => done(false));
+        modal.querySelector('[data-action="confirm"]').addEventListener("click", () => done(true));
+      });
+    },
+
+    _onClusterClick(e) {
+      const btn = e.target.closest("[data-action]");
+      if (!btn) return;
+      switch (btn.dataset.action) {
+        case "start-cluster":  this._startCluster(); break;
+        case "open-settings":  this._openSettings(); break;
+        case "stop-cluster":   this._stopCluster();  break;
+        case "delete-cluster": this._deleteCluster();break;
+      }
+    },
+
+    _renderLogPanel() {
+      if (this.els.logPanel && document.body.contains(this.els.logPanel) && this.els.logPanel.parentElement) {
+        this.els.logPanel.querySelector(".log").textContent = this.state.logBuffer.join("\n");
+        this._scrollLogToBottom();
+        return this.els.logPanel;
+      }
+      const panel = document.createElement("div");
+      panel.className = "log-panel";
+      panel.innerHTML = '<div class="log-header"><h2>minikube output</h2><span class="log-hint">streaming…</span></div><pre class="log"></pre>';
+      panel.querySelector(".log").textContent = this.state.logBuffer.join("\n");
+      this.els.logPanel = panel;
+      this._scrollLogToBottom();
+      return panel;
+    },
+
+    _scrollLogToBottom() {
+      const log = this.els.logPanel && this.els.logPanel.querySelector(".log");
+      if (!log) return;
+      log.scrollTop = log.scrollHeight;
     },
   };
 
