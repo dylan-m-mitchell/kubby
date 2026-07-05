@@ -13,12 +13,24 @@
       <h1>kubby</h1>
       <span class="tagline">local kubernetes</span>
     </div>
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-tab="cluster" type="button">Cluster</button>
+      <button class="tab" data-tab="docs" type="button">Docs</button>
+    </nav>
     <div class="meta" id="meta">connecting…</div>
     <button class="ghost" id="refresh" type="button">Re-check</button>
   </header>
 
   <main>
-    <section class="cards" id="cards" aria-live="polite"></section>
+    <!-- Cluster tab -->
+    <section class="tab-panel" id="tab-cluster" aria-live="polite">
+      <div id="cluster-content"></div>
+    </section>
+
+    <!-- Docs tab (tool status) -->
+    <section class="tab-panel" id="tab-docs" hidden>
+      <section class="cards" id="cards" aria-live="polite"></section>
+    </section>
   </main>
 
   <div class="toast" id="toast" hidden></div>
