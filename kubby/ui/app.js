@@ -240,10 +240,13 @@
         pill.type = "button";
         const podCount = (ns.pods || []).length;
         pill.innerHTML = `${this._esc(ns.name)} <span class="ns-count">${podCount}</span>`;
-        pill.addEventListener("click", () => {
-          const expanded = wrapper.classList.toggle("expanded");
-          pill.setAttribute("aria-expanded", expanded);
-        });
+        // Default to expanded so pods are visible without clicking
+        wrapper.classList.add("expanded");
+        pill.setAttribute("aria-expanded", "true");
+        pill.onclick = function () {
+          const isExpanded = wrapper.classList.toggle("expanded");
+          pill.setAttribute("aria-expanded", String(isExpanded));
+        };
         wrapper.appendChild(pill);
 
         if (ns.pods && ns.pods.length) {
@@ -260,6 +263,11 @@
             podList.appendChild(row);
           }
           wrapper.appendChild(podList);
+        } else {
+          const empty = document.createElement("div");
+          empty.className = "pod-list pod-empty";
+          empty.textContent = "no pods";
+          wrapper.appendChild(empty);
         }
 
         pills.appendChild(wrapper);

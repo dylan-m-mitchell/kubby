@@ -784,6 +784,13 @@ main {
   border: 1px solid rgba(210, 153, 34, 0.3);
 }
 
+.pod-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 8px 12px;
+  font-style: italic;
+}
+
 /* ---------- scrollbar (webkit only — the GTK webview supports this) ---------- */
 
 ::-webkit-scrollbar {
