@@ -283,6 +283,7 @@ class KubbyAPI:
         finally:
             with self._minikube_lock:
                 self._current_job_kind = None
+                self._minikube_thread = None
             completion = {"ok": ok, "error": err, "action": action}
             try:
                 if self._window is not None:

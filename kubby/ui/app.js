@@ -166,7 +166,11 @@
         <div class="offline-icon">🐾</div>
         <h2>No cluster connected</h2>
         <p class="offline-error">${this._esc(error || "Could not reach any Kubernetes cluster")}</p>
-        <p class="offline-hint">Start a cluster with <code>minikube start</code> or connect to one, then hit Re-check.</p>
+        <p class="offline-hint">No minikube cluster is running. Start one to spin up a local cluster.</p>
+      <div class="offline-actions">
+        <button type="button" class="primary" data-action="start-cluster"${this.state.minikubeJobRunning ? " disabled" : ""}>${this.state.minikubeJobRunning ? (this.state.minikubeJobKind || "start") + " in progress…" : "Start minikube"}</button>
+        <button type="button" class="ghost" data-action="open-settings"${this.state.minikubeJobRunning ? " disabled" : ""}>⚙ Settings</button>
+      </div>
       `;
       return wrap;
     },
@@ -184,6 +188,11 @@
         <div class="hero-right">
           <span class="badge ok">running</span>
           ${c.version ? `<span class="badge info">${this._esc(c.version)}</span>` : ""}
+      <div class="hero-actions">
+        <button type="button" class="ghost" data-action="open-settings"${this.state.minikubeJobRunning ? " disabled" : ""} title="Edit minikube settings">⚙</button>
+        <button type="button" class="ghost" data-action="stop-cluster"${this.state.minikubeJobRunning ? " disabled" : ""}>Stop</button>
+        <button type="button" class="ghost danger" data-action="delete-cluster"${this.state.minikubeJobRunning ? " disabled" : ""}>Delete</button>
+      </div>
         </div>
       `;
       return hero;
@@ -580,7 +589,7 @@
           errEl.textContent = "CPUs must be a positive number like '2' or '2.5' (or empty)";
           errEl.hidden = false; return;
         }
-        if (memory && !/^\d+(\.\d+)?\s*(m|mi|mb|g|gi|gb)?$/i.test(memory)) {
+        if (memory && !/^\d+(\.\d+)?(m|mi|mb|g|gi|gb)?$/i.test(memory)) {
           errEl.textContent = 'Memory must look like "2g", "4096mb", "2048Mi" (or empty)';
           errEl.hidden = false; return;
         }
