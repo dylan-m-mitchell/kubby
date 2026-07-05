@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import platform
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -85,6 +86,89 @@ class KubbyAPI:
                 }
             )
         return statuses
+
+    def get_cluster_info(self) -> dict[str, Any]:
+        """Return information about the current Kubernetes cluster.
+
+        Returns a dict with:
+        - running (bool): whether a cluster is reachable
+- error (str|None): error message if not running
+- context (str|None): active kubectl context name
+- version (str|None): server Kubernetes version
+- nodes (list[dict]): list of {name, status, roles}
+- namespaces (list[str]): namespace names
+- pod_count (int): total pods across all namespaces
+        """
+        def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                args, capture_output=True, text=True, timeout=10,
+            )
+
+        # Check if kubectl is available
+        if not shutil.which("kubectl"):
+            return {"running": False, "error": "kubectl not found on PATH"}
+
+        # Get current context
+        ctx = _run(["kubectl", "config", "current-context"])
+        if ctx.returncode != 0:
+            return {"running": False, "error": ctx.stderr.strip() or "no current context"}
+        context = ctx.stdout.strip()
+
+        # Try to reach the cluster
+        ver = _run(["kubectl", "version", "--client=false", "-o", "json"])
+        if ver.returncode != 0:
+            return {"running": False, "error": ver.stderr.strip() or "cannot reach cluster", "context": context}
+
+        version = None
+        try:
+            ver_data = json.loads(ver.stdout)
+            version = ver_data.get("serverVersion", {}).get("gitVersion", "")
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+        # Fetch nodes, namespaces, and pods in a single kubectl call to
+        # minimise subprocess overhead (each call can take ~1-2s on minikube).
+        nodes: list[dict[str, Any]] = []
+        namespaces: list[str] = []
+        pod_count = 0
+
+        bulk = _run([
+            "kubectl", "get", "nodes,namespaces,pods", "-A", "-o", "json",
+        ])
+        if bulk.returncode == 0:
+            try:
+                bulk_data = json.loads(bulk.stdout)
+                for item in bulk_data.get("items", []):
+                    kind = item.get("kind", "")
+                    if kind == "Node":
+                        name = item["metadata"]["name"]
+                        roles: list[str] = []
+                        for lbl in item["metadata"].get("labels", {}):
+                            if lbl.startswith("node-role.kubernetes.io/"):
+                                role = lbl.split("/", 1)[1]
+                                if role:
+                                    roles.append(role)
+                        status = "Unknown"
+                        for cond in item.get("status", {}).get("conditions", []):
+                            if cond.get("type") == "Ready":
+                                status = "Ready" if cond.get("status") == "True" else "NotReady"
+                        nodes.append({"name": name, "status": status, "roles": roles})
+                    elif kind == "Namespace":
+                        namespaces.append(item["metadata"]["name"])
+                    elif kind == "Pod":
+                        pod_count += 1
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+        return {
+            "running": True,
+            "error": None,
+            "context": context,
+            "version": version,
+            "nodes": nodes,
+            "namespaces": namespaces,
+            "pod_count": pod_count,
+        }
 
     def install_tool(self, key: str) -> dict[str, Any]:
         """Install the given tool. Streams command output to the UI log.
