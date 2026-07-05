@@ -205,30 +205,7 @@
     _renderGraph(container, c) {
       const elements = [];
 
-      // Cluster root node
-      elements.push({
-        data: { id: "cluster", label: c.context || "cluster", type: "cluster" },
-      });
-
-      // K8s nodes
-      for (const n of (c.nodes || [])) {
-        const nodeId = `node:${n.name}`;
-        elements.push({
-          data: {
-            id: nodeId,
-            label: n.name,
-            status: n.status,
-            roles: (n.roles || []).join(", ") || "worker",
-            type: "knode",
-          },
-        });
-        // Edge: cluster → k8s node
-        elements.push({
-          data: { source: "cluster", target: nodeId, type: "ns-edge" },
-        });
-      }
-
-      // Namespaces (pods are added dynamically on click)
+      // Each namespace is a top-level node — no cluster/k8s-node wrapper
       for (const ns of (c.namespaces || [])) {
         const nsId = `ns:${ns.name}`;
         const pods = ns.pods || [];
@@ -239,17 +216,8 @@
             podCount: pods.length,
             type: "namespace",
             expanded: false,
-            // Store pod data for dynamic expansion
             _pods: pods,
           },
-        });
-
-        // Edge: k8s node → namespace (or cluster → namespace if no nodes)
-        const edgeSource = (c.nodes && c.nodes.length)
-          ? `node:${c.nodes[0].name}`
-          : "cluster";
-        elements.push({
-          data: { source: edgeSource, target: nsId, type: "ns-edge" },
         });
       }
 
@@ -260,49 +228,7 @@
         maxZoom: 3,
         wheelSensitivity: 0.2,
         style: [
-          // Cluster root node
-          {
-            selector: 'node[type="cluster"]',
-            style: {
-              "background-color": "rgba(50, 108, 229, 0.12)",
-              "border-color": "#326ce5",
-              "border-width": 2,
-              label: "data(label)",
-              color: "#93a4ba",
-              "font-size": 13,
-              "font-weight": 700,
-              "text-valign": "center",
-              "text-transform": "uppercase",
-              "letter-spacing": "1px",
-              shape: "round-rectangle",
-              width: 160,
-              height: 50,
-            },
-          },
-          // K8s node
-          {
-            selector: 'node[type="knode"]',
-            style: {
-              "background-color": function (ele) {
-                return ele.data("status") === "Ready" ? "#2ea043" : "#d29922";
-              },
-              "background-opacity": 0.2,
-              "border-color": function (ele) {
-                return ele.data("status") === "Ready" ? "#2ea043" : "#d29922";
-              },
-              "border-width": 2,
-              label: "data(label)",
-              color: "#e6edf3",
-              "font-size": 11,
-              "font-weight": 600,
-              "text-valign": "center",
-              "text-halign": "center",
-              shape: "round-rectangle",
-              width: 140,
-              height: 40,
-            },
-          },
-          // Namespace nodes
+          // Namespace nodes (top-level, root of each sub-graph)
           {
             selector: 'node[type="namespace"]',
             style: {
@@ -372,18 +298,6 @@
               height: 32,
             },
           },
-          // Edges: k8s node → namespace
-          {
-            selector: 'edge[type="ns-edge"]',
-            style: {
-              width: 2,
-              "line-color": "#243042",
-              "target-arrow-color": "#243042",
-              "target-arrow-shape": "triangle",
-              "arrow-scale": 0.8,
-              "curve-style": "bezier",
-            },
-          },
           // Edges: namespace → pod (dynamically added)
           {
             selector: 'edge[type="pod-edge"]',
@@ -398,18 +312,17 @@
           },
         ],
         layout: {
-          name: "breadthfirst",
-          directed: true,
-          roots: "#cluster",
-          spacingFactor: 1.2,
-          padding: 20,
+          name: "grid",
+          padding: 30,
           animate: true,
           animationDuration: 400,
+          avoidOverlap: true,
+          condense: true,
+          rows: undefined,
         },
       });
 
-      // Handle container sizing: Cytoscape may init before the flex layout
-      // gives the container its final dimensions.
+      // Handle container sizing
       requestAnimationFrame(function () {
         cy.resize();
         cy.fit(undefined, 30);
@@ -458,14 +371,14 @@
 
         // Re-layout
         cy.layout({
-          name: "breadthfirst",
-          directed: true,
-          roots: "#cluster",
-          spacingFactor: 1.2,
-          padding: 20,
+          name: "grid",
+          padding: 30,
           animate: true,
           animationDuration: 300,
+          avoidOverlap: true,
+          condense: true,
         }).run();
+        cy.fit(undefined, 30);
       });
 
       // Hover tooltip for pods (appended to the wrapper, not the Cytoscape container)
