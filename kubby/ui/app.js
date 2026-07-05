@@ -110,7 +110,7 @@
       this.els.meta.textContent = `${info.platform} · ${pm} · ${elv}`;
     },
 
-    // ---------- Cluster tab ----------
+    // ---------- Cluster tab (graph view) ----------
 
     renderCluster() {
       const el = this.els.clusterContent;
@@ -128,18 +128,21 @@
         return;
       }
 
-      // Hero row
+      // Status bar + metrics
       el.appendChild(this._clusterHero(c));
-      // Metric cards
       el.appendChild(this._clusterMetrics(c));
-      // Nodes table
-      if (c.nodes && c.nodes.length) {
-        el.appendChild(this._clusterNodes(c.nodes));
-      }
-      // Namespaces
-      if (c.namespaces && c.namespaces.length) {
-        el.appendChild(this._clusterNamespaces(c.namespaces));
-      }
+
+      // Graph container
+      const graphWrap = document.createElement("div");
+      graphWrap.className = "graph-container";
+      const graphEl = document.createElement("div");
+      graphEl.id = "cluster-graph";
+      graphEl.className = "graph";
+      graphWrap.appendChild(graphEl);
+      el.appendChild(graphWrap);
+
+      // Build graph
+      this._renderGraph(graphEl, c);
     },
 
     _clusterOffline(error) {
@@ -197,83 +200,289 @@
       return grid;
     },
 
-    _clusterNodes(nodes) {
-      const section = document.createElement("div");
-      section.className = "cluster-section";
-      const h3 = document.createElement("h3");
-      h3.textContent = "Nodes";
-      section.appendChild(h3);
+    // ---- Cytoscape graph ----
 
-      const table = document.createElement("div");
-      table.className = "node-table";
-      for (const n of nodes) {
-        const row = document.createElement("div");
-        row.className = "node-row";
-        const statusClass = n.status === "Ready" ? "ok" : "err";
-        const roles = n.roles && n.roles.length ? n.roles.join(", ") : "worker";
-        row.innerHTML = `
-          <span class="node-name">${this._esc(n.name)}</span>
-          <span class="node-roles">${this._esc(roles)}</span>
-          <span class="badge ${statusClass}">${this._esc(n.status)}</span>
-        `;
-        table.appendChild(row);
+    _renderGraph(container, c) {
+      const elements = [];
+
+      // Cluster root node
+      elements.push({
+        data: { id: "cluster", label: c.context || "cluster", type: "cluster" },
+      });
+
+      // K8s nodes
+      for (const n of (c.nodes || [])) {
+        const nodeId = `node:${n.name}`;
+        elements.push({
+          data: {
+            id: nodeId,
+            label: n.name,
+            status: n.status,
+            roles: (n.roles || []).join(", ") || "worker",
+            parent: "cluster",
+            type: "knode",
+          },
+        });
       }
-      section.appendChild(table);
-      return section;
-    },
 
-    _clusterNamespaces(namespaces) {
-      const section = document.createElement("div");
-      section.className = "cluster-section";
-      const h3 = document.createElement("h3");
-      h3.textContent = "Namespaces";
-      section.appendChild(h3);
+      // Namespaces + pods
+      for (const ns of (c.namespaces || [])) {
+        const nsId = `ns:${ns.name}`;
+        const pods = ns.pods || [];
+        elements.push({
+          data: {
+            id: nsId,
+            label: ns.name,
+            podCount: pods.length,
+            type: "namespace",
+            expanded: false,
+          },
+        });
 
-      const pills = document.createElement("div");
-      pills.className = "ns-pills";
-      for (const ns of namespaces) {
-        const wrapper = document.createElement("div");
-        wrapper.className = "ns-wrapper";
+        // Edge: cluster → namespace
+        elements.push({
+          data: { source: "cluster", target: nsId, type: "ns-edge" },
+        });
 
-        const pill = document.createElement("button");
-        pill.className = "ns-pill";
-        pill.type = "button";
-        const podCount = (ns.pods || []).length;
-        pill.innerHTML = `${this._esc(ns.name)} <span class="ns-count">${podCount}</span>`;
-        // Default to expanded so pods are visible without clicking
-        wrapper.classList.add("expanded");
-        pill.setAttribute("aria-expanded", "true");
-        pill.onclick = function () {
-          const isExpanded = wrapper.classList.toggle("expanded");
-          pill.setAttribute("aria-expanded", String(isExpanded));
-        };
-        wrapper.appendChild(pill);
-
-        if (ns.pods && ns.pods.length) {
-          const podList = document.createElement("div");
-          podList.className = "pod-list";
-          for (const pod of ns.pods) {
-            const row = document.createElement("div");
-            row.className = "pod-row";
-            const statusClass = pod.status === "Running" ? "ok" : pod.status === "Succeeded" ? "ok" : "warn";
-            row.innerHTML = `
-              <span class="pod-name">${this._esc(pod.name)}</span>
-              <span class="badge ${statusClass}">${this._esc(pod.status)}</span>
-            `;
-            podList.appendChild(row);
-          }
-          wrapper.appendChild(podList);
-        } else {
-          const empty = document.createElement("div");
-          empty.className = "pod-list pod-empty";
-          empty.textContent = "no pods";
-          wrapper.appendChild(empty);
+        // Pod nodes (initially hidden — collapsed by default)
+        for (const pod of pods) {
+          const podId = `pod:${ns.name}:${pod.name}`;
+          elements.push({
+            data: {
+              id: podId,
+              label: pod.name,
+              status: pod.status,
+              parentNS: nsId,
+              type: "pod",
+            },
+            classes: "hidden-pod",
+          });
+          elements.push({
+            data: { source: nsId, target: podId, type: "pod-edge" },
+            classes: "hidden-edge",
+          });
         }
-
-        pills.appendChild(wrapper);
       }
-      section.appendChild(pills);
-      return section;
+
+      const cy = cytoscape({
+        container: container,
+        elements: elements,
+        minZoom: 0.3,
+        maxZoom: 3,
+        wheelSensitivity: 0.2,
+        style: [
+          // Cluster compound node
+          {
+            selector: 'node[type="cluster"]',
+            style: {
+              "background-color": "rgba(50, 108, 229, 0.08)",
+              "border-color": "#326ce5",
+              "border-width": 2,
+              "border-opacity": 0.4,
+              label: "data(label)",
+              color: "#93a4ba",
+              "font-size": 11,
+              "font-weight": 600,
+              "text-valign": "top",
+              "text-margin-y": 8,
+              "text-transform": "uppercase",
+              "letter-spacing": "1px",
+              shape: "round-rectangle",
+              padding: 30,
+            },
+          },
+          // K8s node (inside cluster compound)
+          {
+            selector: 'node[type="knode"]',
+            style: {
+              "background-color": function (ele) {
+                return ele.data("status") === "Ready" ? "#2ea043" : "#d29922";
+              },
+              "background-opacity": 0.2,
+              "border-color": function (ele) {
+                return ele.data("status") === "Ready" ? "#2ea043" : "#d29922";
+              },
+              "border-width": 2,
+              label: "data(label)",
+              color: "#e6edf3",
+              "font-size": 11,
+              "font-weight": 600,
+              "text-valign": "center",
+              "text-halign": "center",
+              shape: "round-rectangle",
+              width: 140,
+              height: 40,
+            },
+          },
+          // Namespace nodes
+          {
+            selector: 'node[type="namespace"]',
+            style: {
+              "background-color": "#161e2c",
+              "border-color": "#243042",
+              "border-width": 2,
+              label: function (ele) {
+                const count = ele.data("podCount") || 0;
+                return ele.data("label") + "  (" + count + ")";
+              },
+              color: "#93a4ba",
+              "font-size": 12,
+              "font-weight": 600,
+              "font-family": "ui-monospace, SFMono-Regular, Menlo, monospace",
+              "text-valign": "center",
+              "text-halign": "center",
+              shape: "round-rectangle",
+              width: 180,
+              height: 44,
+              "overlay-padding": 4,
+              "overlay-opacity": 0,
+            },
+          },
+          // Namespace hover
+          {
+            selector: 'node[type="namespace"]:active',
+            style: {
+              "border-color": "#326ce5",
+              "overlay-color": "#326ce5",
+              "overlay-opacity": 0.1,
+              "overlay-padding": 6,
+              cursor: "pointer",
+            },
+          },
+          // Namespace cursor
+          {
+            selector: 'node[type="namespace"]',
+            style: { cursor: "pointer" },
+          },
+          // Pod nodes (visible when expanded)
+          {
+            selector: 'node[type="pod"]',
+            style: {
+              "background-color": function (ele) {
+                const s = ele.data("status");
+                if (s === "Running" || s === "Succeeded") return "rgba(46, 160, 67, 0.15)";
+                return "rgba(210, 153, 34, 0.15)";
+              },
+              "border-color": function (ele) {
+                const s = ele.data("status");
+                if (s === "Running" || s === "Succeeded") return "#2ea043";
+                return "#d29922";
+              },
+              "border-width": 1.5,
+              label: function (ele) {
+                const name = ele.data("label");
+                const trunc = name.length > 30 ? name.slice(0, 28) + "…" : name;
+                return trunc;
+              },
+              color: "#b8c8e0",
+              "font-size": 10,
+              "font-family": "ui-monospace, SFMono-Regular, Menlo, monospace",
+              "text-valign": "center",
+              "text-halign": "center",
+              shape: "round-rectangle",
+              width: 200,
+              height: 32,
+            },
+          },
+          // Hidden pods (collapsed)
+          {
+            selector: ".hidden-pod",
+            style: { display: "none" },
+          },
+          // Edges: k8s node → namespace
+          {
+            selector: 'edge[type="ns-edge"]',
+            style: {
+              width: 2,
+              "line-color": "#243042",
+              "target-arrow-color": "#243042",
+              "target-arrow-shape": "triangle",
+              "arrow-scale": 0.8,
+              "curve-style": "bezier",
+            },
+          },
+          // Edges: namespace → pod (visible when expanded)
+          {
+            selector: 'edge[type="pod-edge"]',
+            style: {
+              width: 1.5,
+              "line-color": "#1c2638",
+              "target-arrow-color": "#1c2638",
+              "target-arrow-shape": "triangle",
+              "arrow-scale": 0.7,
+              "curve-style": "bezier",
+            },
+          },
+          // Hidden edges (collapsed)
+          {
+            selector: ".hidden-edge",
+            style: { display: "none" },
+          },
+        ],
+        layout: {
+          name: "breadthfirst",
+          directed: true,
+          roots: "#cluster",
+          spacingFactor: 1.2,
+          padding: 20,
+          animate: true,
+          animationDuration: 400,
+        },
+      });
+
+      // Click namespace to expand/collapse pods
+      cy.on("tap", 'node[type="namespace"]', function (evt) {
+        const nsNode = evt.target;
+        const nsId = nsNode.id();
+        const isExpanded = nsNode.data("expanded");
+
+        const podsToToggle = cy.nodes().filter(function (n) {
+          return n.data("parentNS") === nsId;
+        });
+        const edgesToToggle = cy.edges().filter(function (e) {
+          return e.data("source") === nsId && e.data("type") === "pod-edge";
+        });
+
+        if (isExpanded) {
+          podsToToggle.addClass("hidden-pod");
+          edgesToToggle.addClass("hidden-edge");
+          nsNode.data("expanded", false);
+          nsNode.style("border-color", "#243042");
+        } else {
+          podsToToggle.removeClass("hidden-pod");
+          edgesToToggle.removeClass("hidden-edge");
+          nsNode.data("expanded", true);
+          nsNode.style("border-color", "#326ce5");
+          // Re-layout to accommodate new nodes
+          cy.layout({
+            name: "breadthfirst",
+            directed: true,
+            roots: "#cluster",
+            spacingFactor: 1.2,
+            padding: 20,
+            animate: true,
+            animationDuration: 300,
+          }).run();
+        }
+      });
+
+      // Hover tooltip for pods (appended to the wrapper, not the Cytoscape container)
+      const tip = document.createElement("div");
+      tip.className = "graph-tooltip";
+      tip.hidden = true;
+      container.parentElement.appendChild(tip);
+
+      cy.on("mouseover", 'node[type="pod"]', function (evt) {
+        const d = evt.target.data();
+        tip.innerHTML = `<strong>${this._esc(d.label)}</strong><br><span class="badge ${d.status === "Running" || d.status === "Succeeded" ? "ok" : "warn"}">${d.status}</span>`;
+        tip.hidden = false;
+        const pos = evt.renderedPosition;
+        tip.style.left = pos.x + 10 + "px";
+        tip.style.top = pos.y - 30 + "px";
+      }.bind(this));
+      cy.on("mouseout", 'node[type="pod"]', function () {
+        tip.hidden = true;
+      });
     },
 
     // ---------- Docs tab (tool status) ----------
