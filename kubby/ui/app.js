@@ -426,9 +426,9 @@
         } else {
           // Add pod nodes and edges to graph
           const newEles = [];
-          for (var i = 0; i < podData.length; i++) {
-            var pod = podData[i];
-            var podId = "pod:" + nsNode.data("label") + ":" + pod.name;
+          for (let i = 0; i < podData.length; i++) {
+            const pod = podData[i];
+            const podId = "pod:" + nsNode.data("label") + ":" + pod.name;
             newEles.push({
               group: "nodes",
               data: {
