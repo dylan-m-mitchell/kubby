@@ -679,7 +679,7 @@ main {
 
 .graph-container {
   flex: 1;
-  min-height: 200px;
+  min-height: 0;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
