@@ -19,30 +19,7 @@
 
   <main>
     <section class="cards" id="cards" aria-live="polite"></section>
-
-    <section class="log-panel" id="log-panel" hidden>
-      <div class="log-header">
-        <h2 id="log-title">install log</h2>
-        <button class="ghost" id="log-clear" type="button">clear</button>
-      </div>
-      <pre class="log" id="log"></pre>
-    </section>
   </main>
-
-  <div class="modal-backdrop" id="confirm-modal" hidden>
-    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
-      <h2 id="confirm-title">install minikube?</h2>
-      <p id="confirm-body">
-        kubui will request permission to install <strong>minikube</strong> using
-        <span id="confirm-pm">apt</span>.
-      </p>
-      <p class="note" id="confirm-note"></p>
-      <div class="modal-actions">
-        <button class="ghost" id="confirm-cancel" type="button">cancel</button>
-        <button class="primary" id="confirm-proceed" type="button">install</button>
-      </div>
-    </div>
-  </div>
 
   <div class="toast" id="toast" hidden></div>
 
