@@ -110,7 +110,7 @@
       this.els.meta.textContent = `${info.platform} · ${pm} · ${elv}`;
     },
 
-    // ---------- Cluster tab (graph view) ----------
+    // ---------- Cluster tab (table view) ----------
 
     renderCluster() {
       const el = this.els.clusterContent;
@@ -132,17 +132,15 @@
       el.appendChild(this._clusterHero(c));
       el.appendChild(this._clusterMetrics(c));
 
-      // Graph container
-      const graphWrap = document.createElement("div");
-      graphWrap.className = "graph-container";
-      const graphEl = document.createElement("div");
-      graphEl.id = "cluster-graph";
-      graphEl.className = "graph";
-      graphWrap.appendChild(graphEl);
-      el.appendChild(graphWrap);
+      // Nodes table
+      if (c.nodes && c.nodes.length) {
+        el.appendChild(this._clusterNodes(c.nodes));
+      }
 
-      // Build graph
-      this._renderGraph(graphEl, c);
+      // Namespaces with expandable pod lists
+      if (c.namespaces && c.namespaces.length) {
+        el.appendChild(this._clusterNamespaces(c.namespaces));
+      }
     },
 
     _clusterOffline(error) {
@@ -200,204 +198,85 @@
       return grid;
     },
 
-    // ---- Cytoscape graph ----
+    // ---- Table views ----
 
-    _renderGraph(container, c) {
-      const elements = [];
+    _clusterNodes(nodes) {
+      const section = document.createElement("div");
+      section.className = "cluster-section";
+      const h3 = document.createElement("h3");
+      h3.textContent = "Nodes";
+      section.appendChild(h3);
 
-      // Each namespace is a top-level node — no cluster/k8s-node wrapper
-      for (const ns of (c.namespaces || [])) {
-        const nsId = `ns:${ns.name}`;
-        const pods = ns.pods || [];
-        elements.push({
-          data: {
-            id: nsId,
-            label: ns.name,
-            podCount: pods.length,
-            type: "namespace",
-            expanded: false,
-            _pods: pods,
-          },
-        });
+      const table = document.createElement("div");
+      table.className = "node-table";
+      for (const n of nodes) {
+        const row = document.createElement("div");
+        row.className = "node-row";
+        const statusClass = n.status === "Ready" ? "ok" : "err";
+        const roles = n.roles && n.roles.length ? n.roles.join(", ") : "worker";
+        row.innerHTML = `
+          <span class="node-name">${this._esc(n.name)}</span>
+          <span class="node-roles">${this._esc(roles)}</span>
+          <span class="badge ${statusClass}">${this._esc(n.status)}</span>
+        `;
+        table.appendChild(row);
       }
+      section.appendChild(table);
+      return section;
+    },
 
-      const cy = cytoscape({
-        container: container,
-        elements: elements,
-        minZoom: 0.3,
-        maxZoom: 3,
-        wheelSensitivity: 0.2,
-        style: [
-          // Namespace nodes (top-level, root of each sub-graph)
-          {
-            selector: 'node[type="namespace"]',
-            style: {
-              "background-color": "#161e2c",
-              "border-color": "#243042",
-              "border-width": 2,
-              label: function (ele) {
-                const count = ele.data("podCount") || 0;
-                return ele.data("label") + "  (" + count + ")";
-              },
-              color: "#93a4ba",
-              "font-size": 12,
-              "font-weight": 600,
-              "font-family": "ui-monospace, SFMono-Regular, Menlo, monospace",
-              "text-valign": "center",
-              "text-halign": "center",
-              shape: "round-rectangle",
-              width: 180,
-              height: 44,
-              "overlay-padding": 4,
-              "overlay-opacity": 0,
-            },
-          },
-          // Namespace hover
-          {
-            selector: 'node[type="namespace"]:active',
-            style: {
-              "border-color": "#326ce5",
-              "overlay-color": "#326ce5",
-              "overlay-opacity": 0.1,
-              "overlay-padding": 6,
-              cursor: "pointer",
-            },
-          },
-          // Namespace cursor
-          {
-            selector: 'node[type="namespace"]',
-            style: { cursor: "pointer" },
-          },
-          // Pod nodes (visible when expanded)
-          {
-            selector: 'node[type="pod"]',
-            style: {
-              "background-color": function (ele) {
-                const s = ele.data("status");
-                if (s === "Running" || s === "Succeeded") return "rgba(46, 160, 67, 0.15)";
-                return "rgba(210, 153, 34, 0.15)";
-              },
-              "border-color": function (ele) {
-                const s = ele.data("status");
-                if (s === "Running" || s === "Succeeded") return "#2ea043";
-                return "#d29922";
-              },
-              "border-width": 1.5,
-              label: function (ele) {
-                const name = ele.data("label");
-                const trunc = name.length > 30 ? name.slice(0, 28) + "…" : name;
-                return trunc;
-              },
-              color: "#b8c8e0",
-              "font-size": 10,
-              "font-family": "ui-monospace, SFMono-Regular, Menlo, monospace",
-              "text-valign": "center",
-              "text-halign": "center",
-              shape: "round-rectangle",
-              width: 200,
-              height: 32,
-            },
-          },
-          // Edges: namespace → pod (dynamically added)
-          {
-            selector: 'edge[type="pod-edge"]',
-            style: {
-              width: 1.5,
-              "line-color": "#1c2638",
-              "target-arrow-color": "#1c2638",
-              "target-arrow-shape": "triangle",
-              "arrow-scale": 0.7,
-              "curve-style": "bezier",
-            },
-          },
-        ],
-        layout: {
-          name: "grid",
-          padding: 30,
-          animate: true,
-          animationDuration: 400,
-          avoidOverlap: true,
-          condense: true,
-          rows: undefined,
-        },
-      });
+    _clusterNamespaces(namespaces) {
+      const section = document.createElement("div");
+      section.className = "cluster-section";
+      const h3 = document.createElement("h3");
+      h3.textContent = "Namespaces";
+      section.appendChild(h3);
 
-      // Handle container sizing
-      requestAnimationFrame(function () {
-        cy.resize();
-        cy.fit(undefined, 30);
-      });
+      for (const ns of namespaces) {
+        const nsBlock = document.createElement("div");
+        nsBlock.className = "ns-block";
 
-      // Click namespace to expand/collapse pods (dynamically add/remove)
-      cy.on("tap", 'node[type="namespace"]', function (evt) {
-        const nsNode = evt.target;
-        const nsId = nsNode.id();
-        const isExpanded = nsNode.data("expanded");
-        const podData = nsNode.data("_pods") || [];
+        // Namespace header (clickable to expand pods)
+        const header = document.createElement("div");
+        header.className = "ns-header";
+        const podCount = (ns.pods || []).length;
+        header.innerHTML = `
+          <span class="ns-chevron">▸</span>
+          <span class="ns-name">${this._esc(ns.name)}</span>
+          <span class="badge info">${podCount} pod${podCount !== 1 ? "s" : ""}</span>
+        `;
+        header.onclick = function () {
+          const expanded = nsBlock.classList.toggle("expanded");
+          const chevron = header.querySelector(".ns-chevron");
+          chevron.textContent = expanded ? "▾" : "▸";
+        };
+        nsBlock.appendChild(header);
 
-        if (isExpanded) {
-          // Remove pod nodes and edges from graph
-          const podsToRemove = cy.nodes().filter(function (n) {
-            return n.data("parentNS") === nsId;
-          });
-          cy.remove(podsToRemove); // also removes connected edges
-          nsNode.data("expanded", false);
-          nsNode.style("border-color", "#243042");
+        // Pod table (hidden by default)
+        const podTable = document.createElement("div");
+        podTable.className = "pod-table";
+        const pods = ns.pods || [];
+        if (pods.length === 0) {
+          const empty = document.createElement("div");
+          empty.className = "pod-empty-row";
+          empty.textContent = "No pods";
+          podTable.appendChild(empty);
         } else {
-          // Add pod nodes and edges to graph
-          const newEles = [];
-          for (let i = 0; i < podData.length; i++) {
-            const pod = podData[i];
-            const podId = "pod:" + nsNode.data("label") + ":" + pod.name;
-            newEles.push({
-              group: "nodes",
-              data: {
-                id: podId,
-                label: pod.name,
-                status: pod.status,
-                parentNS: nsId,
-                type: "pod",
-              },
-            });
-            newEles.push({
-              group: "edges",
-              data: { source: nsId, target: podId, type: "pod-edge" },
-            });
+          for (const pod of pods) {
+            const row = document.createElement("div");
+            row.className = "pod-row";
+            const statusClass = (pod.status === "Running" || pod.status === "Succeeded") ? "ok" : "warn";
+            row.innerHTML = `
+              <span class="pod-name">${this._esc(pod.name)}</span>
+              <span class="badge ${statusClass}">${this._esc(pod.status)}</span>
+            `;
+            podTable.appendChild(row);
           }
-          cy.add(newEles);
-          nsNode.data("expanded", true);
-          nsNode.style("border-color", "#326ce5");
         }
-
-        // Re-layout
-        cy.layout({
-          name: "grid",
-          padding: 30,
-          animate: true,
-          animationDuration: 300,
-          avoidOverlap: true,
-          condense: true,
-        }).run();
-        cy.fit(undefined, 30);
-      });
-
-      // Hover tooltip for pods (appended to the wrapper, not the Cytoscape container)
-      const tip = document.createElement("div");
-      tip.className = "graph-tooltip";
-      tip.hidden = true;
-      container.parentElement.appendChild(tip);
-
-      cy.on("mouseover", 'node[type="pod"]', function (evt) {
-        const d = evt.target.data();
-        tip.innerHTML = `<strong>${this._esc(d.label)}</strong><br><span class="badge ${d.status === "Running" || d.status === "Succeeded" ? "ok" : "warn"}">${d.status}</span>`;
-        tip.hidden = false;
-        const pos = evt.renderedPosition;
-        tip.style.left = pos.x + 10 + "px";
-        tip.style.top = pos.y - 30 + "px";
-      }.bind(this));
-      cy.on("mouseout", 'node[type="pod"]', function () {
-        tip.hidden = true;
-      });
+        nsBlock.appendChild(podTable);
+        section.appendChild(nsBlock);
+      }
+      return section;
     },
 
     // ---------- Docs tab (tool status) ----------

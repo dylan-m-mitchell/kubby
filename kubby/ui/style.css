@@ -667,54 +667,100 @@ main {
   font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
 }
 
-/* ---------- graph view ---------- */
+/* ---------- namespace blocks (expandable) ---------- */
 
-#cluster-content {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.graph-container {
-  flex: 1;
-  min-height: 0;
-  background: var(--bg);
+.ns-block {
+  background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
-  position: relative;
-  animation: fade-in 300ms ease-out;
+  animation: fade-in 300ms ease-out backwards;
 }
 
-.graph {
-  width: 100%;
-  height: 100%;
+.ns-block + .ns-block {
+  margin-top: 8px;
 }
 
-.graph-tooltip {
-  position: absolute;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 12px;
+.ns-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  cursor: pointer;
+  transition: background 120ms;
+}
+
+.ns-header:hover {
+  background: rgba(50, 108, 229, 0.05);
+}
+
+.ns-chevron {
   font-size: 12px;
-  color: var(--text);
-  pointer-events: none;
-  z-index: 5;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-  white-space: nowrap;
+  color: var(--text-muted);
+  width: 14px;
+  text-align: center;
+  transition: color 120ms;
 }
 
-.graph-tooltip strong {
-  display: block;
-  margin-bottom: 4px;
+.ns-block.expanded .ns-chevron {
+  color: var(--accent);
+}
+
+.ns-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
   font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
-  font-size: 11px;
-  word-break: break-all;
-  white-space: normal;
-  max-width: 260px;
+  flex: 1;
+}
+
+.pod-table {
+  display: none;
+  border-top: 1px solid var(--border-soft);
+}
+
+.ns-block.expanded .pod-table {
+  display: block;
+}
+
+.pod-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px 8px 40px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.pod-row:last-child {
+  border-bottom: none;
+}
+
+.pod-name {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pod-row .badge {
+  font-size: 10px;
+  padding: 2px 7px;
+}
+
+.pod-row .badge.warn {
+  background: rgba(210, 153, 34, 0.12);
+  color: var(--warn);
+  border: 1px solid rgba(210, 153, 34, 0.3);
+}
+
+.pod-empty-row {
+  padding: 10px 16px 10px 40px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
 }
 
 /* ---------- scrollbar (webkit only — the GTK webview supports this) ---------- */
