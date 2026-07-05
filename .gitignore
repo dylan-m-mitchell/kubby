@@ -39,9 +39,3 @@ debian/files
 *.buildinfo
 *.changes
 debian/debhelper-build-stamp
-
-# also match leftover artifacts under the previous package name (`kubui`)
-debian/kubui/
-debian/kubui-venv/
-debian/kubui.debhelper.log
-debian/kubui.substvars
