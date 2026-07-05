@@ -30,10 +30,10 @@ Thumbs.db
 
 # Debian build artifacts
 debian/.debhelper/
-debian/kubui/
-debian/kubui-venv/
-debian/kubui.debhelper.log
-debian/kubui.substvars
+debian/kubby/
+debian/kubby-venv/
+debian/kubby.debhelper.log
+debian/kubby.substvars
 debian/files
 *.deb
 *.buildinfo

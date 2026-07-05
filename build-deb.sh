@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# build-deb.sh — Build the kubui .deb package (developer script).
+# build-deb.sh — Build the kubby .deb package (developer script).
 #
 # This is a DEVELOPER tool. End users should install a pre-built .deb with:
-#   sudo apt install ./kubui_*.deb
+#   sudo apt install ./kubby_*.deb
 #
 # Usage:
 #   bash build-deb.sh
@@ -12,7 +12,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo "==> kubui .deb build"
+echo "==> kubby .deb build"
 
 # ── 1. Build dependencies (tools needed to compile/package, NOT runtime deps) ─
 echo "==> 1/2. Installing build dependencies"
@@ -30,7 +30,7 @@ sudo apt-get install -y \
 echo "==> 2/2. Building the .deb"
 dpkg-buildpackage -us -uc -b
 
-DEB_FILE="$(ls -1 ../kubui_*.deb 2>/dev/null | head -1 || true)"
+DEB_FILE="$(ls -1 ../kubby_*.deb 2>/dev/null | head -1 || true)"
 if [[ -z "$DEB_FILE" ]]; then
     echo "error: .deb not found after build" >&2
     exit 1
