@@ -266,7 +266,7 @@ class KubbyAPI:
 
                 def _drain(stream) -> None:
                     for line in iter(stream.readline, ""):
-                        self._emit_log(line.rstrip("\\r\\n"))
+                        self._emit_log(line.rstrip("\r\n"))
 
                 t_out = threading.Thread(target=_drain, args=(proc.stdout,), daemon=True)
                 t_err = threading.Thread(target=_drain, args=(proc.stderr,), daemon=True)

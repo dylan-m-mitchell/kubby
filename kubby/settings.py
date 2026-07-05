@@ -71,7 +71,11 @@ def load() -> dict[str, Any]:
         return defaults
     if not isinstance(data, dict):
         return defaults
-    return _deep_merge(defaults, data)
+    result = _deep_merge(defaults, data)
+    # Ensure minikube is always a dict, even if disk data clobbered it
+    if not isinstance(result.get("minikube"), dict):
+        result["minikube"] = copy.deepcopy(DEFAULT_MINIKUBE)
+    return result
 
 
 def save(settings: dict[str, Any]) -> None:
