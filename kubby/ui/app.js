@@ -3,7 +3,7 @@
 
   const kubby = {
     els: {},
-    state: { info: null, tools: [], cluster: null, activeTab: "cluster" },
+    state: { tools: [], cluster: null, activeTab: "cluster" },
 
     init() {
       this.cache();
@@ -25,7 +25,6 @@
         tabDocs: id("tab-docs"),
         clusterContent: id("cluster-content"),
         cards: id("cards"),
-        meta: id("meta"),
         refresh: id("refresh"),
         toast: id("toast"),
       };
@@ -81,9 +80,7 @@
         this.els.clusterContent.innerHTML = "";
         this.els.clusterContent.appendChild(this._skeleton(2));
 
-        this.state.info = await window.pywebview.api.system_info();
         this.state.tools = await window.pywebview.api.get_status();
-        this.renderMeta();
         // Always load cluster on startup (it's the default tab)
         await this.loadCluster();
         this.renderDocsCards();
@@ -101,13 +98,6 @@
         this.state.cluster = { running: false, error: String(err) };
         this.renderCluster();
       }
-    },
-
-    renderMeta() {
-      const info = this.state.info;
-      const pm = info.package_manager_label || "no package manager";
-      const elv = info.elevation || "";
-      this.els.meta.textContent = `${info.platform} · ${pm} · ${elv}`;
     },
 
     // ---------- Cluster tab (table view) ----------
@@ -147,7 +137,7 @@
       const wrap = document.createElement("div");
       wrap.className = "cluster-offline";
       wrap.innerHTML = `
-        <div class="offline-icon">⎈</div>
+        <div class="offline-icon">🐾</div>
         <h2>No cluster connected</h2>
         <p class="offline-error">${this._esc(error || "Could not reach any Kubernetes cluster")}</p>
         <p class="offline-hint">Start a cluster with <code>minikube start</code> or connect to one, then hit Re-check.</p>
