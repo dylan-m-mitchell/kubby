@@ -141,11 +141,17 @@
 
       if (!c.running) {
         el.appendChild(this._clusterOffline(c.error));
+        if (this.state.minikubeJobRunning) {
+          el.appendChild(this._renderLogPanel());
+        }
         return;
       }
 
       // Status bar + metrics
       el.appendChild(this._clusterHero(c));
+      if (this.state.minikubeJobRunning) {
+        el.appendChild(this._renderLogPanel());
+      }
       el.appendChild(this._clusterMetrics(c));
 
       // Nodes table
@@ -166,7 +172,7 @@
         <div class="offline-icon">🐾</div>
         <h2>No cluster connected</h2>
         <p class="offline-error">${this._esc(error || "Could not reach any Kubernetes cluster")}</p>
-        <p class="offline-hint">No minikube cluster is running. Start one to spin up a local cluster.</p>
+        <p class="offline-hint">Start a cluster with <code>minikube start</code> (or connect to an existing one), then hit Re-check.</p>
       <div class="offline-actions">
         <button type="button" class="primary" data-action="start-cluster"${this.state.minikubeJobRunning ? " disabled" : ""}>${this.state.minikubeJobRunning ? (this.state.minikubeJobKind || "start") + " in progress…" : "Start minikube"}</button>
         <button type="button" class="ghost" data-action="open-settings"${this.state.minikubeJobRunning ? " disabled" : ""}>⚙ Settings</button>
