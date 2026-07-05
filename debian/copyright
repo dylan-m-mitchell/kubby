@@ -1,7 +1,7 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: kubui
 Upstream-Contact: Dylan <dlnmtchll@gmail.com>
-Source: https://github.com/dylan-m-mitchell/kubui
+Source: https://github.com/dylan/kubui
 
 Files: *
 Copyright: 2025 Dylan <dlnmtchll@gmail.com>

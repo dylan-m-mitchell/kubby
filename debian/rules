@@ -24,7 +24,8 @@ override_dh_auto_build:
 	# pywebview is installed in a separate step below (requires network).
 	$(VENV_BUILD)/bin/pip install --no-cache-dir --no-build-isolation --no-deps .
 	# Install runtime dependencies from vendored wheels (no network needed).
-	# pywebview is not packaged in Debian/Ubuntu, so we vendor the wheel.
+	# pywebview and its transitive deps (proxy_tools, bottle, typing_extensions)
+	# are not guaranteed on every target, so we vendor all the wheels.
 	$(VENV_BUILD)/bin/pip install --no-cache-dir --no-index --find-links=debian/vendor 'pywebview>=6.2.1'
 
 # ── install ──────────────────────────────────────────────────────────
