@@ -5,27 +5,26 @@ Each `Tool` carries:
 - friendly `label` and `description` (shown in the UI)
 - argv that, when run as `<key> <version_args>`, prints the tool's version
 - a `parse_version` callable that extracts a `MAJOR.MINOR[.PATCH]` string
-- a dict mapping package-manager key → argv-tuple install commands
+- exactly one of:
+    * `install_script` — a `sh -c` snippet that installs the tool via its
+      official upstream installer (minikube, helm, kubectl).
+    * `pkg_name` — the host package-manager name, for tools that ship in
+      the OS repo and have no upstream shell installer (podman).
 
-Notes on install commands:
-- For apt-based systems we use the upstream-shipped shell scripts (minikube, helm)
-  or the upstream kubectl direct-download. This avoids needing to add 3rd-party
-  apt repos from the installer. If a user needs an airgapped repo-only setup,
-  they can run the official installation manually.
-- Each tuple in `install_commands[pm]` is run as a separate subprocess (so a
-  failed `mkdir` won't hide a successful install that came after, etc.).
+We deliberately avoid host-PM-keyed dicts of install commands now that the
+delivery is binary rather than .deb: the upstream scripts are PM-agnostic
+on Linux, and the one tool that needs the PM (podman) only ships there.
 """
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
 APT = "apt"
 DNF = "dnf"
 PACMAN = "pacman"
 ZYPPER = "zypper"
-BREW = "brew"
 
 
 @dataclass(frozen=True)
@@ -36,9 +35,23 @@ class Tool:
     website: str
     version_args: tuple[str, ...]
     parse_version: Callable[[str], str | None]
-    install_commands: dict[str, tuple[tuple[str, ...], ...]] = field(
-        default_factory=dict
-    )
+    # `sh -c` snippet that installs the tool, run with elevation. Exactly
+    # one of `install_script` / `pkg_name` should be set per tool.
+    install_script: str | None = None
+    # Host-PM package name (used for tools with no upstream shell installer,
+    # e.g. podman). `linux.pkg_install_argv()` turns this into argv.
+    pkg_name: str | None = None
+
+    def __post_init__(self) -> None:
+        # Enforce the "exactly one of install_script/pkg_name" invariant at
+        # construction so a future Tool entry can't accidentally have both
+        # (silent script-wins) or neither (silent install failure).
+        if (self.install_script is None) == (self.pkg_name is None):
+            raise ValueError(
+                f"Tool {self.key!r} must set exactly one of install_script "
+                f"or pkg_name (got install_script={self.install_script!r}, "
+                f"pkg_name={self.pkg_name!r})"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -64,78 +77,32 @@ def _parse_kubectl(out: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Per-package-manager install command sets
+# Install scripts (run via `sh -c` with elevation)
 # ---------------------------------------------------------------------------
 
 
-# minikube is not in Debian/Fedora base repos; use the upstream installer script.
-MINIKUBE_INSTALL: dict[str, tuple[tuple[str, ...], ...]] = {
-    APT: (
-        (
-            "sh",
-            "-c",
-            "curl -fsSL https://minikube.sigs.k8s.io/scripts/install.sh | sh -",
-        ),
-    ),
-    DNF: (
-        (
-            "sh",
-            "-c",
-            "curl -fsSL https://minikube.sigs.k8s.io/scripts/install.sh | sh -",
-        ),
-    ),
-    BREW: (("brew", "install", "minikube"),),
-}
+# minikube ships an official shell installer at minikube.sigs.k8s.io.
+MINIKUBE_INSTALL_SCRIPT = (
+    "curl -fsSL https://minikube.sigs.k8s.io/scripts/install.sh | sh -"
+)
 
 
-HELM_INSTALL: dict[str, tuple[tuple[str, ...], ...]] = {
-    APT: (
-        (
-            "sh",
-            "-c",
-            "curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sh -",
-        ),
-    ),
-    DNF: (("dnf", "install", "-y", "helm"),),
-    PACMAN: (("pacman", "-S", "--noconfirm", "helm"),),
-    BREW: (("brew", "install", "helm"),),
-}
+# helm's official installer is the get-helm-3 script.
+HELM_INSTALL_SCRIPT = (
+    "curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sh -"
+)
 
 
-PODMAN_INSTALL: dict[str, tuple[tuple[str, ...], ...]] = {
-    APT: (("apt-get", "install", "-y", "podman"),),
-    DNF: (("dnf", "install", "-y", "podman"),),
-    PACMAN: (("pacman", "-S", "--noconfirm", "podman"),),
-    BREW: (("brew", "install", "podman"),),
-}
-
-
-# kubectl is installed to /usr/local/bin via the official Google download.
-KUBECTL_INSTALL: dict[str, tuple[tuple[str, ...], ...]] = {
-    APT: (
-        (
-            "sh",
-            "-c",
-            'set -e; '
-            'KUBECTL_VERSION=$(curl -fsSL https://dl.k8s.io/release/stable.txt); '
-            'curl -fsSLo /usr/local/bin/kubectl '
-            '"https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"; '
-            'chmod +x /usr/local/bin/kubectl',
-        ),
-    ),
-    DNF: (
-        (
-            "sh",
-            "-c",
-            'set -e; '
-            'KUBECTL_VERSION=$(curl -fsSL https://dl.k8s.io/release/stable.txt); '
-            'curl -fsSLo /usr/local/bin/kubectl '
-            '"https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"; '
-            'chmod +x /usr/local/bin/kubectl',
-        ),
-    ),
-    BREW: (("brew", "install", "kubernetes-cli"),),
-}
+# kubectl is distributed as a single static binary; download the latest
+# stable version to /usr/local/bin and chmod +x. Uses the official
+# dl.k8s.io URLs.
+KUBECTL_INSTALL_SCRIPT = (
+    "set -e; "
+    "KUBECTL_VERSION=$(curl -fsSL https://dl.k8s.io/release/stable.txt); "
+    "curl -fsSLo /usr/local/bin/kubectl "
+    "\"https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl\"; "
+    "chmod +x /usr/local/bin/kubectl"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +118,7 @@ TOOLS: dict[str, Tool] = {
         website="https://minikube.sigs.k8s.io/",
         version_args=("version", "--short"),
         parse_version=_parse_semver_token(),
-        install_commands=MINIKUBE_INSTALL,
+        install_script=MINIKUBE_INSTALL_SCRIPT,
     ),
     "helm": Tool(
         key="helm",
@@ -160,7 +127,7 @@ TOOLS: dict[str, Tool] = {
         website="https://helm.sh/",
         version_args=("version", "--short"),
         parse_version=_parse_semver_token(),
-        install_commands=HELM_INSTALL,
+        install_script=HELM_INSTALL_SCRIPT,
     ),
     "podman": Tool(
         key="podman",
@@ -169,7 +136,7 @@ TOOLS: dict[str, Tool] = {
         website="https://podman.io/",
         version_args=("--version",),
         parse_version=_parse_semver_token("podman version "),
-        install_commands=PODMAN_INSTALL,
+        pkg_name="podman",
     ),
     "kubectl": Tool(
         key="kubectl",
@@ -178,6 +145,6 @@ TOOLS: dict[str, Tool] = {
         website="https://kubernetes.io/docs/reference/kubectl/",
         version_args=("version", "--client"),
         parse_version=_parse_kubectl,
-        install_commands=KUBECTL_INSTALL,
+        install_script=KUBECTL_INSTALL_SCRIPT,
     ),
 }

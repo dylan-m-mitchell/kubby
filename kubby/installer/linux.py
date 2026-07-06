@@ -6,8 +6,6 @@ Privilege escalation order (first match wins):
 3. **sudo** — last-resort fallback; on a tty-less subprocess it will fail
    immediately with a useful error if the user can't authenticate.
 
-brew (Linuxbrew) is special-cased: it installs into the user's prefix, so it
-does not need elevation.
 """
 from __future__ import annotations
 
@@ -17,7 +15,7 @@ import subprocess
 from typing import Tuple
 
 # Re-export the package-manager constants for convenience.
-from kubby.installer.tools import APT, DNF, PACMAN, ZYPPER, BREW  # noqa: F401
+from kubby.installer.tools import APT, DNF, PACMAN, ZYPPER  # noqa: F401
 
 _INSTALL_TIMEOUT_S = 600
 
@@ -25,13 +23,10 @@ _INSTALL_TIMEOUT_S = 600
 def detect_package_manager() -> Tuple[str, str]:
     """Return `(key, human_label)` for the host's package manager.
 
-    Preference order: Homebrew (Linuxbrew works everywhere) → apt → dnf →
-    pacman → zypper.
+    Preference order: apt → dnf → pacman → zypper.
 
     Raises RuntimeError if no supported manager is on PATH.
     """
-    if shutil.which("brew"):
-        return BREW, "Homebrew (Linuxbrew)"
     if shutil.which("apt-get"):
         return APT, "APT (Debian/Ubuntu)"
     if shutil.which("dnf"):
@@ -42,7 +37,7 @@ def detect_package_manager() -> Tuple[str, str]:
         return ZYPPER, "zypper (openSUSE)"
     raise RuntimeError(
         "No supported package manager found. kubby supports apt, dnf, pacman, "
-        "zypper, or Homebrew on Linux."
+        "or zypper on Linux."
     )
 
 
@@ -66,12 +61,6 @@ def run_elevated(cmd: tuple[str, ...]) -> subprocess.CompletedProcess:
     """
     argv = list(cmd)
 
-    # Linuxbrew installs into ~/.linuxbrew; no elevation needed.
-    if argv and argv[0] == "brew":
-        return subprocess.run(
-            argv, capture_output=True, text=True, timeout=_INSTALL_TIMEOUT_S
-        )
-
     if os.geteuid() == 0:
         return subprocess.run(
             argv, capture_output=True, text=True, timeout=_INSTALL_TIMEOUT_S
@@ -92,4 +81,26 @@ def run_elevated(cmd: tuple[str, ...]) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         timeout=_INSTALL_TIMEOUT_S,
+    )
+
+
+def pkg_install_argv(pm_key: str, pkg_name: str) -> tuple[str, ...]:
+    """Build the argv tuple to install `pkg_name` via the host package manager.
+
+    Used for tools that have no upstream shell installer (e.g. podman) and
+    must be pulled from the OS repo. Returns the argv as a tuple suitable
+    for `subprocess.run(...)` / `linux.run_elevated(...)`. Raises
+    `ValueError` for unsupported PMs — callers should display the error in
+    the UI log.
+    """
+    if pm_key == APT:
+        return ("apt-get", "install", "-y", pkg_name)
+    if pm_key == DNF:
+        return ("dnf", "install", "-y", pkg_name)
+    if pm_key == PACMAN:
+        return ("pacman", "-S", "--needed", "--noconfirm", pkg_name)
+    if pm_key == ZYPPER:
+        return ("zypper", "--non-interactive", "install", pkg_name)
+    raise ValueError(
+        f"kubby does not know how to install via package manager: {pm_key!r}"
     )

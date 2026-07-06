@@ -454,21 +454,32 @@ class KubbyAPI:
             log_lines.append(line)
             self._emit_log(line)
 
-        try:
-            pm_key, pm_label = linux.detect_package_manager()
-        except Exception as e:
-            emit(f"! {e}")
-            return {"ok": False, "log": "\n".join(log_lines), "error": str(e)}
-
-        commands = tool.install_commands.get(pm_key)
-        if not commands:
-            msg = f"No install procedure defined for package manager: {pm_label}"
+        # Two install paths, used in order of preference:
+        # 1. `install_script` — upstream-provided `sh -c` snippet, PM-agnostic.
+        # 2. `pkg_name` — host-PM install for tools with no upstream installer.
+        if tool.install_script:
+            commands: list[tuple[str, ...]] = [("sh", "-c", tool.install_script)]
+            emit(
+                f"Running upstream installer for {tool.label} via "
+                f"{linux.describe_elevation_method()}."
+            )
+        elif tool.pkg_name:
+            try:
+                pm_key, pm_label = linux.detect_package_manager()
+            except Exception as e:
+                emit(f"! {e}")
+                return {"ok": False, "log": "\n".join(log_lines), "error": str(e)}
+            try:
+                commands = [linux.pkg_install_argv(pm_key, tool.pkg_name)]
+            except ValueError as e:
+                msg = str(e)
+                emit(f"! {msg}")
+                return {"ok": False, "log": "\n".join(log_lines), "error": msg}
+            emit(f"Using package manager: {pm_label}")
+        else:
+            msg = f"No install procedure defined for {tool.label}"
             emit(f"! {msg}")
             return {"ok": False, "log": "\n".join(log_lines), "error": msg}
-
-        emit(f"Using package manager: {pm_label}")
-        emit(f"Will run {len(commands)} command(s) with elevation via "
-             f"{linux.describe_elevation_method()}.")
 
         for cmd in commands:
             emit(f"$ {' '.join(cmd)}")
