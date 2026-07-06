@@ -1,7 +1,0 @@
-kubby (0.1.0-1) unstable; urgency=medium
-
-  * Initial Debian packaging.
-  * Bundles kubectl, helm, and minikube as post-install downloads.
-  * Declares podman, GTK3, WebKit2, and GI as system dependencies.
-
- -- Dylan <dylan@example.com>  Fri, 04 Jul 2025 12:00:00 +0000
