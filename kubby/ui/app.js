@@ -534,7 +534,7 @@
      * backdrop/Cancel dismissals through the returned function so
      * focus restoration is consistent.
      */
-    _setupModalA11y(modal) {
+    _setupModalA11y(modal, escapeCloseFn) {
       modal.setAttribute("role", "dialog");
       modal.setAttribute("aria-modal", "true");
       const previouslyFocused = document.activeElement;
@@ -549,14 +549,23 @@
         modal.tabIndex = -1;
         modal.focus();
       }
-      // `currentCloseFn` is set by the returned wrapper below. The
-      // Escape handler invokes it so any dismiss path (backdrop click,
-      // Cancel, Confirm) closes the modal the same way.
-      let currentCloseFn = null;
+      // Every dismiss path (backdrop click, Cancel, Confirm, Escape)
+      // funnels through `wrappedClose`, which removes the keydown
+      // listener and restores focus before invoking the per-path
+      // closeFn. `escapeCloseFn` is what's called on Escape — pass it
+      // as `() => done(false)` in confirm-style dialogs so Escape
+      // always means Cancel even if the user just clicked Confirm.
+      const wrappedClose = (customCloseFn) => {
+        document.removeEventListener("keydown", onKey);
+        (customCloseFn || escapeCloseFn)();
+        if (previouslyFocused && previouslyFocused.focus) {
+          try { previouslyFocused.focus(); } catch (_) { /* element gone */ }
+        }
+      };
       const onKey = (e) => {
         if (e.key === "Escape") {
           e.stopPropagation();
-          if (currentCloseFn) currentCloseFn();
+          wrappedClose();
           return;
         }
         if (e.key !== "Tab") return;
@@ -578,20 +587,7 @@
       // Attach keydown to document (not backdrop) so Escape still works
       // when focus has drifted outside the modal entirely.
       document.addEventListener("keydown", onKey);
-      // Returned wrapper: callers invoke this with the per-path closeFn
-      // (e.g. `() => done(false)` for cancel, `() => done(true)` for
-      // confirm). All dismiss paths funnel through the same cleanup
-      // (remove listener + restore focus) so the confirm button also
-      // restores focus to the trigger that opened the modal.
-      return (closeFn) => {
-        currentCloseFn = () => {
-          document.removeEventListener("keydown", onKey);
-          closeFn();
-          if (previouslyFocused && previouslyFocused.focus) {
-            try { previouslyFocused.focus(); } catch (_) { /* element gone */ }
-          }
-        };
-      };
+      return wrappedClose;
     },
 
     _openSettings() {
@@ -657,10 +653,9 @@
       const addons = new Set(settings.addons || []);
       modal.querySelectorAll("[data-addon]").forEach((cb) => { cb.checked = addons.has(cb.dataset.addon); });
       const close = () => { root.innerHTML = ""; };
-      const a11yClose = this._setupModalA11y(modal);
-      a11yClose(close);
-      back.addEventListener("click", (e) => { if (e.target === back) a11yClose(close); });
-      modal.querySelector('[data-action="cancel"]').addEventListener("click", () => a11yClose(close));
+      const dismiss = this._setupModalA11y(modal, close);
+      back.addEventListener("click", (e) => { if (e.target === back) dismiss(); });
+      modal.querySelector('[data-action="cancel"]').addEventListener("click", () => dismiss());
       modal.querySelector('[data-action="save"]').addEventListener("click", () => {
         const errEl = modal.querySelector("#kubby-settings-error");
         errEl.hidden = true;
@@ -695,7 +690,7 @@
           return window.pywebview.api.get_minikube_prerequisites().then((p) => {
             this.state.minikubePrereqs = p;
             this.showToast("Settings saved", "warn");
-            a11yClose(close);
+            dismiss();
             this.renderCluster();
           });
         }).catch((e) => { errEl.textContent = String(e); errEl.hidden = false; });
@@ -722,11 +717,10 @@
       back.appendChild(modal);
       root.appendChild(back);
       const close = () => { root.innerHTML = ""; };
-      const a11yClose = this._setupModalA11y(modal);
-      a11yClose(close);
-      modal.querySelector('[data-action="close"]').addEventListener("click", () => a11yClose(close));
-      modal.querySelector('[data-action="settings"]').addEventListener("click", () => { a11yClose(close); this._openSettings(); });
-      back.addEventListener("click", (e) => { if (e.target === back) a11yClose(close); });
+      const dismiss = this._setupModalA11y(modal, close);
+      modal.querySelector('[data-action="close"]').addEventListener("click", () => dismiss());
+      modal.querySelector('[data-action="settings"]').addEventListener("click", () => { dismiss(); this._openSettings(); });
+      back.addEventListener("click", (e) => { if (e.target === back) dismiss(); });
     },
 
     _confirm(opts) {
@@ -747,11 +741,10 @@
         back.appendChild(modal);
         root.appendChild(back);
         const done = (val) => { root.innerHTML = ""; resolve(val); };
-        const a11yDone = this._setupModalA11y(modal);
-        a11yDone(() => done(false));
-        back.addEventListener("click", (e) => { if (e.target === back) a11yDone(() => done(false)); });
-        modal.querySelector('[data-action="cancel"]').addEventListener("click", () => a11yDone(() => done(false)));
-        modal.querySelector('[data-action="confirm"]').addEventListener("click", () => a11yDone(() => done(true)));
+        const dismissModal = this._setupModalA11y(modal, () => done(false));
+        back.addEventListener("click", (e) => { if (e.target === back) dismissModal(); });
+        modal.querySelector('[data-action="cancel"]').addEventListener("click", () => dismissModal());
+        modal.querySelector('[data-action="confirm"]').addEventListener("click", () => dismissModal(() => done(true)));
       });
     },
 
