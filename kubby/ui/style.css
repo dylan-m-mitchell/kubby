@@ -923,12 +923,37 @@ button.danger.primary:hover:not(:disabled) {
 .form-input:focus {
   outline: none;
   border-color: var(--accent);
-  background: var(--bg);
+  /* Longhand on purpose: `background` (shorthand) would reset the
+     chevron background-image set on `select.form-input` when the
+     select is focused. */
+  background-color: var(--bg);
   box-shadow: 0 0 0 3px rgba(50, 108, 229, 0.18);
 }
 
 .form-input-small {
   width: 110px;
+}
+
+/* Native <select> styling: WebKitGTK (and macOS Safari) ignore `color`
+   on a <select> that still has its OS widget, so the closed widget
+   often shows dark-on-dark against our dark theme. Strip the native
+   chrome, paint our own chevron, and explicitly color the option list
+   so the popup reads in the dark theme too. */
+select.form-input {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  cursor: pointer;
+  padding-right: 26px;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'><path d='M1 1 L5 5 L9 1' stroke='%2393a4ba' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 9px 6px;
+}
+
+select.form-input option {
+  color: var(--text);
+  background: var(--bg-elev);
 }
 
 .form-help {
