@@ -367,25 +367,27 @@
       link.textContent = "docs ↗";
       footer.appendChild(link);
 
-      // Install button. Always visible (works as install + upgrade).
+      // Install button: only shown for uninstalled tools.
       // Disabled while any job (install or minikube) is running, so we
       // don't overlap elevation prompts or stream two log panels at once.
-      const installBtn = document.createElement("button");
-      installBtn.type = "button";
-      installBtn.className = "primary btn-sm";
-      installBtn.dataset.action = "install";
-      const busy = this.state.installJobKey || this.state.minikubeJobRunning;
-      if (this.state.installJobKey === tool.key) {
-        installBtn.textContent = "Installing…";
-        installBtn.disabled = true;
-      } else if (busy) {
-        installBtn.textContent = "Install";
-        installBtn.disabled = true;
-        installBtn.title = "another job is in progress";
-      } else {
-        installBtn.textContent = "Install";
+      if (!tool.installed) {
+        const installBtn = document.createElement("button");
+        installBtn.type = "button";
+        installBtn.className = "primary btn-sm";
+        installBtn.dataset.action = "install";
+        const busy = this.state.installJobKey || this.state.minikubeJobRunning;
+        if (this.state.installJobKey === tool.key) {
+          installBtn.textContent = "Installing…";
+          installBtn.disabled = true;
+        } else if (busy) {
+          installBtn.textContent = "Install";
+          installBtn.disabled = true;
+          installBtn.title = "another job is in progress";
+        } else {
+          installBtn.textContent = "Install";
+        }
+        footer.appendChild(installBtn);
       }
-      footer.appendChild(installBtn);
 
       card.appendChild(footer);
       return card;
