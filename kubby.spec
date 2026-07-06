@@ -13,11 +13,10 @@
 # cross-platform, add the relevant `webview.platforms.*` entries to
 # hiddenimports.
 #
-# Path resolution in kubby/app.py is `Path(__file__).resolve().parent / "ui"`.
-# Inside the frozen binary PyInstaller overwrites __file__ to point at the
-# extracted bundle under sys._MEIPASS, so the relative path still resolves
-# correctly — we just need to make sure the UI assets are present in the
-# bundle (see `datas` below).
+# Path resolution in kubby/app.py uses sys._MEIPASS when frozen
+# (PyInstaller sets this to the temp extraction directory). The datas
+# entries below place UI assets at `kubby/ui/` inside the bundle so
+# `PKG_DIR = Path(sys._MEIPASS) / "kubby"` resolves correctly.
 
 a = Analysis(
     ['kubby/app.py'],
