@@ -86,8 +86,8 @@ uv run -m kubby.app --check   # print tool status
 ### Build the binary
 
 ```bash
-pip install pyinstaller   # one-time
-./build-binary.sh         # output: dist/kubby
+pip install pyinstaller jaraco.text   # one-time
+./build-binary.sh                      # output: dist/kubby
 ```
 
 `build-binary.sh` is a thin wrapper around `pyinstaller --noconfirm kubby.spec`.
