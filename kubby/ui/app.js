@@ -803,9 +803,12 @@
       // One install at a time across the whole app, so we don't overlap
       // elevation prompts or stream into the same log panel twice.
       if (this.state.installJobKey || this.state.minikubeJobRunning) return;
+      // Defensive: the Install button is only rendered for uninstalled
+      // tools, but guard against a stale status or race condition.
+      const tool = (this.state.tools || []).find((t) => t.key === key);
+      if (!tool || tool.installed) return;
       this.state.installJobKey = key;
       this.state.logBuffer = [];
-      const tool = (this.state.tools || []).find((t) => t.key === key);
       const label = tool ? tool.label : key;
       this._showGlobalLog("installing " + label, "streaming…");
       this.renderDocsCards();
