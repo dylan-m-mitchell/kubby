@@ -3,7 +3,7 @@
 
   const kubby = {
     els: {},
-    state: { tools: [], cluster: null, activeTab: "cluster", minikubeSettings: null, minikubePrereqs: null, minikubeJobRunning: false, minikubeJobKind: null, logBuffer: [], },
+    state: { tools: [], cluster: null, activeTab: "cluster", minikubeSettings: null, minikubePrereqs: null, minikubeJobRunning: false, minikubeJobKind: null, installJobKey: null, globalLogTitle: null, globalLogHint: null, globalLogPinned: false, logBuffer: [], },
 
     init() {
       this.cache();
@@ -27,11 +27,12 @@
         cards: id("cards"),
         refresh: id("refresh"),
         toast: id("toast"),
+        globalLog: id("global-log"),
+        globalLogContent: id("global-log-content"),
+        globalLogTitle: id("global-log-title"),
+        globalLogHint: id("global-log-hint"),
       };
-      // Log panel + modal root are created lazily on first need; clear
-      // them here so a stale reference from a previous render doesn't
-      // get reused if appendLog fires before render.
-      this.els.logPanel = null;
+      // Modal root is created lazily on first need.
       this.els.modalRoot = null;
     },
 
@@ -42,12 +43,18 @@
         if (!btn) return;
         this.switchTab(btn.dataset.tab);
       });
-      // Delegated handler for the minikube buttons (Start / Settings /
-      // Stop / Delete) — we re-render on every state change, so attaching
-      // per-render listeners is more fragile than delegation.
+      // Delegated handlers: we re-render on every state change, so
+      // attaching per-render listeners is more fragile than delegation.
+      // clusterContent handles the minikube Start/Settings/Stop/Delete
+      // buttons. cards handles the per-tool Install buttons on the
+      // docs tab.
       this.els.clusterContent.addEventListener(
         "click",
         (e) => this._onClusterClick(e),
+      );
+      this.els.cards.addEventListener(
+        "click",
+        (e) => this._onDocsClick(e),
       );
     },
 
@@ -110,7 +117,11 @@
         }
         this.renderCluster();
         this.renderDocsCards();
-        this.hideToast();
+        // Note: do NOT call hideToast() here. The install flow surfaces
+        // its own success/failure toast ~1-60s after the user clicks
+        // Install; if the user clicks Re-check in that window, we'd
+        // silently dismiss the install's toast. Toasts already auto-dismiss
+        // after 5s in showToast().
       } catch (err) {
         this.showToast("Failed to load: " + err);
       }
@@ -141,17 +152,13 @@
 
       if (!c.running) {
         el.appendChild(this._clusterOffline(c.error));
-        if (this.state.minikubeJobRunning) {
-          el.appendChild(this._renderLogPanel());
-        }
+        this._syncGlobalLog();
         return;
       }
 
       // Status bar + metrics
       el.appendChild(this._clusterHero(c));
-      if (this.state.minikubeJobRunning) {
-        el.appendChild(this._renderLogPanel());
-      }
+      this._syncGlobalLog();
       el.appendChild(this._clusterMetrics(c));
 
       // Nodes table
@@ -360,6 +367,26 @@
       link.textContent = "docs ↗";
       footer.appendChild(link);
 
+      // Install button. Always visible (works as install + upgrade).
+      // Disabled while any job (install or minikube) is running, so we
+      // don't overlap elevation prompts or stream two log panels at once.
+      const installBtn = document.createElement("button");
+      installBtn.type = "button";
+      installBtn.className = "primary btn-sm";
+      installBtn.dataset.action = "install";
+      const busy = this.state.installJobKey || this.state.minikubeJobRunning;
+      if (this.state.installJobKey === tool.key) {
+        installBtn.textContent = "Installing…";
+        installBtn.disabled = true;
+      } else if (busy) {
+        installBtn.textContent = "Install";
+        installBtn.disabled = true;
+        installBtn.title = "another job is in progress";
+      } else {
+        installBtn.textContent = "Install";
+      }
+      footer.appendChild(installBtn);
+
       card.appendChild(footer);
       return card;
     },
@@ -382,19 +409,19 @@
       return d.innerHTML;
     },
 
-    /** Called from Python via evaluate_js — kept for API compatibility. */
+    /** Called from Python via evaluate_js — pushes one line of streaming
+     *  output (minikube start/stop/delete or a per-tool install) into
+     *  the global log panel. Buffer is bounded so a runaway stream
+     *  doesn't OOM the webview. */
     appendLog(line) {
       this.state.logBuffer.push(line);
       const MAX_LINES = 800;
       if (this.state.logBuffer.length > MAX_LINES) {
         this.state.logBuffer.splice(0, this.state.logBuffer.length - MAX_LINES);
       }
-      if (this.els.logPanel && document.body.contains(this.els.logPanel)) {
-        const log = this.els.logPanel.querySelector(".log");
-        if (log) {
-          log.textContent = this.state.logBuffer.join("\n");
-          this._scrollLogToBottom();
-        }
+      if (this.els.globalLogContent) {
+        this.els.globalLogContent.textContent = this.state.logBuffer.join("\n");
+        this._scrollLogToBottom();
       }
     },
 
@@ -412,16 +439,18 @@
           payload.action
         );
         this.showToast("minikube " + verb, "ok");
-        // Success: discard the streaming log and reload cluster state.
+        // Success: discard the streaming log, hide the panel, reload cluster.
         this.state.logBuffer = [];
-        this.els.logPanel = null;
+        this._hideGlobalLog();
         this.loadCluster();
       } else {
         const err = (payload && payload.error) || "unknown error";
         this.showToast("minikube " + (payload && payload.action) + " failed: " + err, "err");
-        // Failure: keep the log panel + buffer visible so the user can
-        // read minikube diagnostics. Defer loadCluster() until the user
-        // dismisses or re-tries.
+        // Failure: keep the global log visible so the user can read
+        // minikube diagnostics. Pin the log so the renderCluster() below
+        // doesn't immediately hide it via _syncGlobalLog. Defer
+        // loadCluster() until the user dismisses or re-tries.
+        this.state.globalLogPinned = true;
         this.renderCluster();
       }
     },
@@ -497,6 +526,7 @@
       this.state.minikubeJobRunning = true;
       this.state.minikubeJobKind = kind;
       this.state.logBuffer = [];
+      this._showGlobalLog("minikube output", kind + " in progress…");
       this.renderCluster();
     },
 
@@ -759,23 +789,102 @@
       }
     },
 
-    _renderLogPanel() {
-      if (this.els.logPanel && document.body.contains(this.els.logPanel) && this.els.logPanel.parentElement) {
-        this.els.logPanel.querySelector(".log").textContent = this.state.logBuffer.join("\n");
-        this._scrollLogToBottom();
-        return this.els.logPanel;
+    _onDocsClick(e) {
+      const btn = e.target.closest("[data-action=\"install\"]");
+      if (!btn) return;
+      const card = btn.closest("[data-key]");
+      if (!card) return;
+      this._installTool(card.dataset.key);
+    },
+
+    async _installTool(key) {
+      // One install at a time across the whole app, so we don't overlap
+      // elevation prompts or stream into the same log panel twice.
+      if (this.state.installJobKey || this.state.minikubeJobRunning) return;
+      this.state.installJobKey = key;
+      this.state.logBuffer = [];
+      const tool = (this.state.tools || []).find((t) => t.key === key);
+      const label = tool ? tool.label : key;
+      this._showGlobalLog("installing " + label, "streaming…");
+      this.renderDocsCards();
+      let res;
+      try {
+        res = await window.pywebview.api.install_tool(key);
+      } catch (e) {
+        res = { ok: false, error: String(e) };
       }
-      const panel = document.createElement("div");
-      panel.className = "log-panel";
-      panel.innerHTML = '<div class="log-header"><h2>minikube output</h2><span class="log-hint">streaming…</span></div><pre class="log"></pre>';
-      panel.querySelector(".log").textContent = this.state.logBuffer.join("\n");
-      this.els.logPanel = panel;
+      this.state.installJobKey = null;
+      if (res && res.ok) {
+        this.showToast(label + " installed", "ok");
+        // Drop the streaming log (it's already shown in the toast) and
+        // hide the panel. Reload status so the card badge flips to
+        // "installed" and the version updates.
+        this.state.logBuffer = [];
+        this._hideGlobalLog();
+        await this.load();
+      } else {
+        const err = (res && res.error) || "unknown error";
+        this.showToast("install " + key + " failed: " + err, "err");
+        // Keep the panel + buffer visible so the user can read the
+        // diagnostics. The panel is already visible from the pre-await
+        // _showGlobalLog; pin it so a subsequent Re-check (which would
+        // call renderCluster → _syncGlobalLog) doesn't hide it. Pin is
+        // cleared automatically when the user starts a new job.
+        this.state.globalLogPinned = true;
+        this.renderDocsCards();
+      }
+    },
+
+    _showGlobalLog(title, hint) {
+      if (!this.els.globalLog) return;
+      // Persist on state so _syncGlobalLog can re-show the panel with
+      // the same title/hint after a re-render (e.g. Re-check click
+      // during a minikube start or in-flight install) instead of
+      // clobbering the verb-specific hint with a generic "streaming…".
+      // A new job replaces any pinned (post-failure) log.
+      this.state.globalLogTitle = title || "output";
+      this.state.globalLogHint = hint || "streaming…";
+      this.state.globalLogPinned = false;
+      this.els.globalLogTitle.textContent = this.state.globalLogTitle;
+      this.els.globalLogHint.textContent = this.state.globalLogHint;
+      this.els.globalLogContent.textContent = this.state.logBuffer.join("\n");
+      this.els.globalLog.hidden = false;
+      document.body.classList.add("has-global-log");
       this._scrollLogToBottom();
-      return panel;
+    },
+
+    _hideGlobalLog() {
+      if (!this.els.globalLog) return;
+      this.els.globalLog.hidden = true;
+      this.state.globalLogTitle = null;
+      this.state.globalLogHint = null;
+      this.state.globalLogPinned = false;
+      document.body.classList.remove("has-global-log");
+    },
+
+    // Show the global log iff a job is in flight (minikube OR install) OR
+    // a post-failure log is pinned (the user is reading diagnostics).
+    // Called from renderCluster/renderDocsCards after a state change so
+    // panel visibility stays in sync with the latest state. The current
+    // title/hint were stashed on state by _showGlobalLog (or the initial
+    // _beginJobUi / _installTool call) so we can re-show with the same
+    // content instead of recomputing a generic label. Since _beginJobUi
+    // and _installTool are the only callers of _showGlobalLog, and both
+    // set state synchronously before any render runs, the title/hint are
+    // always populated when we get here. The pinned branch handles the
+    // case where a job has finished (busy=false) but the log should
+    // stay visible because the user is reading failure output.
+    _syncGlobalLog() {
+      const busy = this.state.minikubeJobRunning || !!this.state.installJobKey;
+      if (busy || this.state.globalLogPinned) {
+        this._showGlobalLog(this.state.globalLogTitle, this.state.globalLogHint);
+      } else {
+        this._hideGlobalLog();
+      }
     },
 
     _scrollLogToBottom() {
-      const log = this.els.logPanel && this.els.logPanel.querySelector(".log");
+      const log = this.els.globalLogContent;
       if (!log) return;
       log.scrollTop = log.scrollHeight;
     },

@@ -8,13 +8,13 @@ dependencies = [
     "pywebview>=6.2.1",
 ]
 
-[project.scripts]
-kubby = "kubby.app:main"
-
-[build-system]
-requires = ["hatchling>=1.27,<2"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["kubby"]
-include = ["kubby/**/*.py", "kubby/ui/**/*"]
+[tool.uv]
+# Treat this project as an application, not a library — uv won't
+# try to build a wheel from it. The shipped artifact is a
+# PyInstaller --onefile binary (see build-binary.sh); uv is the
+# dev install path only.
+#
+# Dev workflow note: with no [project.scripts] entry, `uv run kubby`
+# is no longer registered. Use `uv run -m kubby.app` (or
+# `uv run python kubby/__main__.py`) to launch from source.
+package = false

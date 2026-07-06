@@ -33,9 +33,20 @@
     </section>
   </main>
 
+  <!-- Global log panel. Mounted statically in the body so it survives
+       tab switches and card re-renders. The cluster tab (minikube
+       start/stop/delete) and the docs tab (per-tool install) both
+       stream into this single panel via window.kubby.appendLog. -->
+  <div class="log-panel global-log" id="global-log" hidden>
+    <div class="log-header">
+      <h2 id="global-log-title">output</h2>
+      <span class="log-hint" id="global-log-hint">streaming…</span>
+    </div>
+    <pre class="log" id="global-log-content"></pre>
+  </div>
+
   <div class="toast" id="toast" hidden></div>
 
-  <script src="cytoscape.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

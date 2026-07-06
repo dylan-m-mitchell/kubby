@@ -167,6 +167,11 @@ button.ghost {
   background: transparent;
 }
 
+button.btn-sm {
+  font-size: 12px;
+  padding: 5px 12px;
+}
+
 /* ---------- main area ---------- */
 
 main {
@@ -322,6 +327,35 @@ main {
   flex-direction: column;
   animation: fade-in 200ms ease-out;
   flex-shrink: 0;
+}
+
+/* Global log panel: docked to the bottom of the viewport so it survives
+   tab switches and card re-renders. body.has-global-log adds bottom
+   padding to <main> so the docked panel doesn't cover cluster cards.
+   The .log-panel class above is reused; only the position/visibility
+   rules are new. */
+.global-log {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  z-index: 5;
+  max-height: 240px;
+  box-shadow: var(--shadow-modal);
+}
+
+body.has-global-log main {
+  padding-bottom: 280px;
+}
+
+/* The native <details>/<summary> markers can be themed but the global
+   log pre is the only one we have; the .log-header hint fades while
+   streaming, so color is enough to read its state. */
+.log-panel .log-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.4px;
 }
 
 .log-header {

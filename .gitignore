@@ -27,15 +27,10 @@ htmlcov/
 .idea/
 .DS_Store
 Thumbs.db
+*.swp
+*.swo
+*~
 
-# Debian build artifacts
-debian/.debhelper/
-debian/kubby/
-debian/kubby-venv/
-debian/kubby.debhelper.log
-debian/kubby.substvars
-debian/files
-*.deb
-*.buildinfo
-*.changes
-debian/debhelper-build-stamp
+# PyInstaller build artifacts (dist/ and build/ covered above)
+*.manifest
+warn-*.txt
