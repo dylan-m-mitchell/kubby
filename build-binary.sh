@@ -4,13 +4,19 @@
 # Prerequisite: pip install pyinstaller jaraco.text
 #   (or: uv pip install pyinstaller jaraco.text ; uv run pyinstaller ...)
 #
-# Usage:  ./build-binary.sh
+# Usage:  ./build-binary.sh [--clean]
+#   --clean  wipe build/ and dist/ before building
 # Output: dist/kubby
 #
-# Re-runs are incremental; pass --clean to wipe build/ and dist/ first
-# (rarely needed — pyinstaller is good at picking up source edits).
+# Re-runs are incremental by default.
 set -euo pipefail
 cd "$(dirname "$0")"
+
+CLEAN=false
+if [[ "${1:-}" == "--clean" ]]; then
+    CLEAN=true
+    shift
+fi
 
 # Sanity-check that pyinstaller is on PATH. We deliberately don't pin a
 # version in pyproject.toml because the build is out-of-band (a developer
@@ -28,6 +34,11 @@ if ! python -c "import jaraco.text" 2>/dev/null; then
     echo "error: jaraco.text not found in the Python environment" >&2
     echo "       install it with:  pip install jaraco.text" >&2
     exit 127
+fi
+
+if $CLEAN; then
+    echo "Cleaning build/ and dist/ ..."
+    rm -rf build/ dist/
 fi
 
 pyinstaller --noconfirm kubby.spec
