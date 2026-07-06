@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # build-binary.sh — build a single-file kubby binary via PyInstaller.
 #
-# Prerequisite: pip install pyinstaller
-#   (or: uv pip install pyinstaller ; uv run pyinstaller ...)
+# Prerequisite: pip install pyinstaller jaraco.text
+#   (or: uv pip install pyinstaller jaraco.text ; uv run pyinstaller ...)
 #
 # Usage:  ./build-binary.sh
 # Output: dist/kubby
@@ -17,7 +17,16 @@ cd "$(dirname "$0")"
 # runs this script, not the user). The README has the install line.
 if ! command -v pyinstaller >/dev/null 2>&1; then
     echo "error: pyinstaller not found on PATH" >&2
-    echo "       install it with:  pip install pyinstaller" >&2
+    echo "       install it with:  pip install pyinstaller jaraco.text" >&2
+    exit 127
+fi
+
+# jaraco.text is a dependency of setuptools ≥ 70 (used by pkg_resources at
+# runtime). PyInstaller needs it available at build time to bundle it into
+# the binary; without it the frozen binary will crash with PYI-5550.
+if ! python -c "import jaraco.text" 2>/dev/null; then
+    echo "error: jaraco.text not found in the Python environment" >&2
+    echo "       install it with:  pip install jaraco.text" >&2
     exit 127
 fi
 

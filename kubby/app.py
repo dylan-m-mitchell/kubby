@@ -31,7 +31,13 @@ from kubby.installer import (
 
 log = logging.getLogger("kubby")
 
-PKG_DIR = Path(__file__).resolve().parent
+if getattr(sys, "frozen", False):
+    # PyInstaller onefile: __file__ is unreliable for path resolution
+    # because the bootloader may flatten the entry-script path. Use
+    # sys._MEIPASS (the temp extraction directory) instead.
+    PKG_DIR = Path(sys._MEIPASS) / "kubby"
+else:
+    PKG_DIR = Path(__file__).resolve().parent
 UI_DIR = PKG_DIR / "ui"
 INDEX_HTML = UI_DIR / "index.html"
 

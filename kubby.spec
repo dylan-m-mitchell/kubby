@@ -48,6 +48,13 @@ a = Analysis(
         'gi.repository.Pango',
         'gi.repository.Gdk',
         'gi.repository.Gio',
+
+        # setuptools >= 70 no longer vendors jaraco; pkg_resources imports
+        # them dynamically. PyInstaller's static analysis can't see these
+        # imports, so we must list them explicitly (PYI-5550).
+        'jaraco.text',
+        'jaraco.functools',
+        'jaraco.context',
     ],
     hookspath=[],
     hooksconfig={},
