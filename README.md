@@ -46,7 +46,7 @@ installer with elevation (pkexec on a desktop session, sudo as a fallback):
 | Tool      | Source                                                                |
 |-----------|-----------------------------------------------------------------------|
 | minikube  | `minikube.sigs.k8s.io/scripts/install.sh`                             |
-| helm      | `get-helm-3` from `raw.githubusercontent.com/helm/helm/main/scripts/` |
+| helm      | `get-helm-4` from `raw.githubusercontent.com/helm/helm/main/scripts/` |
 | kubectl   | latest stable binary from `dl.k8s.io` → `/usr/local/bin/kubectl`      |
 | podman    | host package manager (apt / dnf / pacman / zypper)                    |
 
