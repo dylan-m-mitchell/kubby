@@ -81,9 +81,14 @@ def _parse_kubectl(out: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-# minikube ships an official shell installer at minikube.sigs.k8s.io.
+# Download the latest stable minikube binary directly from GitHub releases
+# and install to /usr/local/bin. The whole snippet runs under elevation
+# (pkexec/sudo), so `install` has write access to /usr/local/bin.
 MINIKUBE_INSTALL_SCRIPT = (
-    "curl -fsSL https://minikube.sigs.k8s.io/scripts/install.sh | sh -"
+    "set -e; "
+    "curl -fsSLO https://github.com/kubernetes/minikube/releases/latest/download/minikube-linux-amd64; "
+    "install minikube-linux-amd64 /usr/local/bin/minikube; "
+    "rm -f minikube-linux-amd64"
 )
 
 

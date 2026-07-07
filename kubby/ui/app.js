@@ -31,6 +31,7 @@
         globalLogContent: id("global-log-content"),
         globalLogTitle: id("global-log-title"),
         globalLogHint: id("global-log-hint"),
+        installAll: id("install-all"),
       };
       // Modal root is created lazily on first need.
       this.els.modalRoot = null;
@@ -56,6 +57,7 @@
         "click",
         (e) => this._onDocsClick(e),
       );
+      this.els.installAll.addEventListener("click", () => this._installAll());
     },
 
     switchTab(tab) {
@@ -325,6 +327,16 @@
       this.state.tools.forEach((t, i) =>
         this.els.cards.appendChild(this._makeToolCard(t, i))
       );
+      this._syncInstallAllButton();
+    },
+
+    _syncInstallAllButton() {
+      const btn = this.els.installAll;
+      if (!btn) return;
+      const uninstalled = (this.state.tools || []).filter((t) => !t.installed);
+      const busy = this.state.installJobKey || this.state.minikubeJobRunning;
+      btn.hidden = uninstalled.length === 0;
+      btn.disabled = busy;
     },
 
     _makeToolCard(tool, idx) {
@@ -797,6 +809,38 @@
       const card = btn.closest("[data-key]");
       if (!card) return;
       this._installTool(card.dataset.key);
+    },
+
+    async _installAll() {
+      if (this.state.installJobKey || this.state.minikubeJobRunning) return;
+      const uninstalled = (this.state.tools || []).filter((t) => !t.installed);
+      if (uninstalled.length === 0) return;
+      this.state.installJobKey = "__all__";
+      this.state.logBuffer = [];
+      this._showGlobalLog("installing " + uninstalled.length + " tool(s)", "streaming…");
+      this.renderDocsCards();
+      let res;
+      try {
+        res = await window.pywebview.api.install_all();
+      } catch (e) {
+        res = { ok: false, error: String(e) };
+      }
+      this.state.installJobKey = null;
+      if (res && res.ok) {
+        this.showToast("All tools installed", "ok");
+        this.state.logBuffer = [];
+        this._hideGlobalLog();
+        await this.load();
+      } else {
+        const installed = (res && res.installed) ? res.installed.length : 0;
+        const failed = (res && res.failed) ? res.failed.length : 0;
+        this.showToast(
+          installed + " installed, " + failed + " failed",
+          installed > 0 ? "ok" : "err"
+        );
+        this.state.globalLogPinned = true;
+        await this.load();
+      }
     },
 
     async _installTool(key) {

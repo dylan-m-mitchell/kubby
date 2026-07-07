@@ -50,6 +50,20 @@ def describe_elevation_method() -> str:
     return "sudo (terminal password prompt)"
 
 
+def wrap_elevated(cmd: tuple[str, ...]) -> list[str]:
+    """Return `cmd` prepended with pkexec or sudo if not root.
+
+    The returned list is suitable for ``subprocess.Popen`` or any other
+    API that takes an argv list (as opposed to a single string).
+    """
+    argv = list(cmd)
+    if os.geteuid() == 0:
+        return argv
+    if shutil.which("pkexec"):
+        return ["pkexec", *argv]
+    return ["sudo", *argv]
+
+
 def run_elevated(cmd: tuple[str, ...]) -> subprocess.CompletedProcess:
     """Execute `cmd` with privilege sufficient to install system packages.
 
