@@ -448,8 +448,10 @@ class KubbyAPI:
     ) -> int:
         """Run `cmd` under elevation, streaming stdout+stderr live via `emit`.
 
-        Returns the process exit code. Raises `subprocess.TimeoutExpired` if
-        the command runs longer than `_INSTALL_TIMEOUT_S`.
+        Uses a reader thread so ``proc.wait(timeout=...)`` can interrupt a hung
+        process even when it produces no output. Returns the process exit code.
+        Raises `subprocess.TimeoutExpired` if the command runs longer than
+        ``_INSTALL_TIMEOUT_S``.
         """
         argv = linux.wrap_elevated(cmd)
         proc = subprocess.Popen(
@@ -461,13 +463,22 @@ class KubbyAPI:
             encoding="utf-8",
             errors="replace",
         )
-        for line in iter(proc.stdout.readline, ""):  # type: ignore[union-attr]
-            emit(line.rstrip("\r\n"))
+
+        def _drain() -> None:
+            for line in iter(proc.stdout.readline, ""):  # type: ignore[union-attr]
+                emit(line.rstrip("\r\n"))
+
+        reader = threading.Thread(target=_drain, daemon=True)
+        reader.start()
+
         try:
-            return proc.wait(timeout=linux._INSTALL_TIMEOUT_S)
+            returncode = proc.wait(timeout=linux._INSTALL_TIMEOUT_S)
+            reader.join()
+            return returncode
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+            reader.join()
             raise
 
     @staticmethod

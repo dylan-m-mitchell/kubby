@@ -834,10 +834,14 @@
       } else {
         const installed = (res && res.installed) ? res.installed.length : 0;
         const failed = (res && res.failed) ? res.failed.length : 0;
-        this.showToast(
-          installed + " installed, " + failed + " failed",
-          installed > 0 ? "ok" : "err"
-        );
+        if (installed === 0 && failed === 0 && res && res.error) {
+          this.showToast("Install all failed: " + res.error, "err");
+        } else {
+          this.showToast(
+            installed + " installed, " + failed + " failed",
+            installed > 0 ? "ok" : "err"
+          );
+        }
         this.state.globalLogPinned = true;
         await this.load();
       }
