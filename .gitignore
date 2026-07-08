@@ -31,6 +31,11 @@ Thumbs.db
 *.swo
 *~
 
+# AI agent context (Codebuff)
+# Per-developer; not version-controlled. AGENT.md and KNOWLEDGE.md live
+# here so they don't clutter the repo root and aren't shared via GitHub.
+.codebuff/
+
 # PyInstaller build artifacts (dist/ and build/ covered above)
 *.manifest
 warn-*.txt

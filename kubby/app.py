@@ -18,7 +18,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from kubby import settings as settings_mod
 
@@ -443,6 +443,217 @@ class KubbyAPI:
             "pod_count": pod_count,
         }
 
+    def _run_elevated_streaming(
+        self, cmd: tuple[str, ...], emit: Callable[[str], None]
+    ) -> int:
+        """Run `cmd` under elevation, streaming stdout+stderr live via `emit`.
+
+        Uses a reader thread so ``proc.wait(timeout=...)`` can interrupt a hung
+        process even when it produces no output. Returns the process exit code.
+        Raises `subprocess.TimeoutExpired` if the command runs longer than
+        ``_INSTALL_TIMEOUT_S``.
+        """
+        argv = linux.wrap_elevated(cmd)
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+        def _drain() -> None:
+            for line in iter(proc.stdout.readline, ""):  # type: ignore[union-attr]
+                emit(line.rstrip("\r\n"))
+
+        reader = threading.Thread(target=_drain, daemon=True)
+        reader.start()
+
+        try:
+            returncode = proc.wait(timeout=linux._INSTALL_TIMEOUT_S)
+            reader.join()
+            return returncode
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            reader.join()
+            raise
+
+    @staticmethod
+    def _build_install_shell(
+        tool: tools_mod.Tool, pm_key: str | None
+    ) -> str | None:
+        """Return a single shell command line that installs `tool`.
+
+        Returns ``None`` when the tool has no install procedure or the
+        package manager can't be resolved.
+        """
+        if tool.install_script:
+            return tool.install_script
+        if tool.pkg_name and pm_key is not None:
+            try:
+                argv = linux.pkg_install_argv(pm_key, tool.pkg_name)
+            except ValueError:
+                return None
+            return " ".join(argv)
+        return None
+
+    def install_all(self) -> dict[str, Any]:
+        """Install every tool that isn't already on PATH.
+
+        All install commands are combined into a **single shell script**
+        that runs under **one elevation call** (pkexec or sudo), so the
+        user only authenticates once regardless of how many tools need
+        installing.
+
+        Returns a summary dict with ``ok``, ``installed``, ``failed``,
+        ``skipped``.
+        """
+        # Discover what needs installing
+        needed: list[tuple[str, tools_mod.Tool]] = []
+        for key, tool in tools_mod.TOOLS.items():
+            installed, _ver, _path = detector.detect(tool)
+            if not installed:
+                needed.append((key, tool))
+
+        if not needed:
+            self._emit_log("All tools are already installed.")
+            return {
+                "ok": True,
+                "installed": [],
+                "failed": [],
+                "skipped": len(tools_mod.TOOLS),
+            }
+
+        # If any tool uses pkg_name, detect the package manager once.
+        pm_key: str | None = None
+        pm_label: str = ""
+        for _key, tool in needed:
+            if tool.pkg_name:
+                try:
+                    pm_key, pm_label = linux.detect_package_manager()
+                except Exception as e:
+                    self._emit_log(f"! {e}")
+                    return {
+                        "ok": False,
+                        "installed": [],
+                        "failed": [k for k, _ in needed],
+                        "skipped": len(tools_mod.TOOLS) - len(needed),
+                        "error": str(e),
+                    }
+                break
+
+        # Build a single combined shell script for all tools.
+        script_lines: list[str] = ["set -e"]
+        for _key, tool in needed:
+            script_lines.append(f"\n# --- {tool.label} ---")
+            shell_cmd = self._build_install_shell(tool, pm_key)
+            if shell_cmd is None:
+                self._emit_log(
+                    f"! No install procedure defined for {tool.label}"
+                )
+                return {
+                    "ok": False,
+                    "installed": [],
+                    "failed": [k for k, _ in needed],
+                    "skipped": len(tools_mod.TOOLS) - len(needed),
+                    "error": f"no install procedure for {tool.label}",
+                }
+            script_lines.append(shell_cmd)
+        combined_script = "\n".join(script_lines)
+
+        self._emit_log(
+            f"Installing {len(needed)} tool(s) via "
+            f"{linux.describe_elevation_method()}…"
+        )
+        if pm_label:
+            self._emit_log(f"Package manager: {pm_label}")
+
+        # Run the combined script under a single elevation call.
+        log_lines: list[str] = []
+
+        def emit(line: str) -> None:
+            log_lines.append(line)
+            self._emit_log(line)
+
+        try:
+            returncode = self._run_elevated_streaming(
+                ("sh", "-c", combined_script), emit
+            )
+        except FileNotFoundError as e:
+            msg = f"command not found: {e.filename}"
+            self._emit_log(f"! {msg}")
+            return {
+                "ok": False,
+                "installed": [],
+                "failed": [k for k, _ in needed],
+                "skipped": len(tools_mod.TOOLS) - len(needed),
+                "error": msg,
+            }
+        except subprocess.TimeoutExpired:
+            self._emit_log("! command timed out")
+            return {
+                "ok": False,
+                "installed": [],
+                "failed": [k for k, _ in needed],
+                "skipped": len(tools_mod.TOOLS) - len(needed),
+                "error": "install timed out",
+            }
+
+        if returncode != 0:
+            self._emit_log(
+                f"! combined script failed with exit code {returncode}"
+            )
+            # Post-verify to determine which tools succeeded vs failed.
+            installed_keys: list[str] = []
+            failed_keys: list[str] = []
+            for key, tool in needed:
+                inst, _ver, _path = detector.detect(tool)
+                if inst:
+                    installed_keys.append(key)
+                else:
+                    failed_keys.append(key)
+            self._emit_log(
+                f"Done — {len(installed_keys)} installed, "
+                f"{len(failed_keys)} failed."
+            )
+            return {
+                "ok": len(failed_keys) == 0,
+                "installed": installed_keys,
+                "failed": failed_keys,
+                "skipped": len(tools_mod.TOOLS) - len(needed),
+            }
+
+        # All commands succeeded — verify each tool.
+        installed_keys: list[str] = []
+        failed_keys: list[str] = []
+        for key, tool in needed:
+            inst, ver, path = detector.detect(tool)
+            if inst:
+                self._emit_log(
+                    f"✓ {tool.label} installed at {path}"
+                    + (f" (version {ver})" if ver else "")
+                )
+                installed_keys.append(key)
+            else:
+                self._emit_log(
+                    f"! {tool.label} post-install check failed"
+                )
+                failed_keys.append(key)
+
+        self._emit_log(
+            f"\nDone — {len(installed_keys)} installed, "
+            f"{len(failed_keys)} failed."
+        )
+        return {
+            "ok": len(failed_keys) == 0,
+            "installed": installed_keys,
+            "failed": failed_keys,
+            "skipped": len(tools_mod.TOOLS) - len(needed),
+        }
+
     def install_tool(self, key: str) -> dict[str, Any]:
         """Install the given tool. Streams command output to the UI log.
 
@@ -490,7 +701,7 @@ class KubbyAPI:
         for cmd in commands:
             emit(f"$ {' '.join(cmd)}")
             try:
-                result = linux.run_elevated(cmd)
+                returncode = self._run_elevated_streaming(cmd, emit)
             except FileNotFoundError as e:
                 msg = f"command not found: {e.filename}"
                 emit(f"! {msg}")
@@ -502,16 +713,12 @@ class KubbyAPI:
                     "log": "\n".join(log_lines),
                     "error": "install timed out",
                 }
-            if result.stdout.strip():
-                emit(result.stdout.rstrip())
-            if result.stderr.strip():
-                emit(result.stderr.rstrip())
-            if result.returncode != 0:
-                emit(f"! command failed with exit code {result.returncode}")
+            if returncode != 0:
+                emit(f"! command failed with exit code {returncode}")
                 return {
                     "ok": False,
                     "log": "\n".join(log_lines),
-                    "error": f"exit code {result.returncode}",
+                    "error": f"exit code {returncode}",
                 }
 
         # Post-install verification — re-detect on PATH.
