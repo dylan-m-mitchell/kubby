@@ -8,13 +8,10 @@ dependencies = [
     "pywebview>=6.2.1",
 ]
 
+[project.scripts]
+kubby = "kubby.app:main"
+
 [tool.uv]
-# Treat this project as an application, not a library — uv won't
-# try to build a wheel from it. The shipped artifact is a
-# PyInstaller --onefile binary (see build-binary.sh); uv is the
-# dev install path only.
-#
-# Dev workflow note: with no [project.scripts] entry, `uv run kubby`
-# is no longer registered. Use `uv run -m kubby.app` (or
-# `uv run python kubby/__main__.py`) to launch from source.
-package = false
+# The shipped artifact is a PyInstaller --onefile binary
+# (see build-binary.sh); uv is the dev install path only.
+package = true
