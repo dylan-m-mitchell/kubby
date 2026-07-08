@@ -30,6 +30,9 @@ Thumbs.db
 *.swp
 *.swo
 *~
+.agents/
+knowledge.md
+image-search-spec.md
 
 # AI agent context (Codebuff)
 # Per-developer; not version-controlled. AGENT.md and KNOWLEDGE.md live
