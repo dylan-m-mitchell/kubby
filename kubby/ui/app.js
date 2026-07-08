@@ -3,7 +3,12 @@
 
   const kubby = {
     els: {},
-    state: { tools: [], cluster: null, activeTab: "cluster", minikubeSettings: null, minikubePrereqs: null, minikubeJobRunning: false, minikubeJobKind: null, installJobKey: null, globalLogTitle: null, globalLogHint: null, globalLogPinned: false, logBuffer: [], },
+    state: { tools: [], cluster: null, activeTab: "cluster", minikubeSettings: null, minikubePrereqs: null, minikubeJobRunning: false, minikubeJobKind: null, installJobKey: null, globalLogTitle: null, globalLogHint: null, globalLogPinned: false, logBuffer: [],
+      // Image search state
+      searchQuery: "", searchTagFilter: "", localImages: [],
+      remoteResults: { results: [], total_count: 0, has_more: false, page: 1 },
+      imagePullInProgress: null, pulledImages: [],
+      _searchTimer: null, },
 
     init() {
       this.cache();
@@ -23,6 +28,7 @@
         tabs: id("tabs"),
         tabCluster: id("tab-cluster"),
         tabDocs: id("tab-docs"),
+        tabSearch: id("tab-search"),
         clusterContent: id("cluster-content"),
         cards: id("cards"),
         refresh: id("refresh"),
@@ -32,6 +38,13 @@
         globalLogTitle: id("global-log-title"),
         globalLogHint: id("global-log-hint"),
         installAll: id("install-all"),
+        // Image search elements
+        searchInput: id("search-input"),
+        tagFilter: id("tag-filter"),
+        searchResults: id("search-results"),
+        searchEmpty: id("search-empty"),
+        searchStatus: id("search-status"),
+        loadMore: id("load-more"),
       };
       // Modal root is created lazily on first need.
       this.els.modalRoot = null;
@@ -58,6 +71,14 @@
         (e) => this._onDocsClick(e),
       );
       this.els.installAll.addEventListener("click", () => this._installAll());
+      // Search tab events
+      if (this.els.searchInput) {
+        this.els.searchInput.addEventListener("input", () => this._onSearchInput());
+        this.els.tagFilter.addEventListener("input", () => this._doSearch());
+      }
+      if (this.els.loadMore) {
+        this.els.loadMore.addEventListener("click", () => this._loadMoreRemote());
+      }
     },
 
     switchTab(tab) {
@@ -68,10 +89,15 @@
       });
       // Show/hide panels
       this.els.tabCluster.hidden = tab !== "cluster";
+      this.els.tabSearch.hidden = tab !== "search";
       this.els.tabDocs.hidden = tab !== "docs";
       // Lazy-load cluster data when switching to cluster tab
       if (tab === "cluster" && this.state.cluster === null) {
         this.loadCluster();
+      }
+      // Lazy-load local images when switching to search tab
+      if (tab === "search" && this.state.localImages.length === 0) {
+        this._loadLocalImages();
       }
     },
 
@@ -406,6 +432,388 @@
     },
 
     // ---------- helpers ----------
+
+    // --- image search ---
+
+    async _loadLocalImages() {
+      try {
+        const res = await window.pywebview.api.search_images("", 1);
+        if (res && res.ok) {
+          this.state.localImages = (res.local || []).map((img) => ({
+            ...img,
+            pulled: true,
+          }));
+          this._renderSearchResults();
+        }
+      } catch (e) {
+        // podman probably not installed — empty list is fine
+      }
+    },
+
+    _onSearchInput() {
+      clearTimeout(this.state._searchTimer);
+      this.state._searchTimer = setTimeout(() => this._doSearch(), 300);
+    },
+
+    async _doSearch() {
+      const query = (this.els.searchInput ? this.els.searchInput.value : "").trim();
+      const tagFilter = (this.els.tagFilter ? this.els.tagFilter.value : "").trim();
+      this.state.searchQuery = query;
+      this.state.searchTagFilter = tagFilter;
+      this.state.remoteResults = { results: [], total_count: 0, has_more: false, page: 1 };
+
+      // Show/hide empty state
+      if (!query) {
+        // Reset to just local images
+        this.state.remoteResults = { results: [], total_count: 0, has_more: false, page: 1 };
+        try {
+          const res = await window.pywebview.api.search_images("", 1);
+          if (res && res.ok) {
+            this.state.localImages = (res.local || []).map((img) => ({
+              ...img,
+              pulled: true,
+            }));
+          }
+        } catch (e) {}
+        this._renderSearchResults();
+        return;
+      }
+
+      this.els.searchStatus.hidden = false;
+      this.els.searchStatus.textContent = "Searching…";
+      if (this.els.loadMore) this.els.loadMore.hidden = true;
+      this._renderSearchResults(); // clear old results, show loading
+
+      try {
+        const res = await window.pywebview.api.search_images(query, 1);
+        if (res && res.ok) {
+          this.state.localImages = (res.local || []).map((img) => ({
+            ...img,
+            pulled: true,
+          }));
+          const remote = res.remote || { results: [], total_count: 0, has_more: false };
+          remote.results = (remote.results || []).map((img) => ({
+            ...img,
+            pulled: this._isImagePulled(img.name),
+          }));
+          // Apply tag filter
+          if (tagFilter) {
+            const tf = tagFilter.toLowerCase();
+            remote.results = remote.results.filter((img) =>
+              (img.tags || []).some((t) => t.toLowerCase().includes(tf))
+            );
+          }
+          this.state.remoteResults = remote;
+        }
+      } catch (e) {
+        // Network error — show empty remote
+        this.state.remoteResults = { results: [], total_count: 0, has_more: false, page: 1 };
+      }
+
+      this.els.searchStatus.hidden = true;
+      this._renderSearchResults();
+    },
+
+    async _loadMoreRemote() {
+      const nextPage = (this.state.remoteResults.page || 1) + 1;
+      if (this.els.loadMore) this.els.loadMore.disabled = true;
+
+      try {
+        const res = await window.pywebview.api.search_images(
+          this.state.searchQuery,
+          nextPage
+        );
+        if (res && res.ok) {
+          const remote = res.remote || { results: [], total_count: 0, has_more: false };
+          const newResults = (remote.results || []).map((img) => ({
+            ...img,
+            pulled: this._isImagePulled(img.name),
+          }));
+          // Apply tag filter
+          const tagFilter = this.state.searchTagFilter;
+          let filtered = newResults;
+          if (tagFilter) {
+            const tf = tagFilter.toLowerCase();
+            filtered = newResults.filter((img) =>
+              (img.tags || []).some((t) => t.toLowerCase().includes(tf))
+            );
+          }
+          this.state.remoteResults.results = [
+            ...(this.state.remoteResults.results || []),
+            ...filtered,
+          ];
+          this.state.remoteResults.has_more = remote.has_more || false;
+          this.state.remoteResults.page = nextPage;
+        }
+      } catch (e) {}
+
+      if (this.els.loadMore) {
+        this.els.loadMore.disabled = false;
+        this.els.loadMore.hidden = !this.state.remoteResults.has_more;
+      }
+      this._renderSearchResults();
+    },
+
+    _renderSearchResults() {
+      const grid = this.els.searchResults;
+      const empty = this.els.searchEmpty;
+      if (!grid) return;
+
+      grid.innerHTML = "";
+      const local = this.state.localImages || [];
+      const remote = (this.state.remoteResults && this.state.remoteResults.results) || [];
+      const hasAny = local.length > 0 || remote.length > 0;
+      const loading = !this.els.searchStatus.hidden;
+
+      if (empty) {
+        empty.hidden = hasAny || loading || this.state.searchQuery !== "";
+      }
+
+      if (!hasAny && !loading) {
+        if (this.state.searchQuery) {
+          const msg = document.createElement("div");
+          msg.className = "search-empty";
+          msg.innerHTML = '<span class="search-empty-icon">🔍</span><p>No images found for "' + this._esc(this.state.searchQuery) + '"</p>';
+          grid.appendChild(msg);
+        }
+        if (this.els.loadMore) this.els.loadMore.hidden = true;
+        return;
+      }
+
+      // Local section
+      if (local.length > 0) {
+        const label = document.createElement("div");
+        label.className = "search-section-label";
+        label.textContent = `Local (${local.length})`;
+        grid.appendChild(label);
+        local.forEach((img) => grid.appendChild(this._makeImageCard(img)));
+      }
+
+      // Remote section
+      if (remote.length > 0) {
+        const label = document.createElement("div");
+        label.className = "search-section-label";
+        label.textContent = `GitHub Container Registry (${this.state.remoteResults.total_count || remote.length})`;
+        grid.appendChild(label);
+        remote.forEach((img) => grid.appendChild(this._makeImageCard(img)));
+      } else if (loading && this.state.searchQuery) {
+        for (let i = 0; i < 3; i++) {
+          const sk = document.createElement("div");
+          sk.className = "skeleton";
+          grid.appendChild(sk);
+        }
+      }
+
+      if (this.els.loadMore) {
+        this.els.loadMore.hidden = !this.state.remoteResults.has_more;
+      }
+    },
+
+    _makeImageCard(img) {
+      const card = document.createElement("article");
+      card.className = "card";
+      if (img.local && img.pulled) card.classList.add("local");
+      if (this.state.imagePullInProgress === img.name) card.classList.add("pulling");
+
+      const header = document.createElement("div");
+      header.className = "card-header";
+
+      const titleWrap = document.createElement("div");
+      const h3 = document.createElement("h3");
+      h3.textContent = img.name;
+      h3.style.cssText = "font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;word-break:break-all;";
+      titleWrap.appendChild(h3);
+
+      if (img.description) {
+        const desc = document.createElement("p");
+        desc.className = "desc";
+        desc.textContent = img.description;
+        titleWrap.appendChild(desc);
+      }
+
+      const badgeWrap = document.createElement("div");
+      badgeWrap.style.cssText = "display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0;";
+
+      if (img.pulled) {
+        const b = document.createElement("span");
+        b.className = "badge ok";
+        b.textContent = "pulled";
+        badgeWrap.appendChild(b);
+      }
+      if (img.local) {
+        const b = document.createElement("span");
+        b.className = "badge info";
+        b.textContent = "local";
+        badgeWrap.appendChild(b);
+      }
+
+      header.append(titleWrap, badgeWrap);
+      card.appendChild(header);
+
+      // Tags
+      if (img.tags && img.tags.length > 0) {
+        const meta = document.createElement("div");
+        meta.className = "card-image-meta";
+        const maxTags = 5;
+        img.tags.slice(0, maxTags).forEach((t) => {
+          const chip = document.createElement("span");
+          chip.className = "tag-chip";
+          chip.textContent = t;
+          meta.appendChild(chip);
+        });
+        if (img.tags.length > maxTags) {
+          const more = document.createElement("span");
+          more.className = "tag-chip more";
+          more.textContent = "+" + (img.tags.length - maxTags) + " more";
+          meta.appendChild(more);
+        }
+        card.appendChild(meta);
+      }
+
+      // Stats
+      const stats = document.createElement("div");
+      stats.className = "card-stats";
+      if (img.stars !== undefined && img.stars !== null) {
+        stats.innerHTML += '<span>⭐ ' + img.stars + '</span>';
+      }
+      if (img.updated_at) {
+        const date = img.updated_at.slice(0, 10);
+        stats.innerHTML += '<span>📅 ' + date + '</span>';
+      }
+      if (img.size) {
+        stats.innerHTML += '<span>💾 ' + img.size + '</span>';
+      }
+      card.appendChild(stats);
+
+      // Pull progress (if in progress)
+      if (this.state.imagePullInProgress === img.name) {
+        const spinner = document.createElement("span");
+        spinner.className = "spinner";
+        const progress = document.createElement("div");
+        progress.className = "pull-progress";
+        progress.id = "pull-progress-" + btoa(encodeURIComponent(img.name)).slice(0, 12);
+        const top = document.createElement("div");
+        top.style.cssText = "display:flex;align-items:center;gap:6px;";
+        top.appendChild(spinner);
+        const label = document.createElement("span");
+        label.textContent = "Pulling…";
+        top.appendChild(label);
+        progress.appendChild(top);
+        const lines = document.createElement("div");
+        lines.className = "pull-lines";
+        progress.appendChild(lines);
+        card.appendChild(progress);
+      }
+
+      // Footer with pull button
+      const footer = document.createElement("div");
+      footer.className = "card-footer";
+
+      // Link to GitHub repo for remote images
+      if (img.remote && img.owner && img.repo) {
+        const link = document.createElement("a");
+        link.className = "link";
+        link.href = "https://github.com/" + img.owner + "/" + img.repo + "/pkgs/container/" + img.repo;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = "GitHub ↗";
+        footer.appendChild(link);
+      } else {
+        const spacer = document.createElement("span");
+        footer.appendChild(spacer);
+      }
+
+      // Pull button (only for non-pulled images)
+      if (!img.pulled) {
+        const pullBtn = document.createElement("button");
+        pullBtn.type = "button";
+        pullBtn.className = "primary btn-sm";
+        const busyMinikube = this.state.minikubeJobRunning || !!this.state.installJobKey;
+        const busyPull = !!this.state.imagePullInProgress;
+        if (this.state.imagePullInProgress === img.name) {
+          pullBtn.textContent = "Pulling…";
+          pullBtn.disabled = true;
+        } else if (busyPull || busyMinikube) {
+          pullBtn.textContent = "Pull";
+          pullBtn.disabled = true;
+          pullBtn.title = "another job is in progress";
+        } else {
+          pullBtn.textContent = "Pull";
+          pullBtn.addEventListener("click", () => this._pullImage(img.name));
+        }
+        footer.appendChild(pullBtn);
+      }
+
+      card.appendChild(footer);
+      return card;
+    },
+
+    async _pullImage(ref) {
+      if (this.state.imagePullInProgress) return;
+      if (this.state.minikubeJobRunning || !!this.state.installJobKey) return;
+
+      this.state.imagePullInProgress = ref;
+      this._renderSearchResults();
+
+      try {
+        const res = await window.pywebview.api.pull_image(ref);
+        if (res && !res.ok) {
+          this.showToast("Pull failed: " + (res.error || "unknown"), "err");
+          this.state.imagePullInProgress = null;
+          this._renderSearchResults();
+        }
+      } catch (e) {
+        this.showToast("Pull failed: " + e, "err");
+        this.state.imagePullInProgress = null;
+        this._renderSearchResults();
+      }
+    },
+
+    onImagePullProgress(ref, line) {
+      if (this.state.imagePullInProgress !== ref) return;
+      const id = "pull-progress-" + btoa(encodeURIComponent(ref)).slice(0, 12);
+      const el = document.getElementById(id);
+      if (el) {
+        const lines = el.querySelector(".pull-lines");
+        if (lines) {
+          lines.textContent += line + "\n";
+          lines.scrollTop = lines.scrollHeight;
+        }
+      }
+    },
+
+    onImagePullDone(payload) {
+      const ref = this.state.imagePullInProgress;
+      this.state.imagePullInProgress = null;
+      if (payload && payload.ok) {
+        this.state.pulledImages.push(payload.image_ref);
+        this.showToast("Image pulled: " + (payload.image_ref || ref), "ok");
+        // Refresh local images while preserving search context
+        this._refreshLocalImages();
+      } else {
+        const err = (payload && payload.error) || "unknown error";
+        this.showToast("Pull failed: " + err, "err");
+        this._renderSearchResults();
+      }
+    },
+
+    async _refreshLocalImages() {
+      try {
+        const res = await window.pywebview.api.search_images(this.state.searchQuery, 1);
+        if (res && res.ok) {
+          this.state.localImages = (res.local || []).map((img) => ({
+            ...img,
+            pulled: true,
+          }));
+          this._renderSearchResults();
+        }
+      } catch (e) {}
+    },
+
+    _isImagePulled(name) {
+      if ((this.state.pulledImages || []).includes(name)) return true;
+      return (this.state.localImages || []).some((img) => img.name === name);
+    },
 
     _skeleton(count) {
       const frag = document.createDocumentFragment();

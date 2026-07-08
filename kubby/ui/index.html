@@ -15,6 +15,7 @@
     </div>
     <nav class="tabs" id="tabs">
       <button class="tab active" data-tab="cluster" type="button">Cluster</button>
+      <button class="tab" data-tab="search" type="button">Search</button>
       <button class="tab" data-tab="docs" type="button">Docs</button>
     </nav>
 
@@ -25,6 +26,35 @@
     <!-- Cluster tab -->
     <section class="tab-panel" id="tab-cluster" aria-live="polite">
       <div id="cluster-content"></div>
+    </section>
+
+    <!-- Search tab (image search) -->
+    <section class="tab-panel" id="tab-search" hidden>
+      <div class="search-bar-row">
+        <div class="search-input-wrap">
+          <input
+            type="text"
+            id="search-input"
+            class="search-input"
+            placeholder="Search container images…"
+            autocomplete="off"
+          />
+        </div>
+        <input
+          type="text"
+          id="tag-filter"
+          class="tag-filter"
+          placeholder="Tag filter (optional)"
+          autocomplete="off"
+        />
+      </div>
+      <div id="search-empty" class="search-empty">
+        <span class="search-empty-icon">📦</span>
+        <p>Search GitHub Container Registry or browse local podman images</p>
+      </div>
+      <section class="cards" id="search-results" aria-live="polite"></section>
+      <div id="search-status" class="search-status" hidden></div>
+      <button type="button" class="ghost" id="load-more" hidden>Load More</button>
     </section>
 
     <!-- Docs tab (tool status) -->
