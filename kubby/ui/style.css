@@ -1149,6 +1149,10 @@ select.form-input option {
   line-height: 1.5;
 }
 
+.search-empty[hidden] {
+  display: none;
+}
+
 .search-status {
   text-align: center;
   padding: 16px;
