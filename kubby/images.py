@@ -9,17 +9,25 @@ Public surface:
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import urllib.request
 import urllib.parse
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 
 
-def search_local(query: str | None = None) -> list[dict]:
+def search_local(
+    query: str | None = None, env: dict[str, str] | None = None
+) -> list[dict]:
     """Return all local podman images, optionally filtered by ``query``.
 
     Returns an empty list if podman is not installed or fails.
     Each image dict has: name, tags, created, size, local=True.
+
+    *env* is forwarded to ``subprocess.run`` so callers can sanitize the
+    subprocess environment (e.g. strip PyInstaller's bundled
+    ``LD_LIBRARY_PATH``).
     """
     try:
         result = subprocess.run(
@@ -27,6 +35,7 @@ def search_local(query: str | None = None) -> list[dict]:
             capture_output=True,
             text=True,
             timeout=15,
+            env=env,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return []
@@ -86,14 +95,36 @@ def get_ghcr_tags(owner: str, repo: str) -> list[str]:
     """Fetch tags for a public GHCR image at ``ghcr.io/{owner}/{repo}``.
 
     Uses the OCI distribution spec ``/v2/{name}/tags/list`` endpoint.
-    Returns an empty list on any error (including auth-required images).
+    GHCR returns 401 for public images that need an anonymous bearer
+    token — we detect the challenge, request a repository-scoped token,
+    and retry once before falling back to an empty list.
     """
     url = f"https://ghcr.io/v2/{owner}/{repo}/tags/list"
-    req = urllib.request.Request(url)
-    req.add_header("User-Agent", "kubby")
-    try:
+
+    def _do_request(extra_headers: dict[str, str] | None = None) -> tuple[int, str]:
+        """Return (status_code, body) or raise on non-HTTP errors."""
+        req = urllib.request.Request(url)
+        req.add_header("User-Agent", "kubby")
+        if extra_headers:
+            for k, v in extra_headers.items():
+                req.add_header(k, v)
         with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read())
+            return resp.status, resp.read().decode("utf-8")
+
+    try:
+        _status, body = _do_request()
+        data = json.loads(body)
+    except urllib.error.HTTPError as e:
+        if e.code != 401:
+            return []
+        token = _get_ghcr_bearer_token(owner, repo, e.headers)
+        if not token:
+            return []
+        try:
+            _status, body = _do_request({"Authorization": f"Bearer {token}"})
+            data = json.loads(body)
+        except Exception:
+            return []
     except Exception:
         return []
 
@@ -101,6 +132,35 @@ def get_ghcr_tags(owner: str, repo: str) -> list[str]:
     if isinstance(tags, list):
         return tags
     return []
+
+
+def _get_ghcr_bearer_token(
+    owner: str, repo: str, headers: dict[str, str]
+) -> str | None:
+    """Request an anonymous bearer token for the GHCR OCI registry.
+
+    GHCR returns ``401`` with a ``Www-Authenticate`` header that
+    points to its token endpoint.  Parse the realm and service from
+    that header, then request a repository-scoped pull token.
+    Returns ``None`` on any failure.
+    """
+    www_auth = headers.get("Www-Authenticate") or headers.get("www-authenticate") or ""
+    realm_match = re.search(r'realm="([^"]+)"', www_auth)
+    service_match = re.search(r'service="([^"]+)"', www_auth)
+    if not realm_match:
+        return None
+    realm = realm_match.group(1)
+    service = service_match.group(1) if service_match else "ghcr.io"
+    scope = f"repository:{owner}/{repo}:pull"
+    token_url = f"{realm}?service={urllib.parse.quote(service)}&scope={urllib.parse.quote(scope)}"
+    req = urllib.request.Request(token_url)
+    req.add_header("User-Agent", "kubby")
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+        return data.get("token")
+    except Exception:
+        return None
 
 
 def search_ghcr(query: str, page: int = 1, per_page: int = 10) -> dict:

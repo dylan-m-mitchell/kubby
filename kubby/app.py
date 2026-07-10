@@ -353,14 +353,29 @@ class KubbyAPI:
     # ---------- image search / pull ----------
 
     def search_images(
-        self, query: str, page: int = 1
+        self,
+        query: str,
+        page: int = 1,
+        include_local: bool = True,
+        include_remote: bool = True,
     ) -> dict[str, Any]:
         """Search for container images — local (podman) and remote (GHCR).
 
         Returns ``{"ok": True, "local": [...], "remote": {...}}``.
+        Set *include_local* / *include_remote* to ``False`` to skip
+        unnecessary work when only one result set is needed.
         """
-        local = images_mod.search_local(query) if query.strip() else images_mod.search_local()
-        remote = images_mod.search_ghcr(query, page)
+        local: list[dict[str, Any]] = []
+        remote: dict[str, Any] = {"results": [], "total_count": 0, "has_more": False}
+        if include_local:
+            env = self._subprocess_env()
+            local = (
+                images_mod.search_local(query, env=env)
+                if query.strip()
+                else images_mod.search_local(env=env)
+            )
+        if include_remote:
+            remote = images_mod.search_ghcr(query, page)
         return {"ok": True, "local": local, "remote": remote}
 
     def pull_image(self, image_ref: str) -> dict[str, Any]:

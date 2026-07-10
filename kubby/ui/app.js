@@ -8,7 +8,7 @@
       searchQuery: "", searchTagFilter: "", localImages: [],
       remoteResults: { results: [], total_count: 0, has_more: false, page: 1 },
       imagePullInProgress: null, pulledImages: [],
-      _searchTimer: null, _searchToken: 0, },
+      _searchTimer: null, _tagFilterTimer: null, _searchToken: 0, },
 
     init() {
       this.cache();
@@ -76,7 +76,12 @@
       if (this.els.searchInput) {
         this.els.searchInput.addEventListener("input", () => this._onSearchInput());
         this.els.searchInput.addEventListener("change", () => this._updateDockerHubLink());
-        this.els.tagFilter.addEventListener("input", () => this._doSearch());
+        this.els.tagFilter.addEventListener("input", () => {
+          this.state.searchTagFilter = (this.els.tagFilter ? this.els.tagFilter.value : "").trim();
+          this._renderSearchResults();
+          clearTimeout(this.state._tagFilterTimer);
+          this.state._tagFilterTimer = setTimeout(() => this._doSearch(), 300);
+        });
       }
       if (this.els.loadMore) {
         this.els.loadMore.addEventListener("click", () => this._loadMoreRemote());
@@ -442,7 +447,7 @@
 
     async _loadLocalImages() {
       try {
-        const res = await window.pywebview.api.search_images("", 1);
+        const res = await window.pywebview.api.search_images("", 1, true, false);
         if (res && res.ok) {
           this.state.localImages = (res.local || []).map((img) => ({
             ...img,
@@ -485,7 +490,7 @@
         // Reset to just local images
         this.state.remoteResults = { results: [], total_count: 0, has_more: false, page: 1 };
         try {
-          const res = await window.pywebview.api.search_images("", 1);
+          const res = await window.pywebview.api.search_images("", 1, true, false);
           if (token !== this.state._searchToken) return;
           if (res && res.ok) {
             this.state.localImages = (res.local || []).map((img) => ({
@@ -508,7 +513,7 @@
         const res = await window.pywebview.api.search_images(query, 1);
         if (token !== this.state._searchToken) return;
         if (res && res.ok) {
-          let localImages = (res.local || []).map((img) => ({
+          this.state.localImages = (res.local || []).map((img) => ({
             ...img,
             pulled: true,
           }));
@@ -517,17 +522,6 @@
             ...img,
             pulled: this._isImagePulled(img.name),
           }));
-          // Apply tag filter to both local and remote results
-          if (tagFilter) {
-            const tf = tagFilter.toLowerCase();
-            localImages = localImages.filter((img) =>
-              (img.tags || []).some((t) => t.toLowerCase().includes(tf))
-            );
-            remote.results = remote.results.filter((img) =>
-              (img.tags || []).some((t) => t.toLowerCase().includes(tf))
-            );
-          }
-          this.state.localImages = localImages;
           this.state.remoteResults = remote;
         }
       } catch (e) {
@@ -548,7 +542,9 @@
       try {
         const res = await window.pywebview.api.search_images(
           this.state.searchQuery,
-          nextPage
+          nextPage,
+          false,
+          true
         );
         if (res && res.ok) {
           const remote = res.remote || { results: [], total_count: 0, has_more: false };
@@ -556,18 +552,9 @@
             ...img,
             pulled: this._isImagePulled(img.name),
           }));
-          // Apply tag filter
-          const tagFilter = this.state.searchTagFilter;
-          let filtered = newResults;
-          if (tagFilter) {
-            const tf = tagFilter.toLowerCase();
-            filtered = newResults.filter((img) =>
-              (img.tags || []).some((t) => t.toLowerCase().includes(tf))
-            );
-          }
           this.state.remoteResults.results = [
             ...(this.state.remoteResults.results || []),
-            ...filtered,
+            ...newResults,
           ];
           this.state.remoteResults.has_more = remote.has_more || false;
           this.state.remoteResults.page = nextPage;
@@ -587,8 +574,21 @@
       if (!grid) return;
 
       grid.innerHTML = "";
-      const local = this.state.localImages || [];
-      const remote = (this.state.remoteResults && this.state.remoteResults.results) || [];
+      let local = this.state.localImages || [];
+      let remote = (this.state.remoteResults && this.state.remoteResults.results) || [];
+
+      // Apply tag filter client-side so rapid tag-filter keystrokes
+      // re-render instantly from already-loaded data.
+      const tf = (this.state.searchTagFilter || "").trim().toLowerCase();
+      if (tf) {
+        local = local.filter((img) =>
+          (img.tags || []).some((t) => t.toLowerCase().includes(tf))
+        );
+        remote = remote.filter((img) =>
+          (img.tags || []).some((t) => t.toLowerCase().includes(tf))
+        );
+      }
+
       const hasAny = local.length > 0 || remote.length > 0;
       const loading = !this.els.searchStatus.hidden;
 
@@ -826,7 +826,9 @@
 
     async _refreshLocalImages() {
       try {
-        const res = await window.pywebview.api.search_images(this.state.searchQuery, 1);
+        const res = await window.pywebview.api.search_images(
+          this.state.searchQuery, 1, true, false
+        );
         if (res && res.ok) {
           this.state.localImages = (res.local || []).map((img) => ({
             ...img,
