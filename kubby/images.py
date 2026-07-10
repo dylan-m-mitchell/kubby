@@ -134,6 +134,11 @@ def search_ghcr(query: str, page: int = 1, per_page: int = 10) -> dict:
     if not isinstance(items, list):
         return {"results": [], "total_count": total, "has_more": False}
 
+    # Remember the raw item count before filtering so has_more reflects
+    # whether the API returned a full page, not how many entries survived
+    # the owner/repo check.
+    raw_count = len(items)
+
     # Filter valid items and collect (owner, repo, item) tuples for
     # concurrent tag fetching so we don't make sequential blocking HTTP calls.
     entries: list[tuple[str, str, dict]] = []
@@ -166,7 +171,7 @@ def search_ghcr(query: str, page: int = 1, per_page: int = 10) -> dict:
             }
         )
 
-    has_more = len(results) == per_page and (page * per_page) < total
+    has_more = raw_count == per_page and (page * per_page) < total
     return {"results": results, "total_count": total, "has_more": has_more}
 
 

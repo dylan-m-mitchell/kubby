@@ -8,7 +8,7 @@
       searchQuery: "", searchTagFilter: "", localImages: [],
       remoteResults: { results: [], total_count: 0, has_more: false, page: 1 },
       imagePullInProgress: null, pulledImages: [],
-      _searchTimer: null, },
+      _searchTimer: null, _searchToken: 0, },
 
     init() {
       this.cache();
@@ -475,6 +475,7 @@
     async _doSearch() {
       const query = (this.els.searchInput ? this.els.searchInput.value : "").trim();
       const tagFilter = (this.els.tagFilter ? this.els.tagFilter.value : "").trim();
+      const token = ++this.state._searchToken;
       this.state.searchQuery = query;
       this.state.searchTagFilter = tagFilter;
       this.state.remoteResults = { results: [], total_count: 0, has_more: false, page: 1 };
@@ -485,6 +486,7 @@
         this.state.remoteResults = { results: [], total_count: 0, has_more: false, page: 1 };
         try {
           const res = await window.pywebview.api.search_images("", 1);
+          if (token !== this.state._searchToken) return;
           if (res && res.ok) {
             this.state.localImages = (res.local || []).map((img) => ({
               ...img,
@@ -492,6 +494,7 @@
             }));
           }
         } catch (e) {}
+        if (token !== this.state._searchToken) return;
         this._renderSearchResults();
         return;
       }
@@ -503,8 +506,9 @@
 
       try {
         const res = await window.pywebview.api.search_images(query, 1);
+        if (token !== this.state._searchToken) return;
         if (res && res.ok) {
-          this.state.localImages = (res.local || []).map((img) => ({
+          let localImages = (res.local || []).map((img) => ({
             ...img,
             pulled: true,
           }));
@@ -513,20 +517,26 @@
             ...img,
             pulled: this._isImagePulled(img.name),
           }));
-          // Apply tag filter
+          // Apply tag filter to both local and remote results
           if (tagFilter) {
             const tf = tagFilter.toLowerCase();
+            localImages = localImages.filter((img) =>
+              (img.tags || []).some((t) => t.toLowerCase().includes(tf))
+            );
             remote.results = remote.results.filter((img) =>
               (img.tags || []).some((t) => t.toLowerCase().includes(tf))
             );
           }
+          this.state.localImages = localImages;
           this.state.remoteResults = remote;
         }
       } catch (e) {
         // Network error — show empty remote
+        if (token !== this.state._searchToken) return;
         this.state.remoteResults = { results: [], total_count: 0, has_more: false, page: 1 };
       }
 
+      if (token !== this.state._searchToken) return;
       this.els.searchStatus.hidden = true;
       this._renderSearchResults();
     },
