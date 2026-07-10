@@ -12,6 +12,7 @@ import json
 import subprocess
 import urllib.request
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 
 
 def search_local(query: str | None = None) -> list[dict]:
@@ -133,7 +134,9 @@ def search_ghcr(query: str, page: int = 1, per_page: int = 10) -> dict:
     if not isinstance(items, list):
         return {"results": [], "total_count": total, "has_more": False}
 
-    results: list[dict] = []
+    # Filter valid items and collect (owner, repo, item) tuples for
+    # concurrent tag fetching so we don't make sequential blocking HTTP calls.
+    entries: list[tuple[str, str, dict]] = []
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -141,8 +144,15 @@ def search_ghcr(query: str, page: int = 1, per_page: int = 10) -> dict:
         repo = item.get("name", "")
         if not owner or not repo:
             continue
+        entries.append((owner, repo, item))
 
-        tags = get_ghcr_tags(owner, repo)
+    # Fetch tags concurrently via a bounded thread pool.  `get_ghcr_tags`
+    # catches all errors internally, so exceptions will not propagate.
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        all_tags = list(executor.map(lambda e: get_ghcr_tags(e[0], e[1]), entries))
+
+    results: list[dict] = []
+    for (owner, repo, item), tags in zip(entries, all_tags):
         results.append(
             {
                 "name": f"ghcr.io/{owner}/{repo}",
