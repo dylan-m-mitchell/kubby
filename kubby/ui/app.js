@@ -487,6 +487,7 @@
 
       // Show/hide empty state
       if (!query) {
+        this.els.searchStatus.hidden = true;
         // Reset to just local images
         this.state.remoteResults = { results: [], total_count: 0, has_more: false, page: 1 };
         try {
@@ -536,6 +537,7 @@
     },
 
     async _loadMoreRemote() {
+      const token = this.state._searchToken;
       const nextPage = (this.state.remoteResults.page || 1) + 1;
       if (this.els.loadMore) this.els.loadMore.disabled = true;
 
@@ -546,6 +548,7 @@
           false,
           true
         );
+        if (token !== this.state._searchToken) return;
         if (res && res.ok) {
           const remote = res.remote || { results: [], total_count: 0, has_more: false };
           const newResults = (remote.results || []).map((img) => ({
@@ -561,6 +564,7 @@
         }
       } catch (e) {}
 
+      if (token !== this.state._searchToken) return;
       if (this.els.loadMore) {
         this.els.loadMore.disabled = false;
         this.els.loadMore.hidden = !this.state.remoteResults.has_more;
@@ -815,6 +819,13 @@
       if (payload && payload.ok) {
         this.state.pulledImages.push(payload.image_ref);
         this.showToast("Image pulled: " + (payload.image_ref || ref), "ok");
+        // Update cached remote results' pulled state before re-rendering
+        const remote = this.state.remoteResults;
+        if (remote && remote.results) {
+          for (const img of remote.results) {
+            img.pulled = this._isImagePulled(img.name);
+          }
+        }
         // Refresh local images while preserving search context
         this._refreshLocalImages();
       } else {

@@ -428,7 +428,7 @@ class KubbyAPI:
             try:
                 podman_bin = shutil.which("podman") or "podman"
                 proc = subprocess.Popen(
-                    [podman_bin, "pull", image_ref],
+                    [podman_bin, "pull", "--", image_ref],
                     env=self._subprocess_env(),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
