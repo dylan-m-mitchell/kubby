@@ -73,11 +73,14 @@ class KubbyAPI:
         PyInstaller's onefile bootloader sets ``LD_LIBRARY_PATH`` to its bundled
         library directory, which can cause system binaries (podman, minikube,
         kubectl) to load the wrong shared libraries and fail with exit code 127.
-        Restore the original ``LD_LIBRARY_PATH`` if PyInstaller saved it.
+        Restore the original ``LD_LIBRARY_PATH`` if PyInstaller saved it;
+        otherwise drop it entirely so the bundled libs don't leak through.
         """
         env = os.environ.copy()
         if "LD_LIBRARY_PATH_ORIG" in env:
             env["LD_LIBRARY_PATH"] = env["LD_LIBRARY_PATH_ORIG"]
+        else:
+            env.pop("LD_LIBRARY_PATH", None)
         return env
 
     def _emit_log(self, line: str) -> None:
