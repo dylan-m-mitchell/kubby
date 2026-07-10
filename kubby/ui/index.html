@@ -15,6 +15,7 @@
     </div>
     <nav class="tabs" id="tabs">
       <button class="tab active" data-tab="cluster" type="button">Cluster</button>
+      <button class="tab" data-tab="search" type="button">Search</button>
       <button class="tab" data-tab="docs" type="button">Docs</button>
     </nav>
 
@@ -25,6 +26,48 @@
     <!-- Cluster tab -->
     <section class="tab-panel" id="tab-cluster" aria-live="polite">
       <div id="cluster-content"></div>
+    </section>
+
+    <!-- Search tab (image search) -->
+    <section class="tab-panel" id="tab-search" hidden>
+      <div class="search-bar-row">
+        <div class="search-input-wrap">
+          <label for="search-input" class="sr-only">Search container images</label>
+          <input
+            type="text"
+            id="search-input"
+            class="search-input"
+            placeholder="Search container images…"
+            autocomplete="off"
+          />
+        </div>
+        <label for="tag-filter" class="sr-only">Filter by tag</label>
+        <input
+          type="text"
+          id="tag-filter"
+          class="tag-filter"
+          placeholder="Tag filter (optional)"
+          autocomplete="off"
+        />
+        <a
+          id="dockerhub-link"
+          class="dockerhub-link"
+          href="https://hub.docker.com/search"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Search on Docker Hub"
+        >
+          <span aria-hidden="true">🐳</span>
+          <span>Docker Hub</span>
+        </a>
+      </div>
+      <div id="search-empty" class="search-empty">
+        <span class="search-empty-icon">📦</span>
+        <p>Search GitHub Container Registry or browse local podman images</p>
+      </div>
+      <section class="cards" id="search-results"></section>
+      <div id="search-status" class="search-status" hidden role="status" aria-live="polite"></div>
+      <button type="button" class="ghost" id="load-more" hidden>Load More</button>
     </section>
 
     <!-- Docs tab (tool status) -->

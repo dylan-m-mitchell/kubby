@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from kubby import settings as settings_mod
+from kubby import images as images_mod
 
 from kubby.installer import (
     detector,
@@ -58,8 +59,29 @@ class KubbyAPI:
         self._minikube_lock = threading.Lock()
         self._current_job_kind: str | None = None
 
+        # Image search / pull state
+        self._image_pull_thread: threading.Thread | None = None
+        self._image_pull_ref: str | None = None
+
     def bind_window(self, window: webview.Window) -> None:
         self._window = window
+
+    @staticmethod
+    def _subprocess_env() -> dict[str, str]:
+        """Return a copy of the current environment suitable for spawning external binaries.
+
+        PyInstaller's onefile bootloader sets ``LD_LIBRARY_PATH`` to its bundled
+        library directory, which can cause system binaries (podman, minikube,
+        kubectl) to load the wrong shared libraries and fail with exit code 127.
+        Restore the original ``LD_LIBRARY_PATH`` if PyInstaller saved it;
+        otherwise drop it entirely so the bundled libs don't leak through.
+        """
+        env = os.environ.copy()
+        if "LD_LIBRARY_PATH_ORIG" in env:
+            env["LD_LIBRARY_PATH"] = env["LD_LIBRARY_PATH_ORIG"]
+        else:
+            env.pop("LD_LIBRARY_PATH", None)
+        return env
 
     def _emit_log(self, line: str) -> None:
         """Push a log line to the frontend via `window.evaluate_js`."""
@@ -259,6 +281,7 @@ class KubbyAPI:
                 # thread per stream, then wait() in this thread.
                 proc = subprocess.Popen(
                     argv,
+                    env=self._subprocess_env(),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -326,6 +349,144 @@ class KubbyAPI:
                     )
             except Exception:
                 log.exception("failed to notify JS of minikube job completion")
+
+    # ---------- image search / pull ----------
+
+    def search_images(
+        self,
+        query: str,
+        page: int = 1,
+        include_local: bool = True,
+        include_remote: bool = True,
+    ) -> dict[str, Any]:
+        """Search for container images — local (podman) and remote (GHCR).
+
+        Returns ``{"ok": True, "local": [...], "remote": {...}}``.
+        Set *include_local* / *include_remote* to ``False`` to skip
+        unnecessary work when only one result set is needed.
+        """
+        local: list[dict[str, Any]] = []
+        remote: dict[str, Any] = {"results": [], "total_count": 0, "has_more": False}
+        if include_local:
+            env = self._subprocess_env()
+            local = (
+                images_mod.search_local(query, env=env)
+                if query.strip()
+                else images_mod.search_local(env=env)
+            )
+        if include_remote:
+            remote = images_mod.search_ghcr(query, page)
+        return {"ok": True, "local": local, "remote": remote}
+
+    def pull_image(self, image_ref: str) -> dict[str, Any]:
+        """Pull a container image via podman in a background thread.
+
+        Rejects the request if another job (minikube or image pull) is
+        already in progress. Progress is streamed to JS via
+        ``window.kubby.onImagePullProgress(...)`` and completion via
+        ``window.kubby.onImagePullDone(...)``.
+
+        Returns ``{"ok": True, "started": True, "image_ref": ...}``
+        on success, or ``{"ok": False, "error": ...}`` if busy/missing
+        podman.
+        """
+        with self._minikube_lock:
+            busy = (
+                (self._minikube_thread is not None and self._minikube_thread.is_alive())
+                or (self._image_pull_thread is not None and self._image_pull_thread.is_alive())
+            )
+            if busy:
+                kind = self._current_job_kind or self._image_pull_ref or "another job"
+                return {
+                    "ok": False,
+                    "error": f"a {kind} is already in progress — wait for it to finish",
+                }
+            if not shutil.which("podman"):
+                return {"ok": False, "error": "podman is not installed"}
+            self._image_pull_ref = image_ref
+            thread = threading.Thread(
+                target=self._run_image_pull,
+                args=(image_ref,),
+                daemon=True,
+                name=f"kubby-pull-{image_ref.split('/')[-1]}",
+            )
+            self._image_pull_thread = thread
+            thread.start()
+            return {"ok": True, "started": True, "image_ref": image_ref}
+
+    def _run_image_pull(self, image_ref: str) -> None:
+        """Worker thread body: run ``podman pull <image_ref>`` and stream.
+
+        Sends each output line to JS via ``window.kubby.onImagePullProgress``
+        and notifies completion via ``window.kubby.onImagePullDone``.
+        Always clears state in ``finally``.
+        """
+        ok = False
+        err: str | None = None
+        proc: subprocess.Popen[str] | None = None
+        try:
+            try:
+                podman_bin = shutil.which("podman") or "podman"
+                proc = subprocess.Popen(
+                    [podman_bin, "pull", "--", image_ref],
+                    env=self._subprocess_env(),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+
+                def _drain() -> None:
+                    for line in iter(proc.stdout.readline, ""):  # type: ignore[union-attr]
+                        clean = line.rstrip("\r\n")
+                        if not clean:
+                            continue
+                        try:
+                            if self._window is not None:
+                                self._window.evaluate_js(
+                                    "window.kubby && window.kubby"
+                                    f".onImagePullProgress({json.dumps(image_ref)},"
+                                    f"{json.dumps(clean)})"
+                                )
+                        except Exception:
+                            pass
+
+                reader = threading.Thread(target=_drain, daemon=True)
+                reader.start()
+
+                try:
+                    returncode = proc.wait(timeout=600)  # 10 min
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                    reader.join()
+                    err = "pull timed out (10 min)"
+                else:
+                    reader.join()
+                    if returncode == 0:
+                        ok = True
+                    else:
+                        err = f"exit code {returncode}"
+            except FileNotFoundError:
+                err = "podman binary not found on PATH"
+        except Exception as e:
+            log.exception("image pull raised unexpectedly")
+            err = str(e)
+        finally:
+            with self._minikube_lock:
+                self._image_pull_thread = None
+                self._image_pull_ref = None
+            completion = {"ok": ok, "error": err, "image_ref": image_ref}
+            try:
+                if self._window is not None:
+                    self._window.evaluate_js(
+                        "window.kubby && window.kubby"
+                        f".onImagePullDone({json.dumps(completion)})"
+                    )
+            except Exception:
+                log.exception("failed to notify JS of image pull completion")
 
 
     def get_cluster_info(self) -> dict[str, Any]:
@@ -456,6 +617,7 @@ class KubbyAPI:
         argv = linux.wrap_elevated(cmd)
         proc = subprocess.Popen(
             argv,
+            env=self._subprocess_env(),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
