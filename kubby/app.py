@@ -66,6 +66,20 @@ class KubbyAPI:
     def bind_window(self, window: webview.Window) -> None:
         self._window = window
 
+    @staticmethod
+    def _subprocess_env() -> dict[str, str]:
+        """Return a copy of the current environment suitable for spawning external binaries.
+
+        PyInstaller's onefile bootloader sets ``LD_LIBRARY_PATH`` to its bundled
+        library directory, which can cause system binaries (podman, minikube,
+        kubectl) to load the wrong shared libraries and fail with exit code 127.
+        Restore the original ``LD_LIBRARY_PATH`` if PyInstaller saved it.
+        """
+        env = os.environ.copy()
+        if "LD_LIBRARY_PATH_ORIG" in env:
+            env["LD_LIBRARY_PATH"] = env["LD_LIBRARY_PATH_ORIG"]
+        return env
+
     def _emit_log(self, line: str) -> None:
         """Push a log line to the frontend via `window.evaluate_js`."""
         if self._window is None:
@@ -264,6 +278,7 @@ class KubbyAPI:
                 # thread per stream, then wait() in this thread.
                 proc = subprocess.Popen(
                     argv,
+                    env=self._subprocess_env(),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -340,7 +355,6 @@ class KubbyAPI:
         """Search for container images — local (podman) and remote (GHCR).
 
         Returns ``{"ok": True, "local": [...], "remote": {...}}``.
-        ``remote`` is the dict returned by ``images.search_ghcr(...)``.
         """
         local = images_mod.search_local(query) if query.strip() else images_mod.search_local()
         remote = images_mod.search_ghcr(query, page)
@@ -394,8 +408,10 @@ class KubbyAPI:
         proc: subprocess.Popen[str] | None = None
         try:
             try:
+                podman_bin = shutil.which("podman") or "podman"
                 proc = subprocess.Popen(
-                    ["podman", "pull", image_ref],
+                    [podman_bin, "pull", image_ref],
+                    env=self._subprocess_env(),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -583,6 +599,7 @@ class KubbyAPI:
         argv = linux.wrap_elevated(cmd)
         proc = subprocess.Popen(
             argv,
+            env=self._subprocess_env(),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,

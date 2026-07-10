@@ -1125,6 +1125,33 @@ select.form-input option {
   color: var(--text-muted);
 }
 
+.dockerhub-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card);
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  transition: background 120ms, border 120ms, color 120ms, box-shadow 120ms;
+  white-space: nowrap;
+}
+
+.dockerhub-link:hover {
+  background: var(--border-soft);
+  border-color: #34466a;
+  color: var(--text);
+  box-shadow: 0 0 0 3px rgba(50, 108, 229, 0.1);
+}
+
+.dockerhub-link:active {
+  transform: translateY(1px);
+}
+
 .search-empty {
   display: flex;
   flex-direction: column;

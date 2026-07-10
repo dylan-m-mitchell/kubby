@@ -41,6 +41,7 @@
         // Image search elements
         searchInput: id("search-input"),
         tagFilter: id("tag-filter"),
+        dockerHubLink: id("dockerhub-link"),
         searchResults: id("search-results"),
         searchEmpty: id("search-empty"),
         searchStatus: id("search-status"),
@@ -74,6 +75,7 @@
       // Search tab events
       if (this.els.searchInput) {
         this.els.searchInput.addEventListener("input", () => this._onSearchInput());
+        this.els.searchInput.addEventListener("change", () => this._updateDockerHubLink());
         this.els.tagFilter.addEventListener("input", () => this._doSearch());
       }
       if (this.els.loadMore) {
@@ -96,8 +98,11 @@
         this.loadCluster();
       }
       // Lazy-load local images when switching to search tab
-      if (tab === "search" && this.state.localImages.length === 0) {
-        this._loadLocalImages();
+      if (tab === "search") {
+        this._updateDockerHubLink();
+        if (this.state.localImages.length === 0) {
+          this._loadLocalImages();
+        }
       }
     },
 
@@ -453,6 +458,18 @@
     _onSearchInput() {
       clearTimeout(this.state._searchTimer);
       this.state._searchTimer = setTimeout(() => this._doSearch(), 300);
+      this._updateDockerHubLink();
+    },
+
+    _updateDockerHubLink() {
+      const link = this.els.dockerHubLink;
+      if (!link) return;
+      const query = (this.els.searchInput ? this.els.searchInput.value : "").trim();
+      if (query) {
+        link.href = "https://hub.docker.com/search?q=" + encodeURIComponent(query);
+      } else {
+        link.href = "https://hub.docker.com/search";
+      }
     },
 
     async _doSearch() {

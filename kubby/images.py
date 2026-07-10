@@ -1,9 +1,8 @@
-"""Image search and pull utilities for kubby.
+"""Image search utilities for kubby.
 
 Public surface:
 - ``search_local(query)`` — query local podman images
 - ``search_ghcr(query, page, per_page)`` — search GitHub Container Registry
-- ``pull_image(image_ref)`` — pull an image via podman
 - ``get_ghcr_tags(owner, repo)`` — fetch tags for a GHCR image
 """
 
@@ -151,21 +150,3 @@ def search_ghcr(query: str, page: int = 1, per_page: int = 10) -> dict:
     return {"results": results, "total_count": total, "has_more": has_more}
 
 
-def pull_image(image_ref: str) -> subprocess.Popen | None:
-    """Start ``podman pull <image_ref>`` and return the Popen process.
-
-    Returns ``None`` if podman is not found on PATH.
-    The caller is responsible for reading stdout/stderr and waiting.
-    """
-    import shutil
-
-    if not shutil.which("podman"):
-        return None
-
-    return subprocess.Popen(
-        ["podman", "pull", image_ref],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
