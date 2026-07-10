@@ -48,6 +48,16 @@ def search_local(query: str | None = None) -> list[dict]:
         names = img.get("Names") or img.get("names") or []
         name = names[0] if names else (img.get("Id", "") or "")[:12]
         tags = img.get("Tags") or img.get("tags") or []
+        # When the top-level Tags list is absent (newer podman JSON format),
+        # try the per-image Tag field, then fall back to extracting the tag
+        # from Names[0] (e.g. "nginx:alpine") so we never report "latest"
+        # for an image that has a real tag.
+        if not tags:
+            explicit_tag = img.get("Tag") or img.get("tag")
+            if explicit_tag and explicit_tag != "<none>":
+                tags = [explicit_tag]
+            elif name and ":" in name and "/" not in name.rsplit(":", 1)[-1]:
+                tags = [name.rsplit(":", 1)[-1]]
         created = img.get("Created") or img.get("created") or ""
         size = img.get("Size") or img.get("size") or ""
 
