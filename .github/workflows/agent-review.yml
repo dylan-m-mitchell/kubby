@@ -1,0 +1,88 @@
+name: Agent review loop
+
+# Opens the agentic loop when a PR is opened: the ci-reviewer agent reviews
+# the diff, writes a fix plan into a sticky PR comment, applies the fixes it
+# considers safe, and the loop repeats until the agent reports CLEAN, reports
+# something only a human can decide, or the 3-round cap is reached.
+#
+# Why the loop lives in one job rather than re-triggering itself:
+# pushes made with GITHUB_TOKEN do not start new workflow runs, so the agent's
+# commits cannot re-fire this workflow (or ci.yml). That is deliberate — it
+# means no runaway recursion — and it is why the script runs ruff + pytest
+# itself before every push: the gates it enforces are the gates the PR would
+# have gotten from CI on a human push.
+#
+# Setup: add the OPENCODE_API_KEY repository secret (OpenCode Console
+# service-account key) to enable paid models. Without it the loop still runs
+# on a free model. Set the REVIEW_MODEL repository variable to pick a model
+# explicitly. Draft PRs and PRs labelled skip-agent-review are not reviewed;
+# fork PRs are reviewed but never edited or pushed to (read-only token).
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+
+concurrency:
+  group: agent-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  review:
+    name: review and fix
+    if: >-
+      !github.event.pull_request.draft &&
+      github.actor != 'github-actions[bot]' &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-agent-review')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      PR_HEAD_REF: ${{ github.head_ref }}
+      MAX_ITERATIONS: '3'
+      # Same-repo PRs can be pushed to; forks cannot (and must not be).
+      PUSH_FIXES: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+      REVIEW_MODEL: ${{ vars.REVIEW_MODEL }}
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      # The script uses this for gh/git only — it strips the token from the
+      # agent's environment before launching the model.
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Review the head, not the temporary merge commit: what the agent
+          # fixes must be what lands on the branch.
+          ref: ${{ github.event.pull_request.head.sha }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          fetch-depth: 0
+          # No credential in git config: the agent has a shell in this repo
+          # and must not be able to read the token out of .git/config.
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+          # Shares nothing with the other jobs' caches on purpose: setup-uv
+          # cache keys collide across jobs otherwise.
+          cache-suffix: agent-review
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # @opencode/cli is the V2 line (the older `opencode-ai` package is V1).
+      # Pinned exactly: a review bot must not silently change behaviour on
+      # someone else's release day.
+      - name: Install OpenCode
+        run: npm install --global @opencode/cli@2.0.16
+
+      - name: Sanity check
+        run: opencode --version
+
+      - name: Run the review loop
+        run: ./scripts/agent-review-loop.sh

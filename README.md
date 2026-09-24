@@ -100,6 +100,29 @@ pip install pyinstaller   # one-time
 See `kubby.spec` for what gets bundled (the TUI stylesheet, Textual's data
 files, onefile mode).
 
+## Continuous integration
+
+Every PR runs lint, tests and a binary build (`.github/workflows/ci.yml`);
+tagging `vX.Y.Z` builds, smoke-tests and publishes a release
+(`.github/workflows/release.yml`).
+
+Opening a PR also starts the **agent review loop**
+(`.github/workflows/agent-review.yml`). The `ci-reviewer` OpenCode agent
+reviews the diff, posts a fix plan as a sticky PR comment, applies the fixes
+it considers safe, and the loop goes around again — up to 3 rounds — until
+the agent reports `CLEAN`, or a finding needs a human. Nothing is pushed
+until the round passes the same `ruff` + `pytest` checks CI runs, and a
+failing round hands its error output straight back to the agent.
+
+- **Opt out:** open the PR as a draft, or add the `skip-agent-review` label.
+- **Model:** set the `REVIEW_MODEL` repository variable to choose one.
+  Without it, adding the `OPENCODE_API_KEY` secret (an OpenCode Console
+  service-account key) selects a paid model; with neither, the loop falls
+  back to a free model so it still runs.
+- **Guardrails:** the agent cannot commit, push, edit `.github/`, or reach
+  the network — the surrounding script owns every GitHub action, and fork
+  PRs are reviewed but never edited (their token is read-only).
+
 ## Requirements
 
 - Any interactive terminal on Linux (X11/Wayland not required)
@@ -109,6 +132,11 @@ files, onefile mode).
 ## Layout
 
 ```
+.github/workflows/      ci.yml, release.yml, agent-review.yml
+.opencode/agents/
+  ci-reviewer.md        # the PR review agent (permissions + system prompt)
+scripts/
+  agent-review-loop.sh  # review → plan → fix → gate → push, ≤ 3 rounds
 kubby/
   __init__.py
   __main__.py             # python -m kubby
