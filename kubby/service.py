@@ -80,8 +80,10 @@ class KubbyService:
         on_log: Callable[[str], None] = _NOOP_LOG,
         on_job_done: Callable[[dict], None] = _NOOP_DONE,
     ) -> None:
-        self._on_log = on_log
-        self._on_job_done = on_job_done
+        # Public (re)assignable: a UI builds the service first, then attaches
+        # its own sinks — `service.on_log = self._handle_line`.
+        self.on_log = on_log
+        self.on_job_done = on_job_done
 
         # Single-job bookkeeping for minikube start/stop/delete.
         self._job_lock = threading.Lock()
@@ -100,14 +102,14 @@ class KubbyService:
     def _emit(self, line: str) -> None:
         """Push one log line to the consumer. Never raises."""
         try:
-            self._on_log(line)
+            self.on_log(line)
         except Exception:
             log.exception("on_log callback raised")
 
     def _notify_done(self, payload: dict[str, Any]) -> None:
         """Push a minikube-job completion payload. Never raises."""
         try:
-            self._on_job_done(payload)
+            self.on_job_done(payload)
         except Exception:
             log.exception("on_job_done callback raised")
 
