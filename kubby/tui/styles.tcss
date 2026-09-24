@@ -67,7 +67,7 @@ Screen {
 }
 
 /* help overlay ------------------------------------------------------ */
-HelpScreen {
+HelpScreen, ConfirmModal, PrereqModal {
     align: center middle;
     background: $bg 70%;
 }
@@ -79,4 +79,38 @@ HelpScreen {
     border: round $border-focus;
     background: $panel-bg;
     padding: 1 2;
+}
+
+/* confirm / preflight boxes ---------------------------------------- */
+#confirm-box, #prereq-box {
+    width: 60;
+    height: auto;
+    max-height: 90%;
+    border: round $border-focus;
+    background: $panel-bg;
+    padding: 1 2;
+}
+
+#confirm-title, #prereq-title {
+    color: $accent;
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+#confirm-message, #prereq-hints, #confirm-hints {
+    color: $dim;
+    padding-top: 1;
+}
+
+/* image filter ------------------------------------------------------ */
+/* Hidden until "/" opens it (Python also toggles `display`). Textual's
+   Input ships with a `tall` border, which at height 1 eats the content
+   row — strip it so this reads as a single lazygit-style strip. */
+#filter-bar {
+    display: none;
+    height: 1;
+    border: none;
+    background: $strip-bg;
+    color: $text;
+    padding: 0 1;
 }

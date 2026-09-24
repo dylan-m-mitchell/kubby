@@ -5,8 +5,9 @@ images) beside a right-hand namespaces tree, a streaming log strip, and a
 keybar.  Every panel is bordered, focusable and lazygit-style — Tab
 cycles between them and the focused one gets a brighter border/title.
 
-Panels are dumb: they *render* state handed to them by `kubby.tui.app`,
-which owns fetching, actions and key handling.
+Panels are dumb about *doing*: a key press becomes a `PanelAction`
+message, `kubby.tui.app` performs it (in a worker, against the service)
+and pushes fresh state back through the `set_*` methods below.
 """
 
 from __future__ import annotations
@@ -15,9 +16,29 @@ from typing import Any, ClassVar
 
 from rich.text import Text
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Vertical
+from textual.message import Message
 from textual.widgets import OptionList, RichLog, Static, Tree
 from textual.widgets.option_list import Option
+
+
+class PanelFocused(Message):
+    """Bubbles to the app when a panel gains focus, so the keybar can show
+    that panel's keys."""
+
+    def __init__(self, panel: "PanelBase") -> None:
+        super().__init__()
+        self.panel = panel
+
+
+class PanelAction(Message):
+    """A panel key was pressed; the app decides what that means."""
+
+    def __init__(self, action: str, payload: Any = None) -> None:
+        super().__init__()
+        self.action = action
+        self.payload = payload
 
 
 class PanelBase:
@@ -33,6 +54,12 @@ class PanelBase:
     #: Every concrete panel picks up the `.panel` stylesheet rules
     #: (border, background, focus highlight) automatically.
     DEFAULT_CLASSES = "panel"
+
+    def on_focus(self) -> None:
+        self.post_message(PanelFocused(self))
+
+    def _request(self, action: str, payload: Any = None) -> None:
+        self.post_message(PanelAction(action, payload))
 
 
 def format_size(size: Any) -> str:
@@ -55,13 +82,33 @@ def format_size(size: Any) -> str:
 
 
 class MinikubePanel(PanelBase, Vertical, can_focus=True):
-    """Cluster summary — context, version, reachable/not."""
+    """Cluster summary — context, version, reachable/not — plus the
+    start/stop/delete keys."""
 
     BORDER_TITLE = "minikube"
     EMPTY_TEXT = "no cluster"
 
+    BINDINGS = [
+        Binding("s", "request('start')", "start"),
+        Binding("S", "request('stop')", "stop"),
+        Binding("d", "request('delete')", "delete"),
+    ]
+
     def compose(self) -> ComposeResult:
         yield Static(Text(self.EMPTY_TEXT, style="dim"), id="minikube-body")
+
+    def action_request(self, action: str) -> None:
+        self._request(action)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action != "request":
+            return super().check_action(action, parameters)
+        if self.app.is_busy:
+            return None  # visible but grayed while something is running
+        kind = parameters[0] if parameters else None
+        running = bool(self.app.cluster.get("running"))
+        # Start only makes sense without a cluster; stop/delete need one.
+        return (not running) if kind == "start" else running
 
     def set_cluster(self, info: dict[str, Any]) -> None:
         body = self.query_one("#minikube-body", Static)
@@ -94,7 +141,10 @@ class MinikubePanel(PanelBase, Vertical, can_focus=True):
         if nodes:
             ready = sum(1 for n in nodes if n.get("status") == "Ready")
             out.append("\n")
-            out.append(f"{ready}/{len(nodes)}", style="green" if ready == len(nodes) else "yellow")
+            out.append(
+                f"{ready}/{len(nodes)}",
+                style="green" if ready == len(nodes) else "yellow",
+            )
             out.append(" nodes ready", style="dim")
         return out
 
@@ -105,10 +155,40 @@ class ToolsPanel(PanelBase, OptionList):
     BORDER_TITLE = "tools"
     EMPTY_TEXT = "no tools"
 
+    BINDINGS = [
+        Binding("i", "request('install')", "install"),
+        Binding("I", "request('install_all')", "install all"),
+    ]
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(markup=False, **kwargs)
 
+    def action_request(self, action: str) -> None:
+        self._request(action, self.selected_tool() if action == "install" else None)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action != "request":
+            return super().check_action(action, parameters)
+        if self.app.is_busy:
+            return None
+        if parameters and parameters[0] == "install":
+            return self.selected_tool() is not None
+        return True
+
+    def selected_tool(self) -> str | None:
+        """Registry key of the highlighted row (None for the empty state)."""
+        index = self.highlighted
+        if index is None:
+            return None
+        try:
+            option = self.get_option_at_index(index)
+        except Exception:
+            return None
+        return option.id
+
     def set_tools(self, tools: list[dict[str, Any]]) -> None:
+        # Keep the user's selection across a refresh (post-install, rows move).
+        selected = self.selected_tool()
         self.clear_options()
         if not tools:
             self.add_option(Option(Text(self.EMPTY_TEXT, style="dim")))
@@ -123,14 +203,27 @@ class ToolsPanel(PanelBase, OptionList):
                 row = Text("✗ ", style="red")
                 row.append(f"{label:<9}")
                 row.append("not installed", style="dim")
-            self.add_option(Option(row))
+            self.add_option(Option(row, id=str(tool.get("key"))))
+        if selected is not None:
+            for index, tool in enumerate(tools):
+                if str(tool.get("key")) == selected:
+                    self.highlighted = index
+                    break
+        if self.highlighted is None:
+            # OptionList starts with nothing highlighted; a row must always
+            # be actionable, otherwise `i` has no target after a refresh.
+            self.highlighted = 0
 
 
 class ImagesPanel(PanelBase, OptionList):
-    """Local podman images (no network)."""
+    """Local podman images (no network), filterable with ``/``."""
 
     BORDER_TITLE = "images"
     EMPTY_TEXT = "no local images"
+
+    BINDINGS = [
+        Binding("slash", "request('filter')", "filter"),
+    ]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(markup=False, **kwargs)
@@ -138,16 +231,38 @@ class ImagesPanel(PanelBase, OptionList):
         #: these, while the rows show the short name).
         self._images: list[dict[str, Any]] = []
 
-    def set_images(self, images: list[dict[str, Any]]) -> None:
-        self.clear_options()
-        self._images = list(images)
-        if not images:
-            self.add_option(Option(Text(self.EMPTY_TEXT, style="dim")))
-            return
-        for image in images:
-            self.add_option(Option(self._row(image)))
+    def action_request(self, action: str) -> None:
+        self._request(action)
 
-    def _row(self, image: dict[str, Any]) -> Text:
+    def set_images(
+        self, images: list[dict[str, Any]], query: str = ""
+    ) -> None:
+        self._images = list(images)
+        rows = images
+        needle = query.strip().lower()
+        if needle:
+            rows = [
+                image
+                for image in images
+                if needle in str(image.get("name", "")).lower()
+                or any(needle in str(tag).lower() for tag in image.get("tags") or [])
+            ]
+        self.clear_options()
+        if not rows:
+            label = (
+                f"no image matches “{query.strip()}”"
+                if needle
+                else self.EMPTY_TEXT
+            )
+            self.add_option(Option(Text(label, style="dim")))
+            return
+        for image in rows:
+            self.add_option(Option(self._row(image)))
+        if self.highlighted is None:
+            self.highlighted = 0
+
+    @staticmethod
+    def _row(image: dict[str, Any]) -> Text:
         name = str(image.get("name") or "?")
         # Display the familiar short name; the filter matches the full one.
         short = name.split("/")[-1]
@@ -159,7 +274,7 @@ class ImagesPanel(PanelBase, OptionList):
 
 
 class ClusterPanel(PanelBase, Tree):
-    """Namespaces, ready to grow pod rows (Phase 3)."""
+    """Namespaces with their pods, expandable (arrows / enter / left-right)."""
 
     BORDER_TITLE = "namespaces"
     EMPTY_TEXT = "no cluster"
@@ -182,18 +297,37 @@ class ClusterPanel(PanelBase, Tree):
 
         if not info.get("running"):
             self.root.add_leaf(Text(self.EMPTY_TEXT, style="dim"))
-            return
-
-        namespaces = info.get("namespaces") or []
-        if not namespaces:
+        elif not (info.get("namespaces") or []):
             self.root.add_leaf(Text("no namespaces", style="dim"))
-            return
-        for namespace in namespaces:
-            pods = namespace.get("pods") or []
-            label = Text(str(namespace.get("name") or "?"))
-            label.append(f"  {len(pods)}", style="dim")
-            label.append(" pods" if len(pods) != 1 else " pod", style="dim")
-            self.root.add_leaf(label, data=namespace)
+        else:
+            for namespace in info["namespaces"]:
+                pods = namespace.get("pods") or []
+                label = Text(str(namespace.get("name") or "?"))
+                label.append(f"  {len(pods)}", style="dim")
+                label.append(" pods" if len(pods) != 1 else " pod", style="dim")
+                # Expanded by default so pods are visible without a keypress.
+                node = self.root.add(label, data=namespace, expand=True)
+                for pod in pods:
+                    node.add(self._pod_label(pod), data=pod, allow_expand=False)
+
+        # Tree starts with no cursor (show_root is off); a focused panel
+        # always shows one, and the existing position survives a refresh.
+        if self.cursor_line < 0:
+            self.cursor_line = 0
+
+    @staticmethod
+    def _pod_label(pod: dict[str, Any]) -> Text:
+        name = str(pod.get("name") or "?")
+        status = str(pod.get("status") or "Unknown")
+        if status in ("Running", "Succeeded", "Completed"):
+            style = "green"
+        elif status in ("Pending", "ContainerCreating"):
+            style = "yellow"
+        else:
+            style = "red"
+        label = Text(name)
+        label.append(f"  {status}", style=style)
+        return label
 
 
 class LogPanel(RichLog):
@@ -236,9 +370,10 @@ class LogPanel(RichLog):
         self.sync()
 
     def end_job(self, ok: bool) -> None:
-        """The job finished; a failure pins the log open (rule 5)."""
+        """The job finished; a failure pins the log open (rule 5) — unless
+        this job was dismissed, which wins over the pin (rule 2)."""
         self.job_active = False
-        if not ok:
+        if not ok and not self.dismissed:
             self.pinned = True
         self.sync()
 

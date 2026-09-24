@@ -6,13 +6,12 @@ Every test drives a real `KubbyApp` through Textual's pilot, with a
 
 from __future__ import annotations
 
-import asyncio
 import threading
-import time
 
+from textual.binding import Binding
 from textual.widgets import Static
 
-from kubby.tui.app import KubbyApp, GLOBAL_KEYS, render_status, render_keybar
+from kubby.tui.app import KubbyApp, APP_KEYS, render_status
 from kubby.tui.panels import (
     ClusterPanel,
     ImagesPanel,
@@ -22,18 +21,9 @@ from kubby.tui.panels import (
     format_size,
 )
 from kubby.tui.popups import HelpScreen
+from helpers import wait_until
 
 PANEL_IDS = ("minikube", "tools", "images", "cluster")
-
-
-async def wait_until(predicate, timeout: float = 5.0) -> bool:
-    """Poll until *predicate* holds (workers finish off the UI thread)."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        await asyncio.sleep(0.02)
-    return predicate()
 
 
 class TestShell:
@@ -95,9 +85,10 @@ class TestShell:
 
             body = app.screen.query_one("#help-body", Static)
             text = str(body.content)
-            for key, label in GLOBAL_KEYS:
-                assert f'"{key}"' in text, key
-                assert label in text, label
+            for key, action, description, _show in APP_KEYS:
+                display = app.get_key_display(Binding(key, action, description))
+                assert f'"{display}"' in text, key
+                assert description in text, description
 
             # `q` closes the overlay — it must NOT quit the app.
             await pilot.press("q")
@@ -197,12 +188,6 @@ class TestRenderHelpers:
         assert "no cluster" in text
         assert "APT + sudo" in text
         assert "ctx:" not in text and "nodes" not in text  # nothing to show yet
-
-    def test_keybar_quotes_every_key(self):
-        text = str(render_keybar())
-        for key, label in GLOBAL_KEYS:
-            assert f'"{key}"' in text
-            assert label in text
 
     def test_format_size(self):
         assert format_size(125_829_120) == "120.0MB"

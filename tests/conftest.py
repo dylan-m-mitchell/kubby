@@ -9,6 +9,7 @@ exercise re-check without touching the host.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
@@ -102,6 +103,8 @@ class FakeService:
         self.job_result: dict[str, Any] = {"ok": True, "started": True}
         self.install_result: dict[str, Any] = {"ok": True, "installed": ["helm"],
                                                "failed": [], "skipped": 0}
+        #: seconds an install "takes" — gives pilot tests a busy window
+        self.install_delay = 0.0
         self.prerequisites: dict[str, Any] = {"ok": True, "issues": [],
                                               "settings_path": "/tmp/settings.json"}
         self.settings: dict[str, Any] = {"minikube": {
@@ -199,7 +202,7 @@ class FakeService:
             return {"ok": False, "log": "",
                     "error": f"a {kind} is already in progress — wait for it to finish"}
         self.calls.append(f"install_tool:{key}")
-        return dict(self.install_result)
+        return self._simulate_install(f"tool {key}")
 
     def install_all(self) -> dict[str, Any]:
         if self.job_running:
@@ -207,6 +210,14 @@ class FakeService:
             return {"ok": False, "installed": [], "failed": [], "skipped": 0,
                     "error": f"a {kind} is already in progress — wait for it to finish"}
         self.calls.append("install_all")
+        return self._simulate_install("every tool")
+
+    def _simulate_install(self, what: str) -> dict[str, Any]:
+        """Stream two lines like the real installer, then return its summary."""
+        if self.install_delay:
+            time.sleep(self.install_delay)
+        self.on_log(f"$ installing {what}")
+        self.on_log("done")
         return dict(self.install_result)
 
     # ----- job state ---------------------------------------------------
