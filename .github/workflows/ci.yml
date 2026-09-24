@@ -1,0 +1,113 @@
+name: CI
+
+# Every push to any branch, plus every pull request.
+# `branches: ['**']` is what keeps tag pushes out — those belong to
+# release.yml, and without it this workflow would run twice per release.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# A newer push to the same branch makes older runs pointless. Cancel them
+# instead of burning Actions minutes on results nobody will read.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # Ruff is deliberately NOT added to pyproject.toml yet — the rule set
+      # and the formatting pass are still in flight. Running it via `uvx`
+      # with a pinned version keeps CI deterministic without touching the
+      # project lockfile.
+      #
+      # `--select E9,F` is the high-signal subset: syntax errors, undefined
+      # names, unused imports, bad f-strings. Everything else (import
+      # ordering, line length, style) gets enabled once the formatting work
+      # lands — flip this to a bare `uv run ruff check .` at that point.
+      - name: ruff (errors only)
+        run: uvx ruff@0.16.8 check . --select E9,F
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          # Resolved from .python-version (3.12) so CI matches dev machines.
+          python-version-file: .python-version
+
+      # --locked fails the build if uv.lock drifted out of sync with
+      # pyproject.toml, which is exactly the "silent dependency drift"
+      # failure mode we want surfaced here rather than on someone's laptop.
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # Node is preinstalled on ubuntu-latest, so tests/test_ui_log_dismissal.py
+      # runs its JS regression test instead of silently skipping.
+      - name: Run tests
+        run: uv run pytest
+
+  build:
+    name: build binary
+    # Building the PyInstaller bundle takes several minutes, so it only
+    # gates pull requests. Pushes are already covered by `test`.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # PyInstaller has to see the GTK/WebKit introspection bindings at
+      # build time in order to bundle them. These are the same packages the
+      # README tells end users to install.
+      - name: Install GTK / WebKit build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-gi \
+            python3-gi-cairo \
+            gir1.2-gtk-3.0 \
+            gir1.2-webkit2-4.1
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version-file: .python-version
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # pyinstaller / jaraco.text are intentionally kept out of
+      # pyproject.toml (build-binary.sh documents why: the build is
+      # out-of-band). `uv run --with` injects them for this invocation only
+      # and leaves uv.lock untouched.
+      - name: Build one-file binary
+        run: uv run --with pyinstaller --with jaraco.text ./build-binary.sh --clean
+
+      # Exit code 0 from PyInstaller does not mean the bundle actually
+      # runs. `--check` exercises the frozen import path headlessly — it
+      # never opens a window, so no Xvfb needed.
+      - name: Smoke test binary
+        run: ./dist/kubby --check
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubby-linux-x86_64
+          path: dist/kubby
+          retention-days: 7

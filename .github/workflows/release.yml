@@ -1,0 +1,68 @@
+name: Release
+
+# Cutting a release is:  git tag vX.Y.Z && git push origin vX.Y.Z
+# The tag must be pushed (not created via the GitHub UI) — this workflow
+# builds on a Linux runner, and the UI-created release would have nothing
+# attached to it.
+on:
+  push:
+    tags:
+      - 'v*'
+
+# `contents: write` is the only permission this needs — it creates a
+# Release and uploads two assets. Scoped here rather than repo-wide.
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GTK / WebKit build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-gi \
+            python3-gi-cairo \
+            gir1.2-gtk-3.0 \
+            gir1.2-webkit2-4.1
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version-file: .python-version
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Build one-file binary
+        run: uv run --with pyinstaller --with jaraco.text ./build-binary.sh --clean
+
+      # Never publish a binary that cannot start. `--check` runs headless.
+      - name: Smoke test binary
+        run: ./dist/kubby --check
+
+      - name: Generate checksum
+        run: |
+          cd dist
+          sha256sum kubby > kubby.sha256
+          cat kubby.sha256
+
+      # gh ships on every GitHub runner, so no third-party release action
+      # is required. --generate-notes fills the body from merged PRs.
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/kubby \
+            dist/kubby.sha256 \
+            --title "kubby ${GITHUB_REF_NAME}" \
+            --generate-notes
