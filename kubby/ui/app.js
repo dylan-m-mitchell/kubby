@@ -3,7 +3,7 @@
 
   const kubby = {
     els: {},
-    state: { tools: [], cluster: null, activeTab: "cluster", minikubeSettings: null, minikubePrereqs: null, minikubeJobRunning: false, minikubeJobKind: null, installJobKey: null, globalLogTitle: null, globalLogHint: null, globalLogPinned: false, logBuffer: [],
+    state: { tools: [], cluster: null, activeTab: "cluster", minikubeSettings: null, minikubePrereqs: null, minikubeJobRunning: false, minikubeJobKind: null, installJobKey: null, globalLogTitle: null, globalLogHint: null, globalLogPinned: false, globalLogDismissed: false, logBuffer: [],
       // Image search state
       searchQuery: "", searchTagFilter: "", localImages: [],
       remoteResults: { results: [], total_count: 0, has_more: false, page: 1 },
@@ -37,6 +37,7 @@
         globalLogContent: id("global-log-content"),
         globalLogTitle: id("global-log-title"),
         globalLogHint: id("global-log-hint"),
+        globalLogClose: id("global-log-close"),
         installAll: id("install-all"),
         // Image search elements
         searchInput: id("search-input"),
@@ -72,6 +73,15 @@
         (e) => this._onDocsClick(e),
       );
       this.els.installAll.addEventListener("click", () => this._installAll());
+      // Global log close button. Dismissal is recorded for the current
+      // job so a later render (Re-check, settings save, job completion)
+      // doesn't pop the panel back open through _syncGlobalLog().
+      if (this.els.globalLogClose) {
+        this.els.globalLogClose.addEventListener("click", () => {
+          this.state.globalLogDismissed = true;
+          this._hideGlobalLog();
+        });
+      }
       // Search tab events
       if (this.els.searchInput) {
         this.els.searchInput.addEventListener("input", () => this._onSearchInput());
@@ -988,6 +998,8 @@
       this.state.minikubeJobRunning = true;
       this.state.minikubeJobKind = kind;
       this.state.logBuffer = [];
+      // New job: a previous dismissal no longer applies, show its log.
+      this.state.globalLogDismissed = false;
       this._showGlobalLog("minikube output", kind + " in progress…");
       this.renderCluster();
     },
@@ -1265,6 +1277,8 @@
       if (uninstalled.length === 0) return;
       this.state.installJobKey = "__all__";
       this.state.logBuffer = [];
+      // New job: a previous dismissal no longer applies, show its log.
+      this.state.globalLogDismissed = false;
       this._showGlobalLog("installing " + uninstalled.length + " tool(s)", "streaming…");
       this.renderDocsCards();
       let res;
@@ -1305,6 +1319,8 @@
       if (!tool || tool.installed) return;
       this.state.installJobKey = key;
       this.state.logBuffer = [];
+      // New job: a previous dismissal no longer applies, show its log.
+      this.state.globalLogDismissed = false;
       const label = tool ? tool.label : key;
       this._showGlobalLog("installing " + label, "streaming…");
       this.renderDocsCards();
@@ -1375,7 +1391,18 @@
     // always populated when we get here. The pinned branch handles the
     // case where a job has finished (busy=false) but the log should
     // stay visible because the user is reading failure output.
+    //
+    // A dismissal made via the panel's close button beats both branches:
+    // the user asked for the log to go away mid-job, so later renders
+    // (Re-check, settings save, job completion — including the
+    // post-failure pin) must leave it closed. _hideGlobalLog() clears the
+    // pin as well, so nothing re-opens it. The flag is reset when the
+    // next job starts (_beginJobUi / _installTool / _installAll).
     _syncGlobalLog() {
+      if (this.state.globalLogDismissed) {
+        this._hideGlobalLog();
+        return;
+      }
       const busy = this.state.minikubeJobRunning || !!this.state.installJobKey;
       if (busy || this.state.globalLogPinned) {
         this._showGlobalLog(this.state.globalLogTitle, this.state.globalLogHint);

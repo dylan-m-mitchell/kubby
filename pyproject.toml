@@ -15,3 +15,12 @@ kubby = "kubby.app:main"
 # The shipped artifact is a PyInstaller --onefile binary
 # (see build-binary.sh); uv is the dev install path only.
 package = true
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -83,6 +83,17 @@ uv run -m kubby.app           # run from source
 uv run -m kubby.app --check   # print tool status
 ```
 
+### Tests
+
+```bash
+uv run pytest        # unit tests (pytest is a dev dependency)
+```
+
+Tests live in `tests/` and cover the pure-logic modules: the tool registry
+and its version parsers, settings load/save coercion, package-manager +
+elevation selection, tool detection, and the settings → `minikube` argv
+translation. They need no display, no network, and no cluster.
+
 ### Build the binary
 
 ```bash
@@ -119,6 +130,7 @@ kubby/
 kubby.spec                # PyInstaller spec (onefile build)
 build-binary.sh           # developer: produce dist/kubby
 pyproject.toml            # project config (deps: pywebview)
+tests/                    # pytest suite (uv run pytest)
 ```
 
 ## Roadmap
