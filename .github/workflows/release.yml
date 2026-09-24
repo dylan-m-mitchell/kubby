@@ -1,0 +1,75 @@
+name: Release
+
+# Cutting a release is:  git tag vX.Y.Z && git push origin vX.Y.Z
+# The tag must be pushed (not created via the GitHub UI) — this workflow
+# builds on a Linux runner, and the UI-created release would have nothing
+# attached to it.
+on:
+  push:
+    tags:
+      - 'v*'
+
+# `contents: write` is the only permission this needs — it creates a
+# Release and uploads two assets. Scoped here rather than repo-wide.
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+          # Cache keys are global — without a suffix this can race a
+          # concurrent CI run saving the same key.
+          cache-suffix: release
+
+      # uv resolves the interpreter from .python-version, so the release
+      # is built with the same Python as CI and dev machines.
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # No system GUI packages: the Textual TUI is pure Python and bundles
+      # no native bindings. jaraco.text is required at build time only
+      # (see build-binary.sh / kubby.spec — PYI-5550).
+      - name: Build one-file binary
+        run: uv run --with pyinstaller --with jaraco.text ./build-binary.sh --clean
+
+      # Never publish a binary that cannot start. `--check` runs headless.
+      - name: Smoke test binary
+        run: ./dist/kubby --check
+
+      - name: Generate checksum
+        run: |
+          cd dist
+          sha256sum kubby > kubby.sha256
+          cat kubby.sha256
+
+      # gh ships on every GitHub runner, so no third-party release action
+      # is required. --generate-notes fills the body from merged PRs.
+      #
+      # Pre-release tags (-rc1, -beta.2, -alpha) must not show up as a
+      # normal release or land on the repo's "latest" link.
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          FLAGS=()
+          if [[ "$TAG" =~ -(alpha|beta|rc|pre|dev|test)[.0-9]*$ ]]; then
+            FLAGS+=(--prerelease)
+          fi
+          gh release create "$TAG" \
+            dist/kubby \
+            dist/kubby.sha256 \
+            --title "kubby ${TAG}" \
+            "${FLAGS[@]}" \
+            --generate-notes

@@ -1,0 +1,111 @@
+name: CI
+
+# Pushes are limited to the two long-lived branches: `dev` is where PRs
+# land, `master` is the release branch. Feature branches only run CI via
+# their pull request — that keeps every commit from running the suite
+# twice (once for the push, once for the PR) while still gating merges.
+#
+# Tag pushes are excluded on purpose: they belong to release.yml.
+on:
+  push:
+    branches: [dev, master]
+  pull_request:
+
+# A newer push to the same branch makes older runs pointless. Cancel them
+# instead of burning Actions minutes on results nobody will read.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+          cache-suffix: ${{ github.job }}
+
+      # Ruff is deliberately NOT added to pyproject.toml yet — the rule set
+      # and the formatting pass are still in flight. Running it via `uvx`
+      # with a pinned version keeps CI deterministic without touching the
+      # project lockfile.
+      #
+      # `--select E9,F` is the high-signal subset: syntax errors, undefined
+      # names, unused imports, bad f-strings. Everything else (import
+      # ordering, line length, style) gets enabled once the formatting work
+      # lands — flip this to a bare `uv run ruff check .` at that point.
+      - name: ruff (errors only)
+        run: uvx ruff@0.16.8 check . --select E9,F
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+          # test and build resolve the same deps, so their cache keys are
+          # identical and one job's save always loses the race. Suffix per
+          # job so both saves land.
+          cache-suffix: ${{ github.job }}
+
+      # --locked fails the build if uv.lock drifted out of sync with
+      # pyproject.toml, which is exactly the "silent dependency drift"
+      # failure mode we want surfaced here rather than on someone's laptop.
+      #
+      # The interpreter comes from .python-version (3.12): uv reads it,
+      # downloads the managed build if the runner doesn't have it, and
+      # uses it for the venv — one source of truth for CI and dev boxes.
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # The suite is headless: the TUI is driven through Textual's pilot,
+      # so no display server, no network and no cluster are needed.
+      - name: Run tests
+        run: uv run pytest
+
+  build:
+    name: build binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+          cache-suffix: ${{ github.job }}
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # pyinstaller / jaraco.text are intentionally kept out of
+      # pyproject.toml (build-binary.sh documents why: the build is
+      # out-of-band). `uv run --with` injects them for this invocation only
+      # and leaves uv.lock untouched.
+      #
+      # No system GUI packages are installed: since the Textual TUI
+      # replaced the web GUI there are no GTK/WebKit bindings to bundle.
+      - name: Build one-file binary
+        run: uv run --with pyinstaller --with jaraco.text ./build-binary.sh --clean
+
+      # Exit code 0 from PyInstaller does not mean the bundle actually
+      # runs. `--check` exercises the frozen import path headlessly — it
+      # never opens the TUI, so no display is required.
+      - name: Smoke test binary
+        run: ./dist/kubby --check
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: kubby-linux-x86_64
+          path: dist/kubby
+          retention-days: 7
