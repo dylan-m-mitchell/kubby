@@ -1,11 +1,10 @@
 [project]
 name = "kubby"
 version = "0.1.0"
-description = "GUI tool for managing local Kubernetes cluster resources."
+description = "Terminal UI for managing local Kubernetes cluster resources."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "pywebview>=6.2.1",
     "textual>=8.2.8",
 ]
 

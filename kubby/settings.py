@@ -168,7 +168,7 @@ def load() -> dict[str, Any]:
     ``DEFAULT_MINIKUBE`` if the caller e.g. appends to ``addons``.
 
     Inner-key coercion also runs here, not just on ``save()``: a user may
-    read settings (e.g. ``KubbyAPI.get_minikube_settings``) without ever
+    read settings (e.g. ``KubbyService.get_minikube_settings``) without ever
     persisting them, and we don't want a corrupt on-disk payload to reach
     ``minikube.start_args(...)`` in that read-without-write window.
     """

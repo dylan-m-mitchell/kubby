@@ -1,8 +1,9 @@
 """UI-agnostic service layer: everything kubby *does*, minus how it looks.
 
-The old ``KubbyAPI`` mixed domain behavior (detect/install/driver/cluster)
-with pywebview plumbing (``window.evaluate_js``). This module keeps the
-behavior and delivers progress through two injected callbacks instead::
+The old ``KubbyAPI`` (the web GUI's bridge) mixed domain behavior
+(detect/install/driver/cluster) with the plumbing that pushed JavaScript
+into the browser window. This module keeps that behavior and delivers
+progress through two injected callbacks instead::
 
     service = KubbyService(on_log=..., on_job_done=...)
 

@@ -26,9 +26,10 @@ Sections = Sequence[tuple[str, Rows]]
 #: action label ("n" for a label like "no thanks" must stay *cancel*).
 _TAKEN_KEYS = frozenset({"y", "n", "enter", "escape", "q"})
 
-#: Validation, lifted verbatim from ``kubby/ui/app.js`` so both UIs accept
-#: (and reject) exactly the same settings.json values. Messages are the
-#: GUI's strings too — same form, same complaints.
+#: Validation, lifted verbatim from the web GUI's settings modal (both UIs
+#: shipped in this repo until the TUI replaced it), so a settings.json
+#: written by either is accepted by the other. Messages are the GUI's
+#: strings too — same form, same complaints.
 CPUS_RE = re.compile(r"^\d+(\.\d+)?$")
 MEMORY_RE = re.compile(r"^\d+(\.\d+)?(m|mi|mb|g|gi|gb)?$", re.IGNORECASE)
 
@@ -55,10 +56,10 @@ SaveFn = Callable[[dict[str, Any], Callable[[dict[str, Any]], None]], None]
 
 
 class SettingsScreen(ModalScreen[None]):
-    """The GUI's settings modal, ported field for field.
+    """The web GUI's settings modal, ported field for field.
 
-    Same validation regexes and error strings as ``kubby/ui/app.js``, so a
-    ``settings.json`` written by either UI is accepted by the other.
+    Same validation regexes and error strings as the form it replaces, so
+    a ``settings.json`` written by an older kubby is still accepted here.
 
     ``esc`` backs out without writing; ``ctrl+s``/``enter`` save through the
     injected ``save(payload, done)`` callable — the app runs the write in a
