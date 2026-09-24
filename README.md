@@ -1,5 +1,7 @@
 # kubby
 
+[![CI](https://github.com/dylan-m-mitchell/kubby/actions/workflows/ci.yml/badge.svg)](https://github.com/dylan-m-mitchell/kubby/actions/workflows/ci.yml)
+
 A terminal UI for managing local Kubernetes cluster resources.
 
 Start a minikube cluster, watch pods come up, install kubectl/helm/podman from
