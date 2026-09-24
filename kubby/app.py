@@ -1,9 +1,15 @@
-"""kubby entry point — opens a native window backed by the OS's webview.
+"""kubby entry point — pywebview GUI adapter + CLI.
 
 Public surface:
 - `main(argv=None)`: parses CLI args, opens the GUI (or runs --check).
 - `KubbyAPI`: instance passed to pywebview as `js_api`; methods are exposed to
   the HTML/JS frontend as `window.pywebview.api.<method_name>`.
+
+`KubbyAPI` is now a thin adapter: all domain behavior (detect, install,
+minikube, cluster, settings) lives in `kubby.service.KubbyService`, and this
+class only forwards the service's callbacks into `window.evaluate_js` and
+carries the two GUI-only web features (`search_images`, `pull_image`) that
+disappear with `kubby/ui/` in Phase 5 of the TUI plan.
 """
 from __future__ import annotations
 
@@ -12,30 +18,22 @@ import contextlib
 import json
 import logging
 import os
-import platform
 import shutil
 import subprocess
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from kubby import settings as settings_mod
 from kubby import images as images_mod
-
-from kubby.installer import (
-    detector,
-    linux,
-    minikube as minikube_mod,
-    tools as tools_mod,
-)
+from kubby.service import KubbyService
 
 log = logging.getLogger("kubby")
 
 if getattr(sys, "frozen", False):
     # PyInstaller onefile: __file__ resolves to the MEIPASS root, not
-    # the package directory. Use sys._MEIPASS explicitly so PKG_DIR
-    # matches the `kubby/ui` datas destination in kubby.spec.
+    # the package directory. Use sys._MEIPASS explicitly to match the
+    # `kubby/ui` datas destination in kubby.spec.
     PKG_DIR = Path(sys._MEIPASS) / "kubby"
 else:
     PKG_DIR = Path(__file__).resolve().parent
@@ -51,40 +49,25 @@ class KubbyAPI:
     """
 
     def __init__(self) -> None:
-        self._window: webview.Window | None = None
-        # Track the currently-running worker thread for minikube start/stop/delete
-        # so we (a) reject double-clicks and (b) keep `_current_job_kind`
-        # available for any synchronous status checks from JS.
-        self._minikube_thread: threading.Thread | None = None
-        self._minikube_lock = threading.Lock()
-        self._current_job_kind: str | None = None
-
-        # Image search / pull state
+        self._window: Any = None  # webview.Window, imported lazily in main()
+        # Image search / pull state (GUI-only, deleted in Phase 5)
         self._image_pull_thread: threading.Thread | None = None
         self._image_pull_ref: str | None = None
+        self._image_pull_lock = threading.Lock()
 
-    def bind_window(self, window: webview.Window) -> None:
+        # All domain behavior lives here; callbacks push into the webview.
+        self._service = KubbyService(
+            on_log=self._push_log,
+            on_job_done=self._push_job_done,
+        )
+
+    def bind_window(self, window: Any) -> None:
         self._window = window
 
-    @staticmethod
-    def _subprocess_env() -> dict[str, str]:
-        """Return a copy of the current environment suitable for spawning external binaries.
+    # ----- service callbacks → JS -----
 
-        PyInstaller's onefile bootloader sets ``LD_LIBRARY_PATH`` to its bundled
-        library directory, which can cause system binaries (podman, minikube,
-        kubectl) to load the wrong shared libraries and fail with exit code 127.
-        Restore the original ``LD_LIBRARY_PATH`` if PyInstaller saved it;
-        otherwise drop it entirely so the bundled libs don't leak through.
-        """
-        env = os.environ.copy()
-        if "LD_LIBRARY_PATH_ORIG" in env:
-            env["LD_LIBRARY_PATH"] = env["LD_LIBRARY_PATH_ORIG"]
-        else:
-            env.pop("LD_LIBRARY_PATH", None)
-        return env
-
-    def _emit_log(self, line: str) -> None:
-        """Push a log line to the frontend via `window.evaluate_js`."""
+    def _push_log(self, line: str) -> None:
+        """Forward a service log line to `window.kubby.appendLog(...)`."""
         if self._window is None:
             return
         try:
@@ -94,113 +77,47 @@ class KubbyAPI:
         except Exception:
             log.exception("failed to push log line to window")
 
-    # ----- public API methods (callable from JS) -----
+    def _push_job_done(self, payload: dict[str, Any]) -> None:
+        """Forward minikube completion to `window.kubby.onClusterActionDone(...)`."""
+        if self._window is None:
+            return
+        try:
+            self._window.evaluate_js(
+                "window.kubby && window.kubby"
+                f".onClusterActionDone({json.dumps(payload)})"
+            )
+        except Exception:
+            log.exception("failed to notify JS of minikube job completion")
+
+    # ----- public API methods (callable from JS), delegated to the service -----
 
     def system_info(self) -> dict[str, Any]:
-        """Return host info so the UI can label package manager / elevation path."""
-        pm_label = "(unknown)"
-        try:
-            _pm_key, pm_label = linux.detect_package_manager()
-        except Exception as e:
-            pm_label = f"unsupported ({e})"
-        return {
-            "platform": platform.system(),
-            "release": platform.release(),
-            "python": platform.python_version(),
-            "package_manager_label": pm_label,
-            "elevation": linux.describe_elevation_method(),
-        }
+        """Host info so the UI can label package manager / elevation path."""
+        return self._service.system_info()
 
     def get_status(self) -> list[dict[str, Any]]:
-        """Return current install status of every managed tool."""
-        statuses: list[dict[str, Any]] = []
-        for key, tool in tools_mod.TOOLS.items():
-            installed, version, path = detector.detect(tool)
-            statuses.append(
-                {
-                    "key": key,
-                    "label": tool.label,
-                    "description": tool.description,
-                    "website": tool.website,
-                    "installed": installed,
-                    "version": version,
-                    "path": path,
-                }
-            )
-        return statuses
-
-    # ---------- minikube management ----------
+        """Current install status of every managed tool."""
+        return self._service.get_status()
 
     def get_minikube_settings(self) -> dict[str, Any]:
-        """Return persisted minikube settings, merged with defaults.
-
-        Always returns a fully-populated dict so the UI can render the form
-        even on a fresh install (no settings file yet).
-        """
-        return settings_mod.load()
+        """Persisted minikube settings, merged with defaults."""
+        return self._service.get_minikube_settings()
 
     def save_minikube_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Validate and persist minikube settings to disk.
-
-        Returns ``{"ok": True}`` on success or ``{"ok": False, "error": ...}``
-        on OSError/ValueError. Per-field validation lives in the UI layer.
-        """
-        try:
-            settings_mod.save(settings)
-            return {"ok": True}
-        except (OSError, ValueError) as e:
-            return {"ok": False, "error": str(e)}
+        """Validate and persist minikube settings to disk."""
+        return self._service.save_minikube_settings(settings)
 
     def get_minikube_prerequisites(self) -> dict[str, Any]:
-        """Pre-flight check for ``minikube start``.
-
-        Returns a dict with:
-        - ``ok`` (bool): True when no blockers found
-        - ``issues`` (list[str]): human-readable list of problems
-        - ``settings_path`` (str): where settings live, for the UI to display
-
-        Covers minikube + kubectl on PATH and, for non-``auto`` drivers, that
-        the driver binary itself is on PATH. Daemon-level health (e.g. is
-        docker actually running?) is left to minikube's own error output,
-        which we stream back live.
-        """
-        settings = settings_mod.load()["minikube"]
-        issues: list[str] = []
-
-        if not shutil.which("minikube"):
-            issues.append(
-                "minikube is not installed — install it from the Docs tab."
-            )
-        if not shutil.which("kubectl"):
-            issues.append(
-                "kubectl is not installed — install it from the Docs tab."
-            )
-
-        driver = (settings.get("driver") or "").strip()
-        if driver and driver not in ("auto",):
-            self._check_driver_binary(driver, issues)
-        else:
-            # Empty / auto: at least one of docker / podman should be present,
-            # otherwise minikube will pick a driver we may not have configured.
-            if not (shutil.which("docker") or shutil.which("podman")):
-                issues.append(
-                    "Neither docker nor podman is installed — minikube "
-                    "needs at least one as a container driver."
-                )
-
-        return {
-            "ok": not issues,
-            "issues": issues,
-            "settings_path": str(settings_mod.CONFIG_FILE),
-        }
+        """Pre-flight check for ``minikube start``."""
+        return self._service.get_minikube_prerequisites()
 
     def start_minikube(self) -> dict[str, Any]:
         """Kick off ``minikube start`` using the persisted settings."""
-        return self._kick_job("start")
+        return self._service.start_minikube()
 
     def stop_minikube(self) -> dict[str, Any]:
         """Kick off ``minikube stop`` in a worker thread."""
-        return self._kick_job("stop")
+        return self._service.stop_minikube()
 
     def delete_minikube(self) -> dict[str, Any]:
         """Kick off ``minikube delete`` in a worker thread.
@@ -208,149 +125,21 @@ class KubbyAPI:
         The UI is responsible for showing a confirm dialog BEFORE calling
         this — this method does the destructive thing as soon as invoked.
         """
-        return self._kick_job("delete")
+        return self._service.delete_minikube()
 
-    def _check_driver_binary(self, driver: str, issues: list[str]) -> None:
-        """Append a missing-driver issue if the driver binary isn't on PATH.
+    def get_cluster_info(self) -> dict[str, Any]:
+        """Information about the current Kubernetes cluster (see the service)."""
+        return self._service.get_cluster_info()
 
-        minikube's ``none`` driver doesn't need an external binary so it's
-        exempt. For other drivers we look up the *actual* binary minikube
-        invokes (``docker``, ``podman``, ``qemu-kvm`` for the kvm2 driver)
-        — not the driver name itself, which is rarely a real executable.
-        """
-        if driver == "none":
-            return
-        driver_binaries = {"docker": "docker", "podman": "podman", "kvm2": "qemu-kvm"}
-        binary = driver_binaries.get(driver, driver)
-        if not shutil.which(binary):
-            issues.append(
-                f"Driver '{driver}' needs '{binary}' on PATH — install it "
-                f"from the Docs tab so minikube can use it."
-            )
+    def install_all(self) -> dict[str, Any]:
+        """Install every tool that isn't already on PATH (one elevation call)."""
+        return self._service.install_all()
 
-    def _kick_job(self, action: str) -> dict[str, Any]:
-        """Build argv from settings and dispatch to a worker thread.
+    def install_tool(self, key: str) -> dict[str, Any]:
+        """Install the given tool, streaming output to the UI log."""
+        return self._service.install_tool(key)
 
-        Rejects re-entry while another job is active so the user can't
-        trigger stop + delete simultaneously from a double-click.
-        """
-        with self._minikube_lock:
-            if self._minikube_thread is not None and self._minikube_thread.is_alive():
-                kind = self._current_job_kind or "another command"
-                return {
-                    "ok": False,
-                    "error": f"a {kind} is already in progress — wait for it to finish",
-                }
-            settings = settings_mod.load()["minikube"]
-            if action == "start":
-                argv = minikube_mod.start_args(settings)
-            elif action == "stop":
-                argv = minikube_mod.stop_args()
-            elif action == "delete":
-                argv = minikube_mod.delete_args()
-            else:
-                return {"ok": False, "error": f"unknown action: {action!r}"}
-
-            self._current_job_kind = action
-            thread = threading.Thread(
-                target=self._run_minikube_job,
-                args=(action, argv),
-                daemon=True,
-                name=f"kubby-minikube-{action}",
-            )
-            self._minikube_thread = thread
-            thread.start()
-            return {"ok": True, "started": True, "action": action}
-
-    def _run_minikube_job(self, action: str, argv: list[str]) -> None:
-        """Worker thread body: run ``argv`` and stream results.
-
-        Always notifies JS of completion (success or failure) via
-        ``window.kubby.onClusterActionDone``. Even on exception the
-        ``finally``-guard clears state so the next ``_kick_job`` can run.
-        """
-        self._emit_log(f"$ {' '.join(argv)}")
-        ok = False
-        err: str | None = None
-        proc: subprocess.Popen[str] | None = None
-        try:
-            try:
-                # Stream stdout/stderr incrementally so the UI sees live
-                # progress during long-running commands like `minikube start`.
-                # We use Popen with line-buffered text mode and a reader
-                # thread per stream, then wait() in this thread.
-                proc = subprocess.Popen(
-                    argv,
-                    env=self._subprocess_env(),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    bufsize=1,
-                    encoding="utf-8",
-                    # minikube output occasionally includes non-UTF8 bytes
-                    # (ANSI escapes, stray locale flag) — replace with U+FFFD
-                    # instead of letting UnicodeDecodeError escape this worker.
-                    errors="replace",
-                )
-
-                def _drain(stream) -> None:
-                    for line in iter(stream.readline, ""):
-                        self._emit_log(line.rstrip("\r\n"))
-
-                t_out = threading.Thread(target=_drain, args=(proc.stdout,), daemon=True)
-                t_err = threading.Thread(target=_drain, args=(proc.stderr,), daemon=True)
-                t_out.start()
-                t_err.start()
-
-                try:
-                    returncode = proc.wait(timeout=900)  # 15 min
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    # proc.kill() sends SIGKILL — the child is guaranteed
-                    # to die. Bare wait() reaps it so its pipes get EOF
-                    # and the reader threads can terminate; once that
-                    # happens the threads return from iter() immediately
-                    # so a bare join() (no timeout) is sufficient.
-                    proc.wait()
-                    t_out.join()
-                    t_err.join()
-                    msg = "minikube command timed out (15 min)"
-                    self._emit_log(f"! {msg}")
-                    err = msg
-                else:
-                    t_out.join()
-                    t_err.join()
-                    if returncode == 0:
-                        self._emit_log(f"✓ minikube {action} succeeded")
-                        ok = True
-                    else:
-                        self._emit_log(
-                            f"! minikube {action} failed (exit {returncode})"
-                        )
-                        err = f"exit code {returncode}"
-            except FileNotFoundError:
-                msg = "minikube binary not found on PATH"
-                self._emit_log(f"! {msg}")
-                err = msg
-        except Exception as e:
-            log.exception("minikube job raised unexpectedly")
-            self._emit_log(f"! unexpected error: {e}")
-            err = str(e)
-        finally:
-            with self._minikube_lock:
-                self._current_job_kind = None
-                self._minikube_thread = None
-            completion = {"ok": ok, "error": err, "action": action}
-            try:
-                if self._window is not None:
-                    self._window.evaluate_js(
-                        "window.kubby && window.kubby"
-                        f".onClusterActionDone({json.dumps(completion)})"
-                    )
-            except Exception:
-                log.exception("failed to notify JS of minikube job completion")
-
-    # ---------- image search / pull ----------
+    # ---------- image search / pull (GUI-only web feature, deleted in Phase 5) ----------
 
     def search_images(
         self,
@@ -368,7 +157,7 @@ class KubbyAPI:
         local: list[dict[str, Any]] = []
         remote: dict[str, Any] = {"results": [], "total_count": 0, "has_more": False}
         if include_local:
-            env = self._subprocess_env()
+            env = KubbyService._subprocess_env()
             local = (
                 images_mod.search_local(query, env=env)
                 if query.strip()
@@ -381,22 +170,25 @@ class KubbyAPI:
     def pull_image(self, image_ref: str) -> dict[str, Any]:
         """Pull a container image via podman in a background thread.
 
-        Rejects the request if another job (minikube or image pull) is
-        already in progress. Progress is streamed to JS via
+        Rejects the request if another job (minikube, install, or image
+        pull) is already in progress. Progress is streamed to JS via
         ``window.kubby.onImagePullProgress(...)`` and completion via
         ``window.kubby.onImagePullDone(...)``.
 
-        Returns ``{"ok": True, "started": True, "image_ref": ...}``
-        on success, or ``{"ok": False, "error": ...}`` if busy/missing
-        podman.
+        NOTE (flagged, deliberate): the original shared one lock with the
+        minikube job so the busy check was atomic. The lock now lives
+        inside `KubbyService`, so this asks the service instead — there is
+        a theoretical check-then-start race that the single-user GUI (and
+        this feature, which Phase 5 deletes) never hits.
         """
-        with self._minikube_lock:
-            busy = (
-                (self._minikube_thread is not None and self._minikube_thread.is_alive())
-                or (self._image_pull_thread is not None and self._image_pull_thread.is_alive())
-            )
-            if busy:
-                kind = self._current_job_kind or self._image_pull_ref or "another job"
+        with self._image_pull_lock:
+            if self._image_pull_thread is not None and self._image_pull_thread.is_alive():
+                return {
+                    "ok": False,
+                    "error": "another image pull is already in progress — wait for it to finish",
+                }
+            if self._service.is_job_running():
+                kind = self._service.job_kind or "another job"
                 return {
                     "ok": False,
                     "error": f"a {kind} is already in progress — wait for it to finish",
@@ -429,7 +221,7 @@ class KubbyAPI:
                 podman_bin = shutil.which("podman") or "podman"
                 proc = subprocess.Popen(
                     [podman_bin, "pull", "--", image_ref],
-                    env=self._subprocess_env(),
+                    env=KubbyService._subprocess_env(),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -475,7 +267,7 @@ class KubbyAPI:
             log.exception("image pull raised unexpectedly")
             err = str(e)
         finally:
-            with self._minikube_lock:
+            with self._image_pull_lock:
                 self._image_pull_thread = None
                 self._image_pull_ref = None
             completion = {"ok": ok, "error": err, "image_ref": image_ref}
@@ -487,418 +279,6 @@ class KubbyAPI:
                     )
             except Exception:
                 log.exception("failed to notify JS of image pull completion")
-
-
-    def get_cluster_info(self) -> dict[str, Any]:
-        """Return information about the current Kubernetes cluster.
-
-        Returns a dict with:
-        - running (bool): whether a cluster is reachable
-        - error (str|None): error message if not running
-        - context (str|None): active kubectl context name
-        - version (str|None): server Kubernetes version
-        - nodes (list[dict]): list of {name, status, roles}
-        - namespaces (list[dict]): list of {name, pods: [{name, status}]}
-        - pod_count (int): total pods across all namespaces
-        """
-        def _run(args: list[str], timeout: int = 15) -> subprocess.CompletedProcess[str] | None:
-            try:
-                return subprocess.run(
-                    args, capture_output=True, text=True, timeout=timeout,
-                )
-            except subprocess.TimeoutExpired:
-                log.warning("kubectl timed out: %s", " ".join(args))
-                return None
-
-        # Check if kubectl is available
-        if not shutil.which("kubectl"):
-            return {"running": False, "error": "kubectl not found on PATH"}
-
-        # Get current context
-        ctx = _run(["kubectl", "config", "current-context"])
-        if ctx is None or ctx.returncode != 0:
-            return {"running": False, "error": (ctx.stderr.strip() if ctx else "timeout") or "no current context"}
-        context = ctx.stdout.strip()
-
-        # Try to reach the cluster
-        ver = _run(["kubectl", "version", "-o", "json"])
-        if ver is None or ver.returncode != 0:
-            return {"running": False, "error": (ver.stderr.strip() if ver else "timeout") or "cannot reach cluster", "context": context}
-
-        version = None
-        try:
-            ver_data = json.loads(ver.stdout)
-            version = ver_data.get("serverVersion", {}).get("gitVersion", "")
-        except (json.JSONDecodeError, KeyError):
-            pass
-
-        # Fetch each resource type separately for reliability. A single bulk
-        # `kubectl get nodes,namespaces,pods` call can return partial results
-        # or silently omit items depending on the cluster / kubectl version.
-        # Separate calls also give us per-namespace pod breakdown.
-
-        # --- nodes ---
-        nodes: list[dict[str, Any]] = []
-        nodes_resp = _run(["kubectl", "get", "nodes", "-o", "json"])
-        if nodes_resp and nodes_resp.returncode == 0:
-            try:
-                for item in json.loads(nodes_resp.stdout).get("items", []):
-                    name = item["metadata"]["name"]
-                    roles: list[str] = []
-                    for lbl in item["metadata"].get("labels", {}):
-                        if lbl.startswith("node-role.kubernetes.io/"):
-                            role = lbl.split("/", 1)[1]
-                            if role:
-                                roles.append(role)
-                    status = "Unknown"
-                    for cond in item.get("status", {}).get("conditions", []):
-                        if cond.get("type") == "Ready":
-                            status = "Ready" if cond.get("status") == "True" else "NotReady"
-                    nodes.append({"name": name, "status": status, "roles": roles})
-            except (json.JSONDecodeError, KeyError):
-                pass
-
-        # --- namespaces ---
-        ns_names: list[str] = []
-        ns_resp = _run(["kubectl", "get", "namespaces", "-o", "json"])
-        if ns_resp and ns_resp.returncode == 0:
-            try:
-                for item in json.loads(ns_resp.stdout).get("items", []):
-                    ns_names.append(item["metadata"]["name"])
-            except (json.JSONDecodeError, KeyError):
-                pass
-
-        # --- pods ---
-        pods_by_ns: dict[str, list[dict[str, str]]] = {}
-        pod_count = 0
-        pods_resp = _run(["kubectl", "get", "pods", "-A", "-o", "json"])
-        if pods_resp and pods_resp.returncode == 0:
-            try:
-                for item in json.loads(pods_resp.stdout).get("items", []):
-                    ns = item["metadata"]["namespace"]
-                    pod_name = item["metadata"]["name"]
-                    phase = item.get("status", {}).get("phase", "Unknown")
-                    pods_by_ns.setdefault(ns, []).append(
-                        {"name": pod_name, "status": phase}
-                    )
-                    pod_count += 1
-            except (json.JSONDecodeError, KeyError):
-                pass
-
-        # Build namespace list with per-namespace pod data, preserving the
-        # order returned by kubectl (alphabetical).
-        namespaces: list[dict[str, Any]] = []
-        for ns in ns_names:
-            namespaces.append({
-                "name": ns,
-                "pods": pods_by_ns.get(ns, []),
-            })
-
-        return {
-            "running": True,
-            "error": None,
-            "context": context,
-            "version": version,
-            "nodes": nodes,
-            "namespaces": namespaces,
-            "pod_count": pod_count,
-        }
-
-    def _run_elevated_streaming(
-        self, cmd: tuple[str, ...], emit: Callable[[str], None]
-    ) -> int:
-        """Run `cmd` under elevation, streaming stdout+stderr live via `emit`.
-
-        Uses a reader thread so ``proc.wait(timeout=...)`` can interrupt a hung
-        process even when it produces no output. Returns the process exit code.
-        Raises `subprocess.TimeoutExpired` if the command runs longer than
-        ``_INSTALL_TIMEOUT_S``.
-        """
-        argv = linux.wrap_elevated(cmd)
-        proc = subprocess.Popen(
-            argv,
-            env=self._subprocess_env(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            encoding="utf-8",
-            errors="replace",
-        )
-
-        def _drain() -> None:
-            for line in iter(proc.stdout.readline, ""):  # type: ignore[union-attr]
-                emit(line.rstrip("\r\n"))
-
-        reader = threading.Thread(target=_drain, daemon=True)
-        reader.start()
-
-        try:
-            returncode = proc.wait(timeout=linux._INSTALL_TIMEOUT_S)
-            reader.join()
-            return returncode
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            reader.join()
-            raise
-
-    @staticmethod
-    def _build_install_shell(
-        tool: tools_mod.Tool, pm_key: str | None
-    ) -> str | None:
-        """Return a single shell command line that installs `tool`.
-
-        Returns ``None`` when the tool has no install procedure or the
-        package manager can't be resolved.
-        """
-        if tool.install_script:
-            return tool.install_script
-        if tool.pkg_name and pm_key is not None:
-            try:
-                argv = linux.pkg_install_argv(pm_key, tool.pkg_name)
-            except ValueError:
-                return None
-            return " ".join(argv)
-        return None
-
-    def install_all(self) -> dict[str, Any]:
-        """Install every tool that isn't already on PATH.
-
-        All install commands are combined into a **single shell script**
-        that runs under **one elevation call** (pkexec or sudo), so the
-        user only authenticates once regardless of how many tools need
-        installing.
-
-        Returns a summary dict with ``ok``, ``installed``, ``failed``,
-        ``skipped``.
-        """
-        # Discover what needs installing
-        needed: list[tuple[str, tools_mod.Tool]] = []
-        for key, tool in tools_mod.TOOLS.items():
-            installed, _ver, _path = detector.detect(tool)
-            if not installed:
-                needed.append((key, tool))
-
-        if not needed:
-            self._emit_log("All tools are already installed.")
-            return {
-                "ok": True,
-                "installed": [],
-                "failed": [],
-                "skipped": len(tools_mod.TOOLS),
-            }
-
-        # If any tool uses pkg_name, detect the package manager once.
-        pm_key: str | None = None
-        pm_label: str = ""
-        for _key, tool in needed:
-            if tool.pkg_name:
-                try:
-                    pm_key, pm_label = linux.detect_package_manager()
-                except Exception as e:
-                    self._emit_log(f"! {e}")
-                    return {
-                        "ok": False,
-                        "installed": [],
-                        "failed": [k for k, _ in needed],
-                        "skipped": len(tools_mod.TOOLS) - len(needed),
-                        "error": str(e),
-                    }
-                break
-
-        # Build a single combined shell script for all tools.
-        script_lines: list[str] = ["set -e"]
-        for _key, tool in needed:
-            script_lines.append(f"\n# --- {tool.label} ---")
-            shell_cmd = self._build_install_shell(tool, pm_key)
-            if shell_cmd is None:
-                self._emit_log(
-                    f"! No install procedure defined for {tool.label}"
-                )
-                return {
-                    "ok": False,
-                    "installed": [],
-                    "failed": [k for k, _ in needed],
-                    "skipped": len(tools_mod.TOOLS) - len(needed),
-                    "error": f"no install procedure for {tool.label}",
-                }
-            script_lines.append(shell_cmd)
-        combined_script = "\n".join(script_lines)
-
-        self._emit_log(
-            f"Installing {len(needed)} tool(s) via "
-            f"{linux.describe_elevation_method()}…"
-        )
-        if pm_label:
-            self._emit_log(f"Package manager: {pm_label}")
-
-        # Run the combined script under a single elevation call.
-        log_lines: list[str] = []
-
-        def emit(line: str) -> None:
-            log_lines.append(line)
-            self._emit_log(line)
-
-        try:
-            returncode = self._run_elevated_streaming(
-                ("sh", "-c", combined_script), emit
-            )
-        except FileNotFoundError as e:
-            msg = f"command not found: {e.filename}"
-            self._emit_log(f"! {msg}")
-            return {
-                "ok": False,
-                "installed": [],
-                "failed": [k for k, _ in needed],
-                "skipped": len(tools_mod.TOOLS) - len(needed),
-                "error": msg,
-            }
-        except subprocess.TimeoutExpired:
-            self._emit_log("! command timed out")
-            return {
-                "ok": False,
-                "installed": [],
-                "failed": [k for k, _ in needed],
-                "skipped": len(tools_mod.TOOLS) - len(needed),
-                "error": "install timed out",
-            }
-
-        if returncode != 0:
-            self._emit_log(
-                f"! combined script failed with exit code {returncode}"
-            )
-            # Post-verify to determine which tools succeeded vs failed.
-            installed_keys: list[str] = []
-            failed_keys: list[str] = []
-            for key, tool in needed:
-                inst, _ver, _path = detector.detect(tool)
-                if inst:
-                    installed_keys.append(key)
-                else:
-                    failed_keys.append(key)
-            self._emit_log(
-                f"Done — {len(installed_keys)} installed, "
-                f"{len(failed_keys)} failed."
-            )
-            return {
-                "ok": len(failed_keys) == 0,
-                "installed": installed_keys,
-                "failed": failed_keys,
-                "skipped": len(tools_mod.TOOLS) - len(needed),
-            }
-
-        # All commands succeeded — verify each tool.
-        installed_keys: list[str] = []
-        failed_keys: list[str] = []
-        for key, tool in needed:
-            inst, ver, path = detector.detect(tool)
-            if inst:
-                self._emit_log(
-                    f"✓ {tool.label} installed at {path}"
-                    + (f" (version {ver})" if ver else "")
-                )
-                installed_keys.append(key)
-            else:
-                self._emit_log(
-                    f"! {tool.label} post-install check failed"
-                )
-                failed_keys.append(key)
-
-        self._emit_log(
-            f"\nDone — {len(installed_keys)} installed, "
-            f"{len(failed_keys)} failed."
-        )
-        return {
-            "ok": len(failed_keys) == 0,
-            "installed": installed_keys,
-            "failed": failed_keys,
-            "skipped": len(tools_mod.TOOLS) - len(needed),
-        }
-
-    def install_tool(self, key: str) -> dict[str, Any]:
-        """Install the given tool. Streams command output to the UI log.
-
-        Returns a dict with `ok: bool`, optional `version`, optional `error`, and
-        the full `log` joined as a string for convenience. Lines are also pushed
-        live via `_emit_log`.
-        """
-        tool = tools_mod.TOOLS.get(key)
-        if tool is None:
-            return {"ok": False, "error": f"Unknown tool: {key!r}"}
-
-        log_lines: list[str] = []
-
-        def emit(line: str) -> None:
-            log_lines.append(line)
-            self._emit_log(line)
-
-        # Two install paths, used in order of preference:
-        # 1. `install_script` — upstream-provided `sh -c` snippet, PM-agnostic.
-        # 2. `pkg_name` — host-PM install for tools with no upstream installer.
-        if tool.install_script:
-            commands: list[tuple[str, ...]] = [("sh", "-c", tool.install_script)]
-            emit(
-                f"Running upstream installer for {tool.label} via "
-                f"{linux.describe_elevation_method()}."
-            )
-        elif tool.pkg_name:
-            try:
-                pm_key, pm_label = linux.detect_package_manager()
-            except Exception as e:
-                emit(f"! {e}")
-                return {"ok": False, "log": "\n".join(log_lines), "error": str(e)}
-            try:
-                commands = [linux.pkg_install_argv(pm_key, tool.pkg_name)]
-            except ValueError as e:
-                msg = str(e)
-                emit(f"! {msg}")
-                return {"ok": False, "log": "\n".join(log_lines), "error": msg}
-            emit(f"Using package manager: {pm_label}")
-        else:
-            msg = f"No install procedure defined for {tool.label}"
-            emit(f"! {msg}")
-            return {"ok": False, "log": "\n".join(log_lines), "error": msg}
-
-        for cmd in commands:
-            emit(f"$ {' '.join(cmd)}")
-            try:
-                returncode = self._run_elevated_streaming(cmd, emit)
-            except FileNotFoundError as e:
-                msg = f"command not found: {e.filename}"
-                emit(f"! {msg}")
-                return {"ok": False, "log": "\n".join(log_lines), "error": msg}
-            except subprocess.TimeoutExpired:
-                emit("! command timed out")
-                return {
-                    "ok": False,
-                    "log": "\n".join(log_lines),
-                    "error": "install timed out",
-                }
-            if returncode != 0:
-                emit(f"! command failed with exit code {returncode}")
-                return {
-                    "ok": False,
-                    "log": "\n".join(log_lines),
-                    "error": f"exit code {returncode}",
-                }
-
-        # Post-install verification — re-detect on PATH.
-        installed, version, path = detector.detect(tool)
-        if not installed:
-            emit("! post-install check failed: tool still not on PATH")
-            return {
-                "ok": False,
-                "log": "\n".join(log_lines),
-                "error": "post-install verification failed",
-            }
-        emit(f"✓ installed at {path}" + (f" (version {version})" if version else ""))
-        return {
-            "ok": True,
-            "log": "\n".join(log_lines),
-            "version": version,
-            "path": path,
-        }
 
 
 # ---------------------------------------------------------------------------
@@ -925,28 +305,32 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _print_check_report() -> int:
+    """Print the self-check report.
+
+    Sourced from `KubbyService` so the output shape stays identical to the
+    pre-TUI version (it was previously built from `platform` +
+    `tools_mod.TOOLS` directly).
+    """
+    service = KubbyService()
+    info = service.system_info()
     print("kubby self-check")
     print("================")
     print(f"project:      {PKG_DIR.parent}")
-    print(f"python:       {platform.python_version()}")
-    print(f"platform:     {platform.system()} {platform.release()}")
-    try:
-        _pm, label = linux.detect_package_manager()
-        print(f"package mgr:  {label}")
-    except Exception as e:
-        print(f"package mgr:  unsupported ({e})")
-    print(f"elevation:    {linux.describe_elevation_method()}")
+    print(f"python:       {info['python']}")
+    print(f"platform:     {info['platform']} {info['release']}")
+    print(f"package mgr:  {info['package_manager_label']}")
+    print(f"elevation:    {info['elevation']}")
     print()
     print("Managed tools")
     print("-------------")
-    width = max(len(t.label) for t in tools_mod.TOOLS.values()) + 1
-    for _key, tool in tools_mod.TOOLS.items():
-        installed, version, path = detector.detect(tool)
-        if installed:
-            status = f"installed ({version or 'unknown'}) at {path}"
+    statuses = service.get_status()
+    width = max(len(s["label"]) for s in statuses) + 1
+    for s in statuses:
+        if s["installed"]:
+            status = f"installed ({s['version'] or 'unknown'}) at {s['path']}"
         else:
             status = "NOT FOUND"
-        print(f"  {tool.label:<{width}} {status}")
+        print(f"  {s['label']:<{width}} {status}")
     return 0
 
 
@@ -990,7 +374,7 @@ def main(argv: list[str] | None = None) -> int:
     # *before* our `except Exception` arm runs here, which would otherwise
     # wash a real traceback over the user's terminal before our friendly
     # install hint scrolls in. Silence the `webview` logger for the
-    # remainder of this process — `main()` returns on both error and
+    # remainder of this process — `main()` returns on both the error and
     # happy paths, and the GUI loop runs its own logging once started.
     logging.getLogger("webview").setLevel(logging.CRITICAL + 1)
 
@@ -999,7 +383,7 @@ def main(argv: list[str] | None = None) -> int:
         # file:// URLs work natively with pywebview on GTK/WKWebView/WebView2.
         # Relative paths in index.html (./app.js, ./style.css) resolve correctly.
         # `create_window` itself does NOT load any platform backend —
-        # that happens later, in `guilib.initialize()` invoked from
+        # that happens later in `guilib.initialize()` invoked from
         # `webview.start()` below. We keep this `try` here because the
         # same call will still surface real display/session failures on
         # systems where all dependencies are present.
@@ -1015,7 +399,7 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError as e:
         # Defensive: even if `_probe_native_deps` was happy, a backend
         # `ImportError` could in principle escape `create_window` — route
-        # those to the install-hint helper rather than the generic
+        # those to the install-hint helper instead of the generic
         # display-missing message below.
         return _missing_native_deps(e)
     except Exception as e:
@@ -1034,10 +418,10 @@ def main(argv: list[str] | None = None) -> int:
         # `webview.start(...)` -> `guilib.initialize(gui)` ->
         # `import_gtk()` / `import_qt()` / `import_cef()`. If none of the
         # backends succeed, pywebview prints per-backend tracebacks to
-        # stderr via `print(..., file=...)` and ultimately raises
+        # stderr via `print(..., file=...)` and ultimately raises a
         # `WebViewException`. The pre-flight probe above should have
-        # caught the common "no bindings at all" case before we ever
-        # get here, but this `try` remains as a backstop.
+        # caught the "no bindings at all" case before we ever get here,
+        # but this `try` remains as a backstop.
         if args.debug:
             webview.start(debug=True)
         else:
@@ -1086,7 +470,7 @@ def _is_missing_deps_exception(err: Exception) -> bool:
         "You must have either QT or GTK with Python extensions installed
          in order to use pywebview."
 
-    We also accept the raw ``"No module named '...'"`` form in case a
+    We also accept the raw ``"No module named '...'`` form in case a
     backend error ever escapes as plain ImportError.
     """
     msg = str(err)
