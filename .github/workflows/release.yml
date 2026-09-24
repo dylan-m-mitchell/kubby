@@ -28,6 +28,9 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
+          # Cache keys are global — without a suffix this can race a
+          # concurrent CI run saving the same key.
+          cache-suffix: release
 
       # uv resolves the interpreter from .python-version, so the release
       # is built with the same Python as CI and dev machines.

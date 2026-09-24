@@ -30,6 +30,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
+          cache-suffix: ${{ github.job }}
 
       # Ruff is deliberately NOT added to pyproject.toml yet — the rule set
       # and the formatting pass are still in flight. Running it via `uvx`
@@ -52,6 +53,10 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
+          # test and build resolve the same deps, so their cache keys are
+          # identical and one job's save always loses the race. Suffix per
+          # job so both saves land.
+          cache-suffix: ${{ github.job }}
 
       # --locked fails the build if uv.lock drifted out of sync with
       # pyproject.toml, which is exactly the "silent dependency drift"
@@ -77,6 +82,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
+          cache-suffix: ${{ github.job }}
 
       - name: Install dependencies
         run: uv sync --locked
