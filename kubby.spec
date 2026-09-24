@@ -4,19 +4,20 @@
 #
 #   pyinstaller --noconfirm --clean kubby.spec
 #
-# Output: dist/kubby (~30-50 MB, depending on how many platform libs the
-# dynamic GTK backend pulls in).
+# Output: dist/kubby (onefile, console attached).
 #
-# kubby is Linux-only per the plan (Ubuntu 24.04+ / Debian / Fedora / Arch);
-# the spec only bundles the GTK backend and the GObject introspection
-# bindings the GTK backend touches at runtime. If we ever ship
-# cross-platform, add the relevant `webview.platforms.*` entries to
-# hiddenimports.
+# kubby is Linux-only per the plan (Ubuntu 24.04+ / Debian / Fedora / Arch).
+# Since the Textual TUI replaced the web GUI there are no native GUI
+# bindings left to bundle — the TUI is pure Python and talks to the
+# terminal directly.
 #
 # Path resolution in kubby/app.py uses sys._MEIPASS when frozen
 # (PyInstaller sets this to the temp extraction directory). The datas
-# entries below place UI assets at `kubby/ui/` inside the bundle so
-# `PKG_DIR = Path(sys._MEIPASS) / "kubby"` resolves correctly.
+# entry below keeps the TUI stylesheet at `kubby/tui/styles.tcss` inside
+# the bundle, so `KubbyApp.CSS_PATH = "styles.tcss"` — which Textual
+# resolves relative to the file that defines the App class — finds it.
+
+from PyInstaller.utils.hooks import collect_data_files
 
 a = Analysis(
     ['kubby/app.py'],
@@ -24,30 +25,14 @@ a = Analysis(
     binaries=[],
     datas=[
         # (source, destination-in-bundle)
-        ('kubby/ui/index.html', 'kubby/ui'),
-        ('kubby/ui/app.js',     'kubby/ui'),
-        ('kubby/ui/style.css',  'kubby/ui'),
+        ('kubby/tui/styles.tcss', 'kubby/tui'),
+        # Textual ships a handful of non-Python files (tree-sitter query
+        # files used by its code editor widget). Harmless to bundle, and
+        # it keeps the frozen build identical to the source tree if we
+        # ever use those widgets.
+        *collect_data_files('textual'),
     ],
     hiddenimports=[
-        # pywebview loads its platform backend dynamically via
-        # `webview.guilib.import_gtk()`. PyInstaller's static analysis
-        # can't see that import, so we force it in. Linux-only.
-        'webview.platforms.gtk',
-        # PyGObject introspection: gi is the Python wrapper, gi.repository
-        # is where the dynamic native bindings live. PyInstaller's
-        # introspection hooks (in the pyinstaller-hooks-contrib package)
-        # usually catch these, but listing them here makes the dependency
-        # explicit and survives hook-path changes.
-        'gi',
-        'gi.repository',
-        'gi.repository.Gtk',
-        'gi.repository.WebKit2',
-        'gi.repository.GLib',
-        'gi.repository.GObject',
-        'gi.repository.Pango',
-        'gi.repository.Gdk',
-        'gi.repository.Gio',
-
         # setuptools >= 70 no longer vendors jaraco; pkg_resources imports
         # them dynamically. PyInstaller's static analysis can't see these
         # imports, so we must list them explicitly (PYI-5550).
@@ -79,10 +64,8 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    # Keep the console attached. kubby is a GUI app but it also supports
-    # `kubby --check` (print tool status) and the missing-GUI-deps hint
-    # needs to land in the terminal. A windowed (console=False) build
-    # would swallow that output on Windows / macOS.
+    # The terminal IS the UI: kubby renders into it, and `kubby --check`
+    # plus any startup error message print here too.
     console=True,
     disable_windowed_traceback=False,
 )

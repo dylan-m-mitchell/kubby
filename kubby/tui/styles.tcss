@@ -1,0 +1,197 @@
+/* kubby TUI — lazygit-flavored palette and panel chrome. */
+
+$bg: #101418;
+$panel-bg: #141a20;
+$strip-bg: #1b2430;
+$border: #2e3a46;
+$border-focus: #58a6ff;
+$text: #c9d1d9;
+$dim: #768390;
+$accent: #79c0ff;
+
+Screen {
+    background: $bg;
+    color: $text;
+}
+
+/* header ------------------------------------------------------------ */
+#status {
+    height: 1;
+    background: $strip-bg;
+    padding: 0 1;
+}
+
+/* main region ------------------------------------------------------- */
+#body {
+    height: 1fr;
+}
+
+#sidebar {
+    width: 34;
+    min-width: 20;
+    margin: 0 1 0 0;
+}
+
+.panel {
+    background: $panel-bg;
+    border: round $border;
+    border-title-color: $dim;
+    border-subtitle-color: $dim;
+    height: 1fr;
+}
+
+.panel:focus {
+    border: round $border-focus;
+    border-title-color: $accent;
+    border-title-style: bold;
+}
+
+#minikube {
+    height: 6;
+}
+
+/* log --------------------------------------------------------------- */
+#log {
+    height: 10;
+    background: $panel-bg;
+    border: round $border;
+    border-title-color: $dim;
+    margin: 1 0 0 0;
+}
+
+/* keybar ------------------------------------------------------------ */
+#keybar {
+    height: 1;
+    background: $strip-bg;
+    padding: 0 1;
+}
+
+/* modal overlays ---------------------------------------------------- */
+HelpScreen, ConfirmModal, PrereqModal, SettingsScreen {
+    align: center middle;
+    background: $bg 70%;
+}
+
+#help-box {
+    width: 64;
+    height: auto;
+    max-height: 90%;
+    border: round $border-focus;
+    background: $panel-bg;
+    padding: 1 2;
+}
+
+/* confirm / preflight boxes ---------------------------------------- */
+#confirm-box, #prereq-box {
+    width: 60;
+    height: auto;
+    max-height: 90%;
+    border: round $border-focus;
+    background: $panel-bg;
+    padding: 1 2;
+}
+
+#confirm-title, #prereq-title {
+    color: $accent;
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+#confirm-message, #prereq-hints, #confirm-hints {
+    color: $dim;
+    padding-top: 1;
+}
+
+/* settings ---------------------------------------------------------- */
+#settings-box {
+    width: 76;
+    height: auto;
+    max-height: 95%;
+    overflow-y: auto;
+    border: round $border-focus;
+    background: $panel-bg;
+    padding: 1 2;
+}
+
+#settings-title {
+    color: $accent;
+    text-style: bold;
+}
+
+#settings-path {
+    color: $dim;
+    padding-bottom: 1;
+}
+
+/* Sections ("addons") sit above their checkbox rows. */
+#settings-box .field-label {
+    width: 16;
+    height: 1;
+    color: $dim;
+}
+
+#settings-addons {
+    /* Section heading above its checkbox rows: the gap comes from the
+       margin, not padding — this widget is height 1, padding would eat it. */
+    margin-top: 1;
+    text-style: bold underline;
+}
+
+#settings-error {
+    height: 1;
+}
+
+#settings-hints {
+    color: $dim;
+    padding-top: 1;
+}
+
+/* One-line rows: label + field. The fields are built with `compact=True`
+   (Textual's own borderless mode) — plain Input/Select/ToggleButton ship
+   with a 3-row `tall` border that turns the form into a wall. */
+.settings-row {
+    height: 1;
+}
+
+#settings-box Input,
+#settings-box Select,
+#settings-box Checkbox {
+    background: $strip-bg;
+    color: $text;
+}
+
+#settings-box Input:focus,
+#settings-box Select:focus > SelectCurrent,
+#settings-box Checkbox:focus {
+    background: $border-focus;
+    color: $bg;
+}
+
+#set-cpus {
+    width: 10;
+}
+
+#set-memory {
+    width: 14;
+}
+
+#set-k8s {
+    width: 26;
+}
+
+#set-driver {
+    width: 44;
+}
+
+/* image filter ------------------------------------------------------ */
+/* Hidden until "/" opens it (Python also toggles `display`). Textual's
+   Input ships with a `tall` border, which at height 1 eats the content
+   row — strip it so this reads as a single lazygit-style strip. */
+#filter-bar {
+    display: none;
+    height: 1;
+    border: none;
+    background: $strip-bg;
+    color: $text;
+    padding: 0 1;
+}
