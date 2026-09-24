@@ -37,6 +37,7 @@
         globalLogContent: id("global-log-content"),
         globalLogTitle: id("global-log-title"),
         globalLogHint: id("global-log-hint"),
+        globalLogClose: id("global-log-close"),
         installAll: id("install-all"),
         // Image search elements
         searchInput: id("search-input"),
@@ -72,6 +73,10 @@
         (e) => this._onDocsClick(e),
       );
       this.els.installAll.addEventListener("click", () => this._installAll());
+      // Global log close button
+      if (this.els.globalLogClose) {
+        this.els.globalLogClose.addEventListener("click", () => this._hideGlobalLog());
+      }
       // Search tab events
       if (this.els.searchInput) {
         this.els.searchInput.addEventListener("input", () => this._onSearchInput());
