@@ -427,6 +427,7 @@ class TestKeybarAndHelp:
             for key, label in (
                 # (the overlay pads columns, so keys and labels are checked apart)
                 ('"s"', "start"), ('"S"', "stop"), ('"d"', "delete"),  # minikube
+                ('"o"', "settings"),
                 ('"i"', "install"), ('"I"', "install all"),             # tools
                 ('"/"', "filter"),                                      # images
                 ('"enter/space"', "expand / collapse"),                 # namespaces

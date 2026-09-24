@@ -92,6 +92,7 @@ class MinikubePanel(PanelBase, Vertical, can_focus=True):
         Binding("s", "request('start')", "start"),
         Binding("S", "request('stop')", "stop"),
         Binding("d", "request('delete')", "delete"),
+        Binding("o", "request('settings')", "settings"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -106,6 +107,10 @@ class MinikubePanel(PanelBase, Vertical, can_focus=True):
         if self.app.is_busy:
             return None  # visible but grayed while something is running
         kind = parameters[0] if parameters else None
+        if kind == "settings":
+            # Editing config never depends on cluster state (the GUI only
+            # hid it while a job was running, same as here).
+            return True
         running = bool(self.app.cluster.get("running"))
         # Start only makes sense without a cluster; stop/delete need one.
         return (not running) if kind == "start" else running

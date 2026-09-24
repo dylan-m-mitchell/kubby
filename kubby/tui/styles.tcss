@@ -66,8 +66,8 @@ Screen {
     padding: 0 1;
 }
 
-/* help overlay ------------------------------------------------------ */
-HelpScreen, ConfirmModal, PrereqModal {
+/* modal overlays ---------------------------------------------------- */
+HelpScreen, ConfirmModal, PrereqModal, SettingsScreen {
     align: center middle;
     background: $bg 70%;
 }
@@ -100,6 +100,87 @@ HelpScreen, ConfirmModal, PrereqModal {
 #confirm-message, #prereq-hints, #confirm-hints {
     color: $dim;
     padding-top: 1;
+}
+
+/* settings ---------------------------------------------------------- */
+#settings-box {
+    width: 76;
+    height: auto;
+    max-height: 95%;
+    overflow-y: auto;
+    border: round $border-focus;
+    background: $panel-bg;
+    padding: 1 2;
+}
+
+#settings-title {
+    color: $accent;
+    text-style: bold;
+}
+
+#settings-path {
+    color: $dim;
+    padding-bottom: 1;
+}
+
+/* Sections ("addons") sit above their checkbox rows. */
+#settings-box .field-label {
+    width: 16;
+    height: 1;
+    color: $dim;
+}
+
+#settings-addons {
+    /* Section heading above its checkbox rows: the gap comes from the
+       margin, not padding — this widget is height 1, padding would eat it. */
+    margin-top: 1;
+    text-style: bold underline;
+}
+
+#settings-error {
+    height: 1;
+}
+
+#settings-hints {
+    color: $dim;
+    padding-top: 1;
+}
+
+/* One-line rows: label + field. The fields are built with `compact=True`
+   (Textual's own borderless mode) — plain Input/Select/ToggleButton ship
+   with a 3-row `tall` border that turns the form into a wall. */
+.settings-row {
+    height: 1;
+}
+
+#settings-box Input,
+#settings-box Select,
+#settings-box Checkbox {
+    background: $strip-bg;
+    color: $text;
+}
+
+#settings-box Input:focus,
+#settings-box Select:focus > SelectCurrent,
+#settings-box Checkbox:focus {
+    background: $border-focus;
+    color: $bg;
+}
+
+#set-cpus {
+    width: 10;
+}
+
+#set-memory {
+    width: 14;
+}
+
+#set-k8s {
+    width: 26;
+}
+
+#set-driver {
+    width: 44;
 }
 
 /* image filter ------------------------------------------------------ */

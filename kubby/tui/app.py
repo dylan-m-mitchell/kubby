@@ -24,6 +24,7 @@ re-implements it.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from rich.text import Text
@@ -35,6 +36,7 @@ from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import Input, Static
 
+from kubby import settings as settings_mod
 from kubby.service import KubbyService
 from kubby.tui.panels import (
     ClusterPanel,
@@ -45,7 +47,7 @@ from kubby.tui.panels import (
     PanelFocused,
     ToolsPanel,
 )
-from kubby.tui.popups import ConfirmModal, HelpScreen, PrereqModal
+from kubby.tui.popups import ConfirmModal, HelpScreen, PrereqModal, SettingsScreen
 
 log = logging.getLogger("kubby")
 
@@ -245,6 +247,7 @@ class KubbyApp(App[None]):
             "install": self._install_one,
             "install_all": self._install_all,
             "filter": self._open_filter,
+            "settings": self._open_settings,
         }.get(message.action)
         if handler is None:
             log.warning("unhandled panel action %r", message.action)
@@ -363,7 +366,51 @@ class KubbyApp(App[None]):
         if prereq.get("ok"):
             self._kick_job("start")
         else:
-            self.push_screen(PrereqModal(prereq.get("issues") or []))
+            self.push_screen(
+                PrereqModal(prereq.get("issues") or []), self._prereq_closed
+            )
+
+    def _prereq_closed(self, choice: str | None) -> None:
+        if choice == "settings":
+            self._open_settings(None)
+
+    # ----- settings ------------------------------------------------------
+    # Same shape as every other blocking call: read/write in a worker,
+    # results back via `_call_on_ui`.
+
+    def _open_settings(self, _payload: Any) -> None:
+        self._load_settings()
+
+    @work(thread=True, exclusive=True, group="settings")
+    def _load_settings(self) -> None:
+        settings = self.service.get_minikube_settings()
+        self._call_on_ui(self._show_settings, settings)
+
+    def _show_settings(self, settings: dict[str, Any]) -> None:
+        self.push_screen(
+            SettingsScreen(
+                settings.get("minikube") or {},
+                str(settings_mod.CONFIG_FILE),
+                save=self._save_settings,
+            )
+        )
+
+    def _save_settings(
+        self,
+        payload: dict[str, Any],
+        done: Callable[[dict[str, Any]], None],
+    ) -> None:
+        """SettingsScreen's save hook — writes in a worker, calls back here."""
+        self._save_settings_worker(payload, done)
+
+    @work(thread=True, exclusive=True, group="settings")
+    def _save_settings_worker(
+        self,
+        payload: dict[str, Any],
+        done: Callable[[dict[str, Any]], None],
+    ) -> None:
+        result = self.service.save_minikube_settings(payload)
+        self._call_on_ui(done, result)
 
     def _stop_cluster(self, _payload: Any) -> None:
         self._kick_job("stop")
