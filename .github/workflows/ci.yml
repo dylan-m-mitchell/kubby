@@ -25,9 +25,9 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10
         with:
           enable-cache: true
 
@@ -47,17 +47,19 @@ jobs:
     name: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10
         with:
           enable-cache: true
-          # Resolved from .python-version (3.12) so CI matches dev machines.
-          python-version-file: .python-version
 
       # --locked fails the build if uv.lock drifted out of sync with
       # pyproject.toml, which is exactly the "silent dependency drift"
       # failure mode we want surfaced here rather than on someone's laptop.
+      #
+      # The interpreter comes from .python-version (3.12): uv reads it,
+      # downloads the managed build if the runner doesn't have it, and
+      # uses it for the venv — one source of truth for CI and dev boxes.
       - name: Install dependencies
         run: uv sync --locked
 
@@ -70,12 +72,11 @@ jobs:
     name: build binary
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10
         with:
           enable-cache: true
-          python-version-file: .python-version
 
       - name: Install dependencies
         run: uv sync --locked
@@ -97,7 +98,7 @@ jobs:
         run: ./dist/kubby --check
 
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kubby-linux-x86_64
           path: dist/kubby
