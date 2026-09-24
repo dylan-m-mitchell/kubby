@@ -39,7 +39,7 @@ async def wait_until(predicate, timeout: float = 5.0) -> bool:
 class TestShell:
     async def test_startup_renders_every_region(self, fake_service):
         app = KubbyApp(service=fake_service)
-        async with app.run_test(size=(100, 40)) as pilot:
+        async with app.run_test(size=(100, 40)):
             await wait_until(lambda: fake_service.calls.count("get_cluster_info") > 0)
             await wait_until(lambda: app.system)
 
@@ -126,7 +126,7 @@ class TestShell:
 
     async def test_panels_render_service_data(self, fake_service):
         app = KubbyApp(service=fake_service)
-        async with app.run_test(size=(100, 40)) as pilot:
+        async with app.run_test(size=(100, 40)):
             await wait_until(lambda: app.images and app.tools)
 
             tools = app.query_one(ToolsPanel)
@@ -149,7 +149,7 @@ class TestShell:
 
     async def test_log_lines_arrive_from_service_threads(self, fake_service):
         app = KubbyApp(service=fake_service)
-        async with app.run_test(size=(100, 40)) as pilot:
+        async with app.run_test(size=(100, 40)):
             await wait_until(lambda: app.system)
             panel = app.query_one(LogPanel)
 
@@ -173,7 +173,7 @@ class TestShell:
         fake_service.tools = []
         fake_service.images = []
         app = KubbyApp(service=fake_service)
-        async with app.run_test(size=(100, 40)) as pilot:
+        async with app.run_test(size=(100, 40)):
             await wait_until(lambda: app.system)
 
             status = app.query_one("#status", Static)
