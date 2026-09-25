@@ -58,7 +58,12 @@ def render(placement: Placement) -> Text:
     canvas = Canvas(placement.width + 1, placement.height)
 
     for x, y, text in placement.headings:
-        canvas.write(x, y, text[: max(0, placement.width - x)], HEADING_STYLE)
+        # Locked as it is written, so an edge routed later cannot overwrite
+        # the heading text: `_clear_row` only avoids locked cells, and an
+        # unlocked heading would read as free space to route through.
+        clipped = text[: max(0, placement.width - x)]
+        for offset, char in enumerate(clipped):
+            canvas.put(x + offset, y, char, HEADING_STYLE, lock=True)
 
     for box in placement.boxes.values():
         rect = Rect(box.x, box.y, box.width, box.height)
@@ -110,7 +115,7 @@ def _route(canvas: Canvas, placement: Placement, source: str, target: str) -> No
             canvas.line([(sx, sy), (ex - 1, sy)], EDGE_STYLE)
             canvas.arrow_head(ex - 1, sy, "right", EDGE_STYLE)
             return
-        lane = sx + 1
+        lane = _free_lane(canvas, sx + 1, sy, ey)
         canvas.line([(sx, sy), (lane, sy)], EDGE_STYLE)
         canvas.line([(lane, sy), (lane, ey)], EDGE_STYLE)
         canvas.line([(lane, ey), (ex - 1, ey)], EDGE_STYLE)

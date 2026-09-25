@@ -7,14 +7,14 @@ because with a single node they carried no information. A conventional
 layered layout therefore puts each of the ~15 components in its own column,
 and twenty boxes came out 301 columns wide.
 
-So the layout is built around components instead:
+So the layout is built around groups instead:
 
-1. weakly-connected boxes are grouped into components
-2. components are ordered by role — the machine, then what runs on it, then
-   your own code — and stacked down the panel
-3. inside a component, boxes are layered by longest path from its root, so
+1. boxes are grouped by namespace, not by connectivity
+2. groups are ordered by role — the machine, then what runs on it, then
+   your own code — and placed left to right, wrapping to a new band below
+3. inside a group, boxes are layered by longest path from its root, so
    each layer is a column and an edge always points rightwards
-4. a component that will not fit the remaining width wraps to a new band
+4. a group that will not fit the remaining width wraps to a new band
    underneath
 
 Step 4 is what makes the picture scale with the terminal instead of
@@ -103,6 +103,9 @@ def place(diagram: Diagram, width: int) -> Placement:
         order = _order_within_layers(component, layers, diagram)
         columns = _columns(component, layers, order, diagram.nodes)
         widest = max((b.width for column in columns for b in column), default=0)
+        # A single group wider than the panel cannot be wrapped (wrapping is
+        # per group, and this is the smallest unit placed), so it overflows:
+        # see the width-guarantee note in the review plan.
         component_width = _span(columns, widest)
 
         needed = x + (GUTTER if x else 0) + component_width
@@ -173,7 +176,7 @@ def _columns(
         box = PlacedBox(
             id=node_id,
             node=node,
-            width=max(len(line) for line in node.lines) + 2 + 2 * BOX_PAD,
+            width=max((len(line) for line in node.lines), default=0) + 2 + 2 * BOX_PAD,
             height=len(node.lines) + 2,
         )
         by_layer.setdefault(layers.get(node_id, 0), []).append(box)

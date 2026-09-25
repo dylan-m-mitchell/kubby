@@ -175,7 +175,7 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
         if ns.get("pods") and ns.get("name") not in OMITTED_NAMESPACES
     ]
     pods = [pod for ns in namespaces for pod in ns.get("pods") or []]
-    if not namespaces and not pods:
+    if not namespaces and not pods and not cluster.get("services") and not cluster.get("ingresses"):
         return diagram
 
     # --- the host and the node ------------------------------------------
@@ -247,7 +247,11 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
     # Scoped to the namespaces that survived the filter above: a Service in
     # an omitted namespace has no pods left to point at, so drawing it would
     # put a box in the picture that leads nowhere.
-    kept = {ns["name"] for ns in namespaces}
+    kept = {
+        str(ns.get("name") or "default")
+        for ns in (cluster.get("namespaces") or [])
+        if str(ns.get("name") or "default") not in OMITTED_NAMESPACES
+    }
     for svc in cluster.get("services") or []:
         if str(svc.get("namespace") or "default") not in kept:
             continue
