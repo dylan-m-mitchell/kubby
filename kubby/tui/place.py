@@ -110,10 +110,6 @@ class Placement:
     width: int = 0
     height: int = 0
 
-    def rect(self, box_id: str) -> tuple[int, int, int, int]:
-        box = self.boxes[box_id]
-        return box.x, box.y, box.width, box.height
-
 
 def place(diagram: Diagram, width: int) -> Placement:
     """Lay *diagram* out to fit *width* columns, wrapping where it must.

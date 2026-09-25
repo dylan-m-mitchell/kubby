@@ -261,7 +261,6 @@ class KubbyApp(App[None]):
         self.service.on_job_done = self._post_job_done
 
         self.system: dict[str, Any] = {}
-        self.tools: list[dict[str, Any]] = []
         self.cluster: dict[str, Any] = {}
         self.images: list[dict[str, Any]] = []
 
@@ -357,14 +356,13 @@ class KubbyApp(App[None]):
     @work(thread=True, exclusive=True, group="refresh")
     def _refresh(self) -> None:
         system = self.service.system_info()
-        tools = self.service.get_status()
         cluster = self.service.get_cluster_info()
         # The graph reuses the inventory above rather than re-fetching it, so
         # this costs four extra calls, not seven.
         graph = self.service.get_cluster_graph(cluster)
         cluster = {**cluster, "graph": graph}
         images = self.service.list_local_images()
-        self._call_on_ui(self._apply_data, system, tools, cluster, images)
+        self._call_on_ui(self._apply_data, system, cluster, images)
 
     def _call_on_ui(self, callback: Any, *args: Any) -> None:
         """Run *callback* on the UI thread from a worker (blocks until it ran)."""
@@ -377,13 +375,11 @@ class KubbyApp(App[None]):
     def _apply_data(
         self,
         system: dict[str, Any],
-        tools: list[dict[str, Any]],
         cluster: dict[str, Any],
         images: list[dict[str, Any]],
     ) -> None:
         """UI thread: store state and render it."""
         self.system = system
-        self.tools = tools
         self.cluster = cluster
         self.images = images
 

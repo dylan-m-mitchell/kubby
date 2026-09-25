@@ -94,6 +94,13 @@ class Canvas:
             [None] * self.width for _ in range(self.height)
         ]
         self._locked = [[False] * self.width for _ in range(self.height)]
+        #: Cells that are a *frame* border, as opposed to a box. Tracked
+        #: apart because an edge may cross one and may not cross the other.
+        self._frame: set[tuple[int, int]] = set()
+        #: Cells an edge asked for and could not have. Zero is the only
+        #: acceptable value: a non-zero count means a line is broken in the
+        #: middle and the arrowhead is no longer attached to it.
+        self.skipped = 0
 
     # ----- cells -------------------------------------------------------
 
@@ -103,14 +110,30 @@ class Canvas:
     def locked(self, x: int, y: int) -> bool:
         return self.inside(x, y) and self._locked[y][x]
 
+    def solid(self, x: int, y: int) -> bool:
+        """Occupied by something an edge may not write over.
+
+        A box — its border or its text — is solid. A *frame* border is not:
+        an edge that crosses one is a line passing through the frame, which
+        is exactly what it is, and the alternative is refusing the cell and
+        leaving the line in two pieces with the arrow stranded on the far
+        side. The frame's *interior* is solid like any box interior.
+        """
+        return self.locked(x, y) and (x, y) not in self._frame
+
     def put(self, x: int, y: int, char: str, style: str | None = None,
             lock: bool = False) -> bool:
-        """Write one character. Returns False if the cell was locked.
+        """Write one character. Returns False if the cell was solid.
 
-        A refused write is not an error: it is how an edge discovers it has
-        reached a border and should stop.
+        A refused write is counted in ``skipped`` as well as reported, because
+        a picture that silently lost part of a line is the one failure this
+        canvas exists to make impossible.
         """
-        if not self.inside(x, y) or self.locked(x, y):
+        if not self.inside(x, y):
+            self.skipped += 1
+            return False
+        if self.solid(x, y):
+            self.skipped += 1
             return False
         self._force(x, y, char, style)
         if lock:
@@ -244,22 +267,35 @@ class Canvas:
         self, x: int, y: int, direction: str, style: str | None = None,
         force: bool = False,
     ) -> bool:
-        """Place an arrowhead.
+        """Place an arrowhead, and claim the cell.
 
-        *force* writes over a locked cell, which is only ever wanted for an
+        *force* writes over a solid cell, which is only ever wanted for an
         edge arriving at a box from above or below: the head then sits in
         the middle of the border it is entering, which is the long-standing
         ASCII idiom for "it comes in here". The alternative — stopping a row
         short — lands the head on whatever else shares that row, which is
         usually the group's heading, and `defau▼t` is not a thing anyone
         wants to read.
+
+        The cell is locked afterwards, so a later edge cannot draw its line
+        through an arrowhead that is already there. Two edges sharing a run
+        used to produce exactly that: the second overwrote the first's head
+        and a correct edge came out as a plain rule running into a box. A
+        later edge now routes around it, because the routing search skips
+        solid cells and the head has made this one solid.
         """
         if force:
-            if self.inside(x, y):
-                self._force(x, y, ARROWS[direction], style)
-                return True
+            if not self.inside(x, y):
+                return False
+            self._force(x, y, ARROWS[direction], style)
+            self._locked[y][x] = True
+            return True
+        if self.solid(x, y):
+            # Never on a box, and never on a frame's border: a head belongs
+            # against the thing it points at, and a frame is not the thing.
+            self.skipped += 1
             return False
-        return self.put(x, y, ARROWS[direction], style)
+        return self.put(x, y, ARROWS[direction], style, lock=True)
 
     # ----- containers --------------------------------------------------
 
@@ -277,6 +313,17 @@ class Canvas:
         not fit in a box has to go here or be cut.
         """
         self.box(rect, "double", style, lock_inside=False)
+        # Remember which cells are the frame, so an edge routed out of this
+        # container and into another can cross the border instead of being
+        # refused by it. See `Canvas.solid`.
+        for x in range(rect.x, rect.x + rect.width):
+            for y in (rect.y, rect.y + rect.height - 1):
+                if self.inside(x, y):
+                    self._frame.add((x, y))
+        for y in range(rect.y, rect.y + rect.height):
+            for x in (rect.x, rect.x + rect.width - 1):
+                if self.inside(x, y):
+                    self._frame.add((x, y))
         room = max(0, rect.width - 4)
         if not title:
             return
@@ -286,11 +333,13 @@ class Canvas:
         else:
             text += " "
         for offset, char in enumerate(text[:room]):
-            self._force(rect.x + 2 + offset, rect.y, char, style)
-            self._locked[rect.y][rect.x + 2 + offset] = True
-
-    def max_width(self) -> int:
-        return max((len(line.rstrip()) for line in self.plain_lines()), default=0)
+            cell = (rect.x + 2 + offset, rect.y)
+            self._force(*cell, char, style)
+            self._locked[cell[1]][cell[0]] = True
+            # The title is text, not border. An edge crossing the top of a
+            # frame replaces the border with a line; it must not replace
+            # `default` with a dash.
+            self._frame.discard(cell)
 
     def plain_lines(self) -> list[str]:
         return ["".join(row).rstrip() for row in self._chars]

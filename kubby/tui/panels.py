@@ -372,8 +372,7 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
     Read-only for now, which is a deliberate first step rather than a
     limitation: the layout that positions the boxes already reports where
     each one landed, so moving a cursor between them later is a search over
-    those rectangles and not a layout engine. See ``Placement.rect`` in
-    :mod:`kubby.tui.place`.
+    those rectangles and not a layout engine.
 
     It scrolls because a real cluster does not fit a terminal panel. A
     13-workload cluster came out 72 columns by 63 lines against a panel of
@@ -390,6 +389,19 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
     #: Sits inside the cluster panel's own border, so it must not draw a
     #: second one — a border inside a border reads as two panels.
     DEFAULT_CLASSES = "panel-inner"
+
+    #: Scrolls sideways as well as down. A namespace with seven objects in
+    #: it is 33 columns wide whatever the panel is, and a 50-column terminal
+    #: leaves this panel 13 — so without it, ten to twenty columns of the
+    #: cluster were clipped and unreachable, while the code and its comments
+    #: claimed the panel scrolled. The picture cannot be made narrower than
+    #: its widest namespace, so the honest answer is to let the reader move
+    #: across it.
+    DEFAULT_CSS = """
+    GraphPanel {
+        overflow-x: auto;
+    }
+    """
 
     #: Listed explicitly rather than mixed in, because Textual *replaces*
     #: BINDINGS along the MRO instead of merging them, and ScrollableWidget
@@ -457,6 +469,11 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
         # either side of it. Only applied when it fits — see `centre`.
         self.placement = placement
         self._picture.update(paint_mod.centre(paint_mod.render(placement), width))
+        # The Static is shrunk to the panel by default, so the panel's own
+        # horizontal scrollbar has nothing to scroll: the virtual size stays
+        # the panel's width and the columns past it are simply gone. Stating
+        # the width is what makes them reachable.
+        self._picture.styles.width = max(placement.width + 1, width)
 
 
 class ClusterPanel(PanelBase, Vertical, can_focus=True):
@@ -520,11 +537,6 @@ class ClusterPanel(PanelBase, Vertical, can_focus=True):
         """Hand the cluster to both views; each picks the part it needs."""
         self.query_one(ClusterTree).set_cluster(info)
         self.query_one(GraphPanel).set_cluster(info.get("graph") or {})
-
-    def refresh_picture(self) -> None:
-        """Redraw the graph after a resize, when the new width is known."""
-        if self.view == "graph":
-            self.query_one(GraphPanel).refresh_picture()
 
 
 class ClusterTree(PanelBase, Tree):

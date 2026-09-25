@@ -6,9 +6,11 @@ Textual's pilot with `FakeService` standing in for the host.
 
 from __future__ import annotations
 
+import pytest
 from rich.text import Text
 from textual.widgets import Input, Static
 
+from conftest import FakeService
 from helpers import wait_until
 from kubby.tui.app import KubbyApp
 from kubby.tui.panels import (
@@ -17,8 +19,8 @@ from kubby.tui.panels import (
     GraphPanel,
     ImagesPanel,
     LogPanel,
-    MinikubePanel,
     MachinePanel,
+    MinikubePanel,
 )
 from kubby.tui.popups import ConfirmModal, HelpScreen, PrereqModal
 
@@ -745,6 +747,47 @@ class TestClusterGraphView:
     def _picture(app):
         return str(app.query_one(GraphPanel).query_one("#graph-picture").content)
 
+    @pytest.mark.parametrize("width", [50, 60, 70])
+    async def test_every_column_of_the_picture_can_be_reached(self, width):
+        """The panel claims the picture scrolls, and it did not.
+
+        A `VerticalScroll` hides its horizontal overflow, and the Static was
+        shrunk to the panel, so on a 50-column terminal twenty columns of the
+        cluster were neither visible nor reachable — while the code, the
+        docstring and a test's own comment all said the panel scrolls. The
+        picture cannot be narrower than its widest namespace, so the honest
+        answer is a horizontal scrollbar.
+        """
+        app = KubbyApp(service=FakeService())
+        async with app.run_test(size=(width, 40)) as pilot:
+            await wait_until(lambda: app.cluster)
+            panel = app.query_one(GraphPanel)
+            await wait_until(lambda: panel.placement is not None)
+            # The picture's width is applied to the Static and only then does
+            # the container know how far it can scroll, so this is not settled
+            # the moment the data lands.
+            for _ in range(5):
+                await pilot.pause()
+            beyond = panel.placement.width + 1 - panel.size.width
+            assert panel.max_scroll_x >= max(0, beyond), (
+                f"{max(0, beyond)} columns unreachable at terminal {width}"
+            )
+
+    async def test_a_refresh_does_not_probe_the_tools(self, fake_service):
+        """`get_status` runs a version probe per managed tool — four
+        subprocesses — and nothing in the TUI reads the result now that the
+        tools panel is gone. It was being paid for on every startup and
+        every `R` to fill a field with no reader."""
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.cluster)
+            assert "get_status" not in fake_service.calls
+            await pilot.press("R")
+            assert await wait_until(
+                lambda: fake_service.calls.count("get_cluster_info") >= 2
+            )
+            assert "get_status" not in fake_service.calls
+
     async def test_the_graph_is_the_default_view(self, fake_service):
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)):
@@ -941,7 +984,7 @@ class TestPanelTitles:
             await wait_until(lambda: app.system)
             await pilot.press("R")
             assert await wait_until(
-                lambda: fake_service.calls.count("get_status") >= 2
+                lambda: fake_service.calls.count("get_cluster_info") >= 2
             )
             def title_of(panel_cls: type) -> str:
                 return Text.from_markup(

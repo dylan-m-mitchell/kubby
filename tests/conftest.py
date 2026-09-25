@@ -151,8 +151,8 @@ class FakeService:
             "version": info.get("version"),
             "driver": "docker",
             "nodes": [dict(n) for n in self.cluster["nodes"]],
-            # The picture nests everything inside minikube, so a fake cluster
-            # with no node facts drew a `your computer` frame around nothing.
+            # Read by the sidebar's machine panel, which is the only thing
+            # describing the node now that the picture does not.
             "node_facts": [
                 {
                     "name": "minikube",
@@ -165,7 +165,7 @@ class FakeService:
                     "capacity_cpu": "8",
                     "allocatable_cpu": "8",
                     "capacity_memory": "16313348Ki",
-                    "allocatable_memory": "3900m",
+                    "allocatable_memory": "3900Mi",
                 }
             ],
             "namespaces": [

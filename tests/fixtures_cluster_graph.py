@@ -124,6 +124,27 @@ def realistic() -> dict:
     }
 
 
+def cross_namespace() -> dict:
+    """`realistic()` with the Ingress routing to another namespace's Service.
+
+    A cross-namespace backend is what `parse_ingress` explicitly honours —
+    `svc["namespace"]` — so the picture has to be able to draw an edge that
+    leaves one namespace's frame and enters another's. That route is the
+    only one which crosses frame borders, and the only one that used to come
+    out broken.
+    """
+    model = realistic()
+    model["ingresses"] = [
+        {
+            "name": "shop", "namespace": "default", "class": "nginx",
+            "rules": [{"host": "shop.example", "service": "postgres",
+                       "namespace": "data"}],
+            "backends": [{"name": "postgres", "namespace": "data"}],
+        }
+    ]
+    return model
+
+
 def broken() -> dict:
     """The same shape with the workload unhealthy, for the colour rules."""
     model = realistic()
@@ -137,7 +158,8 @@ def broken() -> dict:
 
 
 def main() -> int:
-    for label, model in (("realistic", realistic()), ("broken", broken())):
+    for label, model in (("realistic", realistic()), ("broken", broken()),
+                         ("cross-namespace", cross_namespace())):
         built = diagram.build_diagram(model)
         placement = place.place(built, 72)
         print("=" * 74)

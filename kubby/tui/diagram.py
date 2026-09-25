@@ -157,10 +157,6 @@ class Diagram:
 
     # ----- shape -------------------------------------------------------
 
-    def groups(self) -> list[tuple[str, list[str]]]:
-        """Boxes by the container they are inside, in reading order."""
-        return [(c.label, list(c.members)) for c in self.ordered_containers()]
-
     def children_of(self, container_id: str | None) -> list[Container]:
         return sorted(
             (c for c in self.containers if c.parent == container_id),
@@ -168,38 +164,14 @@ class Diagram:
         )
 
     def ordered_containers(self) -> list[Container]:
-        """Top-level containers, in reading order: the machine, then what
-        runs on it.
+        """Top-level containers, in reading order: the control plane, then the
+        cluster's own machinery, then the reader's own namespaces.
 
         Ties break on the label so the order is stable across refreshes — a
         picture that reshuffles every `R` is impossible to build a mental
         model of.
         """
         return self.children_of(None)
-
-    def components(self) -> list[list[str]]:
-        """Weakly-connected sets, used for ordering boxes within a
-        container."""
-        parent = {node: node for node in self.nodes}
-
-        def find(node: str) -> str:
-            while parent[node] != node:
-                parent[node] = parent[parent[node]]
-                node = parent[node]
-            return node
-
-        for source, target in self.edges:
-            a, b = find(source), find(target)
-            if a != b:
-                parent[a] = b
-
-        buckets: dict[str, list[str]] = {}
-        for node in self.nodes:
-            buckets.setdefault(find(node), []).append(node)
-        return list(buckets.values())
-
-    def role_of(self, node: str) -> str:
-        return self.nodes[node].role
 
 
 def _infra_name(name: str) -> str | None:
