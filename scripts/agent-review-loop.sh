@@ -282,8 +282,10 @@ post_comment() {
 # only by matching the *text* of a shell command, so a path-indirect command
 # (`git apply p.patch`, `patch -p1`, `git checkout <sha>`, `git stash pop`)
 # can still put those files back in the worktree without naming them — and
-# neither ruff nor pytest looks at them. The loop is the last gate before a
-# push, so it refuses them outright.
+# neither ruff nor pytest looks at them. The loop script itself is in the
+# same position: an edit to it would not affect this run (the running copy
+# lives outside the worktree) but would change what future runs execute.
+# The loop is the last gate before a push, so it refuses them outright.
 #
 # Returns 0 (printing the paths) when a protected path is staged, 1 when the
 # staged tree is free of them. Staging first is what makes new, untracked
@@ -292,7 +294,7 @@ reject_protected() {
   local bad
   git add -A 2>/dev/null || true
   bad=$(git diff --cached --name-only 2>/dev/null |
-    grep -E '^(\.github/|\.opencode/agents/)' || true)
+    grep -E '^(\.github/|\.opencode/agents/|scripts/agent-review-loop\.sh$)' || true)
   [[ -n "$bad" ]] || return 1
   warn "discarding protected paths:"
   printf '%s\n' "$bad" >&2
@@ -300,8 +302,8 @@ reject_protected() {
   git reset -q
   # Untracked additions cannot be checked out of anything — remove them;
   # tracked edits are restored from HEAD.
-  git clean -qfd -- .github .opencode/agents 2>/dev/null || true
-  git checkout -q -- .github .opencode/agents 2>/dev/null || true
+  git clean -qfd -- .github .opencode/agents scripts/agent-review-loop.sh 2>/dev/null || true
+  git checkout -q -- .github .opencode/agents scripts/agent-review-loop.sh 2>/dev/null || true
   return 0
 }
 
@@ -871,8 +873,8 @@ for ((round = 1; round <= MAX_ITERATIONS; round++)); do
   elif [[ -n "$(git status --porcelain)" ]]; then
     if reject_protected; then
       protected_touched=true
-      action="⛔ Round $round changed protected paths (\`.github/\`, \`.opencode/agents/\`) — discarded, never committed."
-      feedback="Round $round changed protected paths (.github/ or .opencode/agents/). Those are off limits: drop that change. You may review them, never write them."
+      action="⛔ Round $round changed protected paths (\`.github/\`, \`.opencode/agents/\`, \`scripts/agent-review-loop.sh\`) — discarded, never committed."
+      feedback="Round $round changed protected paths (.github/, .opencode/agents/ or scripts/agent-review-loop.sh). Those are off limits: drop that change. You may review them, never write them."
     elif run_gates "$round"; then
       commit_fixes "fix(review): apply review round $round fixes"
       if [[ "$PUSH_FIXES" == "true" && "$DRY_RUN" != 1 ]]; then
@@ -922,7 +924,7 @@ $(tail -n 40 "$ART/gates-$round.txt" 2>/dev/null || printf '(gate log missing)')
   # A protected path must never survive to the push, and it is worth
   # retrying rather than treating the round as reviewed.
   if [[ "$protected_touched" == true ]]; then
-    agent_error="round $round changed protected paths (.github/, .opencode/agents/) and was discarded"
+    agent_error="round $round changed protected paths (.github/, .opencode/agents/, scripts/agent-review-loop.sh) and was discarded"
     outcome="⛔ protected paths were touched in round $round"
     continue
   fi
