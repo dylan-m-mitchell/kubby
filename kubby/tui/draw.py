@@ -110,6 +110,14 @@ class Canvas:
         #: acceptable value: a non-zero count means a line is broken in the
         #: middle and the arrowhead is no longer attached to it.
         self.skipped = 0
+        #: Which edge claimed each cell, so one edge can redraw its own path
+        #: without that counting as a conflict. See `begin_edge`.
+        self._claimed_by: dict[tuple[int, int], int] = {}
+        #: The subset of those cells holding an arrowhead. Tracked apart
+        #: because the two are not interchangeable: a *line* may be drawn
+        #: over another line, and must never be drawn over a head.
+        self._heads: set[tuple[int, int]] = set()
+        self._owner = 0
 
     # ----- cells -------------------------------------------------------
 
@@ -119,19 +127,74 @@ class Canvas:
     def locked(self, x: int, y: int) -> bool:
         return self.inside(x, y) and self._locked[y][x]
 
-    def solid(self, x: int, y: int) -> bool:
-        """Occupied by something an edge may not write over.
+    def begin_edge(self) -> None:
+        """Start a new edge, which from here may redraw its own cells.
 
-        A box — its border or its text — is solid. So is anything an earlier
-        edge has drawn that a later one must not run over, which is why an
-        arrowhead locks its cell.
+        A route is several legs joined end to end, and a join is a cell two
+        legs both cover. Without this, the second leg was refused at the
+        corner and every long edge lost its tail — or, before lines locked
+        at all, quietly drew over itself and nobody could tell.
+
+        Ownership is per *edge*, not per cell: a later edge still may not
+        reuse an earlier one's run, which is what stops it planting an
+        arrowhead in the middle of a line that already has one at its end.
+        """
+        self._owner += 1
+
+    def mine(self, x: int, y: int) -> bool:
+        return self._claimed_by.get((x, y)) == self._owner
+
+    def solid(self, x: int, y: int) -> bool:
+        """Occupied by something that is not an edge.
+
+        A box — its border or its text. A frame's title. Nothing an earlier
+        edge drew: two lines may share a cell, and in a crowded picture they
+        have to. The line is the same character either way, so an overlap
+        costs nothing and reads as one line used twice, which is what it is.
 
         A *frame* border is not solid, for the reason in the module
         docstring. The frame's interior is not solid either: it holds the
         boxes, and an edge has to be able to pass through the padding between
         them to reach a box on the far side.
         """
-        return self.locked(x, y) and (x, y) not in self._frame
+        if not self.locked(x, y) or (x, y) in self._frame:
+            return False
+        if (x, y) not in self._claimed_by:
+            return True
+        # A line another edge laid may be drawn over — it is the same
+        # character and in a crowded picture it has to be. An arrowhead may
+        # not: a run drawn through one replaces it, and the edge it belonged
+        # to is left as a line with nothing at the end of it.
+        return (x, y) in self._heads
+
+    def headroom(self, x: int, y: int) -> bool:
+        """Whether an arrowhead can go at ``(x, y)``.
+
+        Here an earlier edge *does* get in the way, and the whole of the
+        arrow-consistency guarantee is here. A head is the one glyph that
+        says something — it is the difference between "these are connected"
+        and "these are merely near each other" — so it may not land on
+        another edge's run, which would cut that edge's own head off from
+        its own line and read as `►►│`: an arrow into an arrow.
+        """
+        if self.solid(x, y):
+            return False
+        owner = self._claimed_by.get((x, y))
+        return owner is None or owner == self._owner
+
+    def free_for_forced_head(self, x: int, y: int) -> bool:
+        """Whether a *forced* head may go at ``(x, y)``.
+
+        Forced heads sit on the target's own border, which is solid by
+        definition, so `headroom` always says no. What can still be in the
+        way is another edge's: two namespaces routing to the same Service
+        both arrive from above, and the second head landed on the first's
+        cell and replaced it — so the picture showed one arrow for two
+        links, and the count of drawn edges did not match the count of
+        links in the model.
+        """
+        owner = self._claimed_by.get((x, y))
+        return owner is None or owner == self._owner
 
     def put(self, x: int, y: int, char: str, style: str | None = None,
             lock: bool = False) -> bool:
@@ -150,6 +213,7 @@ class Canvas:
         self._force(x, y, char, style)
         if lock:
             self._locked[y][x] = True
+            self._claimed_by[(x, y)] = self._owner
         return True
 
     def _force(self, x: int, y: int, char: str, style: str | None = None) -> None:
@@ -262,7 +326,7 @@ class Canvas:
     # ----- edges -------------------------------------------------------
 
     def line(self, points: list[tuple[int, int]], style: str | None = None) -> None:
-        """Draw an orthogonal polyline, skipping anything solid.
+        """Draw an orthogonal polyline, skipping anything solid, and claim it.
 
         Skipping rather than merging is the whole point: a solid cell is a
         box, and an arrow that ends up merged into one produces ``├┼─►`` and
@@ -271,12 +335,21 @@ class Canvas:
 
         A *frame* border is not solid, so a run crossing one replaces the
         border with the line character. See the module docstring for why.
+
+        The cells written are locked. An earlier edge's line used to be
+        invisible to a later one's search, so a second edge could walk
+        straight down the first one's run and then force its arrowhead into
+        the middle of it — cutting that edge's own head off from its own
+        line, and leaving ``►►│``, an arrow into an arrow. Two edges may now
+        only share a cell if neither of them wants an arrowhead there.
         """
         for (x1, y1), (x2, y2) in zip(points, points[1:]):
             if x1 == x2:
-                self.vline(x1, min(y1, y2), abs(y2 - y1) + 1, "│", style)
+                self.vline(x1, min(y1, y2), abs(y2 - y1) + 1, "│", style, lock=True)
             else:
-                self.hline(min(x1, x2), y1, abs(x2 - x1) + 1, "─", style)
+                self.hline(
+                    min(x1, x2), y1, abs(x2 - x1) + 1, "─", style, lock=True
+                )
 
     def arrow_head(
         self, x: int, y: int, direction: str, style: str | None = None,
@@ -304,14 +377,20 @@ class Canvas:
                 return False
             self._force(x, y, ARROWS[direction], style)
             self._locked[y][x] = True
+            self._claimed_by[(x, y)] = self._owner
+            self._heads.add((x, y))
             return True
-        if self.solid(x, y):
-            # Never on a box. A head belongs against the thing it points at,
-            # and a frame is not the thing, so a head on a frame border is
-            # refused even though a *line* may cross one.
+        if not self.headroom(x, y):
+            # Never on a box, never on another edge, and never on a frame's
+            # border: a head belongs against the thing it points at, and a
+            # frame is not the thing — even though a *line* may cross one.
             self.skipped += 1
             return False
-        return self.put(x, y, ARROWS[direction], style, lock=True)
+        if not self.put(x, y, ARROWS[direction], style, lock=True):
+            return False
+        self._claimed_by[(x, y)] = self._owner
+        self._heads.add((x, y))
+        return True
 
     # ----- containers --------------------------------------------------
 

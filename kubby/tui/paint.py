@@ -137,6 +137,7 @@ def _route(canvas: Canvas, placement: Placement, source: str, target: str) -> No
     """
     src = placement.boxes[source]
     dst = placement.boxes[target]
+    canvas.begin_edge()
 
     if src.band != dst.band:
         _route_across_bands(canvas, placement, src, dst)
@@ -186,13 +187,15 @@ def _route_sideways(canvas: Canvas, src: PlacedBox, dst: PlacedBox) -> None:
 
     if dst.x > src.x:
         out_x = src.x + src.width
-        if sy == ey and _clear(canvas, sy, out_x, dst.x):
+        if sy == ey and _clear(canvas, sy, out_x, dst.x) and _head_room(
+            canvas, dst.x - 1, sy
+        ):
             _run_right(canvas, dst, sy, out_x)
             return
         lane = _free_lane(canvas, out_x + 1, sy, ey)
         legs = [(out_x, sy, lane, sy), (lane, sy, lane, ey)]
         if lane < dst.x and _legs_clear(
-            canvas, legs + [(lane, ey, dst.x - 1, ey)]
+            canvas, legs + [(lane, ey, dst.x - 1, ey)], (dst.x - 1, ey)
         ):
             _draw_legs(canvas, legs)
             _run_right(canvas, dst, ey, lane)
@@ -206,8 +209,16 @@ def _run_right(canvas: Canvas, dst: PlacedBox, row: int, from_column: int) -> No
 
     The head sits in the cell beside the border rather than on it, so the
     arrow reads as pointing *at* the box and the border stays a border.
+
+    The leg stops a cell short of the head, and is skipped when there is no
+    room for it. Two reasons, both learned the hard way: a leg that ran
+    *through* the head's own cell would claim it, and a head on a claimed
+    cell is refused — so the route drew its line and lost its arrow. And a
+    leg started from a column already past the head's runs backwards,
+    claiming the same cell on the way.
     """
-    _draw_legs(canvas, [(from_column, row, dst.x - 1, row)])
+    if from_column <= dst.x - 2:
+        _draw_legs(canvas, [(from_column, row, dst.x - 2, row)])
     canvas.arrow_head(dst.x - 1, row, "right", EDGE_STYLE)
 
 
@@ -225,25 +236,86 @@ def _route_around(canvas: Canvas, src: PlacedBox, dst: PlacedBox) -> None:
     edge is a row that reads as its border.
     """
     sy = src.y + src.height // 2
-    ey = dst.y + dst.height // 2
     right = dst.x > src.x
     out_x = src.x + src.width if right else src.x - 1
-    in_x = dst.x if right else dst.x + dst.width
 
     for detour in _rows_near(canvas, sy):
-        legs = [
-            (out_x, sy, out_x, detour),
-            (out_x, detour, in_x, detour),
-            (in_x, detour, in_x, ey),
-        ]
-        if not _legs_clear(canvas, legs):
-            continue
-        _draw_legs(canvas, legs)
-        canvas.arrow_head(in_x, ey, "right" if right else "left", EDGE_STYLE)
-        return
+        # In from the side: the cell beside the target, on a row it spans.
+        for column, row in _side_arrivals(dst, right):
+            # The last leg stops beside the head, not on it: a leg running
+            # through the head's own cell would claim it, and a head on a
+            # claimed cell is refused.
+            land = row - 1 if row > detour else row + 1
+            legs = [
+                (out_x, sy, out_x, detour),
+                (out_x, detour, column, detour),
+                (column, detour, column, land),
+            ]
+            if not _legs_clear(canvas, legs, (column, row)):
+                continue
+            _draw_legs(canvas, legs)
+            canvas.arrow_head(column, row, "right" if right else "left", EDGE_STYLE)
+            return
+
+        # Or in through the top or the bottom, on a column of the target's
+        # own border. The side is not always available: a third edge in the
+        # same namespace may be using that column as its way out, and then
+        # two edges in one frame have nowhere to arrive but the top or the
+        # bottom.
+        from_above = detour < dst.y
+        land = dst.y - 1 if from_above else dst.y + dst.height
+        for column in _border_interior(dst):
+            legs = [
+                (out_x, sy, out_x, detour),
+                (out_x, detour, column, detour),
+                (column, detour, column, land),
+            ]
+            head = (column, dst.y if from_above else dst.y + dst.height - 1)
+            if not _legs_clear(canvas, legs):  # forced head; see above
+                continue
+            _draw_legs(canvas, legs)
+            canvas.arrow_head(
+                head[0], head[1], "down" if from_above else "up",
+                EDGE_STYLE, force=True,
+            )
+            return
     # Nothing clear in either direction. Draw no edge rather than a fragment
     # that reads as one — a missing line is a gap the reader can see; a
     # broken one is a connection they will believe.
+
+
+def _border_interior(dst: PlacedBox) -> list[int]:
+    """The columns of *dst*'s top and bottom border, excluding its corners.
+
+    A head on a corner replaces the corner glyph, so the middle of the
+    border is the only place one belongs. Centre first, because a head in
+    the middle of a box is the least surprising place for it.
+    """
+    if dst.width < 3:
+        return []
+    mid = (dst.x + dst.x + dst.width - 1) // 2
+    columns = list(range(dst.x + 1, dst.x + dst.width - 1))
+    return sorted(columns, key=lambda c: abs(c - mid))
+
+
+def _side_arrivals(dst: PlacedBox, right: bool) -> list[tuple[int, int]]:
+    """The cells beside *dst* an edge can arrive at, as ``(column, row)``.
+
+    On a row the box actually spans. A row *outside* it is a row the arrow
+    points past, which is the same mistake as putting the head a column wide
+    of the target: it points at a cell belonging to nothing.
+
+    The cell is beside the box, never its own border column — a vertical leg
+    ending on the border is refused at the border, so the whole route was
+    rejected every time and nothing was ever drawn to a target on its right.
+    Two Services on one Deployment is the ordinary shape that exposed it: the
+    second Service's edge was silently absent at every width, with nothing
+    else wrong anywhere.
+    """
+    column = dst.x - 1 if right else dst.x + dst.width
+    mid = dst.y + dst.height // 2
+    rows = sorted(range(dst.y, dst.y + dst.height), key=lambda r: abs(r - mid))
+    return [(column, row) for row in rows]
 
 
 def _columns_near(canvas: Canvas, lo: int, hi: int) -> list[int]:
@@ -385,7 +457,7 @@ def _route_the_long_way(
     # every band below it too.
     margin = canvas.width - 1
     start_y = src.y + src.height if down else src.y - 1
-    approaches = _approaches(dst, down)
+    approaches = _approaches(canvas, dst, down)
     for drop_x in _columns_near(canvas, src.x, src.x + src.width - 1):
         # Out of the source sideways first. Every column the source spans
         # can be blocked on the way to the gap — the frame's own title sits
@@ -397,13 +469,27 @@ def _route_the_long_way(
             legs = [
                 (out_x, start_y, drop_x, start_y),
                 (drop_x, start_y, drop_x, exit_gap),
-                (drop_x, exit_gap, margin, exit_gap),
-                (margin, exit_gap, margin, lane),
-                (margin, lane, column, lane),
-                # And in, stopping at the last cell *before* the target's
-                # border; the head goes on the border itself, deliberately.
-                (column, lane, head_x, head_y),
             ]
+            if lane == exit_gap:
+                # The common case, and the one that used to draw over
+                # itself: the two gaps are the same row, so the run is one
+                # leg, straight across. Drawn as two — out to the margin and
+                # back from it — the second re-walked the first's cells, and
+                # lines now claim the cells they cover, so the tail of every
+                # long edge came out as a row of refusals.
+                legs.append((drop_x, exit_gap, column, exit_gap))
+            else:
+                # The vertical starts one row *past* the corner the
+                # horizontal already covered, for the same reason.
+                step = 1 if lane > exit_gap else -1
+                legs.append((drop_x, exit_gap, margin, exit_gap))
+                legs.append((margin, exit_gap + step, margin, lane))
+                legs.append((margin, lane, column, lane))
+            # And in, stopping at the last cell *before* the target's
+            # border; the head goes on the border itself, deliberately.
+            legs.append((column, lane, head_x, head_y))
+            # No head argument: this head is forced onto the target's own
+            # border, which is the cell it is supposed to occupy.
             if not _legs_clear(canvas, legs):
                 continue
             _draw_legs(canvas, legs)
@@ -416,7 +502,9 @@ def _route_the_long_way(
     return False
 
 
-def _approaches(dst: PlacedBox, down: bool) -> list[tuple[int, int, int, str]]:
+def _approaches(
+    canvas: Canvas, dst: PlacedBox, down: bool
+) -> list[tuple[int, int, int, str]]:
     """Ways to come into *dst*: ``(column, head_x, head_y, facing)``.
 
     Two families, most direct first. Straight in through the top or the
@@ -433,15 +521,23 @@ def _approaches(dst: PlacedBox, down: bool) -> list[tuple[int, int, int, str]]:
     out: list[tuple[int, int, int, str]] = []
     mid_x = (dst.x + dst.x + dst.width - 1) // 2
     for column in sorted(range(dst.x, dst.x + dst.width), key=lambda c: abs(c - mid_x)):
-        if down:
-            out.append((column, column, dst.y - 1, "down"))
-        else:
-            out.append((column, column, dst.y + dst.height, "up"))
+        # A column another edge has already put a head in is not available.
+        # This is what lets two namespaces route to one Service: the second
+        # takes the next column along instead of landing on the first's
+        # head and erasing it.
+        # The cell the head actually lands in, which is the row *beyond*
+        # the border rather than the border itself — the run stops a cell
+        # short, so `─▼` reads as the arrow entering the box.
+        landing = dst.y - 1 if down else dst.y + dst.height
+        if not canvas.free_for_forced_head(column, landing):
+            continue
+        out.append((column, column, landing, "down" if down else "up"))
     mid_y = dst.y + dst.height // 2
     for row in sorted(range(dst.y, dst.y + dst.height), key=lambda r: abs(r - mid_y)):
-        if dst.x - 1 >= 0:
+        if dst.x - 1 >= 0 and canvas.headroom(dst.x - 1, row):
             out.append((dst.x - 1, dst.x - 1, row, "right"))
-        out.append((dst.x + dst.width, dst.x + dst.width, row, "left"))
+        if canvas.headroom(dst.x + dst.width, row):
+            out.append((dst.x + dst.width, dst.x + dst.width, row, "left"))
     return out
 
 
@@ -461,8 +557,13 @@ def _route_down(
     # wide Ingress above a narrow Service offered columns past the Service's
     # right edge, and the head landed there pointing down at blank space —
     # an arrow with nothing under it, which reads as a connection to nowhere.
-    lo = max(src.x + 1, dst.x)
-    hi = min(src.x + src.width - 1, dst.x + dst.width - 1)
+    #
+    # And it has to be one of the target's *border* columns, not its corner
+    # columns: the head is written on the border it enters, and a head on a
+    # corner replaces the corner glyph. `dst.x + 1 .. dst.x + width - 2` is
+    # the middle of that border, which is where "it comes in here" belongs.
+    lo = max(src.x + 1, dst.x + 1)
+    hi = min(src.x + src.width - 1, dst.x + dst.width - 2)
     for column in range(lo, hi + 1):
         if _clear(canvas, column, top, dst.y, vertical=True):
             _draw_legs(canvas, [(column, top, column, dst.y - 1)])
@@ -557,6 +658,11 @@ def _clear(
     return not any(canvas.solid(x, fixed) for x in range(lo, hi))
 
 
+def _head_room(canvas: Canvas, x: int, y: int) -> bool:
+    """Whether an arrowhead can be placed at ``(x, y)``."""
+    return canvas.headroom(x, y)
+
+
 def _leg_span(
     x1: int, y1: int, x2: int, y2: int
 ) -> tuple[int, int, int, bool] | None:
@@ -581,7 +687,25 @@ def _leg_span(
     return (y1, min(x1, x2), max(x1, x2) + 1, False)
 
 
-def _legs_clear(canvas: Canvas, legs: list[tuple[int, int, int, int]]) -> bool:
+def _legs_clear(
+    canvas: Canvas,
+    legs: list[tuple[int, int, int, int]],
+    head: tuple[int, int] | None = None,
+) -> bool:
+    """Whether every leg, and the head's own cell, are free to draw on.
+
+    The head has to be in here. It is not part of any leg — the leg stops
+    beside it, so the line does not run through it — which meant a route
+    could check clear, draw its whole path, and then find the arrowhead
+    already claimed by an earlier edge. That is the worst of both: a line
+    with nothing at the end of it, and no fallback tried.
+
+    Only for a head that is placed *beside* the box. A forced head goes
+    *on* the target's border on purpose, so testing it for room would fail
+    on the very cell it is meant to occupy.
+    """
+    if head is not None and not canvas.headroom(*head):
+        return False
     return all(
         span is None or _clear(canvas, span[0], span[1], span[2],
                                vertical=span[3])
