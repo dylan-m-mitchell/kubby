@@ -115,7 +115,10 @@ until the round passes the same `ruff` + `pytest` checks CI runs, a failing
 round hands its error output straight back to the agent, and a round whose
 agent crashes is retried by the next round instead of aborting the run.
 
-- **Opt out:** open the PR as a draft, or add the `skip-agent-review` label.
+- **Opt out:** open the PR as a draft (label it `skip-agent-review` before
+  marking it ready), or add that label before opening — the workflow only
+  starts on open/reopen/ready-for-review, so a label added afterwards is
+  never re-read.
 - **Model:** set the `REVIEW_MODEL` repository variable to choose one.
   Without it, adding the `OPENCODE_API_KEY` secret (an OpenCode Console
   service-account key) selects a paid model; with neither, the loop falls

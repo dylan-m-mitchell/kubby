@@ -145,6 +145,33 @@ post_comment() {
   fi
 }
 
+# The agent's permission file denies `.github/*` and `.opencode/agents/*`
+# only by matching the *text* of a shell command, so a path-indirect command
+# (`git apply p.patch`, `patch -p1`, `git checkout <sha>`, `git stash pop`)
+# can still put those files back in the worktree without naming them — and
+# neither ruff nor pytest looks at them. The loop is the last gate before a
+# push, so it refuses them outright.
+#
+# Returns 0 (printing the paths) when a protected path is staged, 1 when the
+# staged tree is free of them. Staging first is what makes new, untracked
+# files under those directories visible.
+reject_protected() {
+  local bad
+  git add -A 2>/dev/null || true
+  bad=$(git diff --cached --name-only 2>/dev/null |
+    grep -E '^(\.github/|\.opencode/agents/)' || true)
+  [[ -n "$bad" ]] || return 1
+  warn "discarding protected paths:"
+  printf '%s\n' "$bad" >&2
+  printf '%s\n' "$bad" >"$ART/protected-paths.txt"
+  git reset -q
+  # Untracked additions cannot be checked out of anything — remove them;
+  # tracked edits are restored from HEAD.
+  git clean -qfd -- .github .opencode/agents 2>/dev/null || true
+  git checkout -q -- .github .opencode/agents 2>/dev/null || true
+  return 0
+}
+
 commit_fixes() {
   git config user.name "github-actions[bot]"
   git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -383,6 +410,7 @@ for ((round = 1; round <= MAX_ITERATIONS; round++)); do
   [[ -f "$PLAN_FILE" ]] || printf 'No plan written by the agent.\n' >"$PLAN_FILE"
 
   gate_failed=false
+  protected_touched=false
   if [[ "$REVIEW_ONLY" == true ]]; then
     # Fork PRs cannot receive our commits. If the agent edited anyway, keep
     # the patch for the log and leave the tree as we found it.
@@ -397,7 +425,11 @@ for ((round = 1; round <= MAX_ITERATIONS; round++)); do
       action="Review only (fork PR): plan produced, no files changed."
     fi
   elif [[ -n "$(git status --porcelain)" ]]; then
-    if run_gates "$round"; then
+    if reject_protected; then
+      protected_touched=true
+      action="⛔ Round $round changed protected paths (\`.github/\`, \`.opencode/agents/\`) — discarded, never committed."
+      feedback="Round $round changed protected paths (.github/ or .opencode/agents/). Those are off limits: drop that change. You may review them, never write them."
+    elif run_gates "$round"; then
       commit_fixes "fix(review): apply review round $round fixes"
       if [[ "$PUSH_FIXES" == "true" && "$DRY_RUN" != 1 ]]; then
         if push_fixes; then
@@ -433,6 +465,14 @@ $(tail -n 40 "$ART/gates-$round.txt" 2>/dev/null || printf '(gate log missing)')
   [[ -n "${AGENT_NOTE:-}" ]] && action+=" $AGENT_NOTE"
   append_round "$round" "$verdict" "$action" "$PLAN_FILE"
   post_comment "$COMMENT_FILE" || warn "could not post the PR comment (read-only token?)"
+
+  # A protected path must never survive to the push, and it is worth
+  # retrying rather than treating the round as reviewed.
+  if [[ "$protected_touched" == true ]]; then
+    agent_error="round $round changed protected paths (.github/, .opencode/agents/) and was discarded"
+    outcome="⛔ protected paths were touched in round $round"
+    continue
+  fi
 
   # A red gate is worth retrying even if the agent claimed CLEAN or BLOCKED:
   # something is still sitting in the working tree.
