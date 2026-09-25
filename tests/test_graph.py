@@ -1,0 +1,304 @@
+"""Tests for `kubby.tui.graph` — Mermaid source and rendering.
+
+The source generator is pure, so most of this is golden: a cluster shape in,
+the exact diagram out. That catches the things that actually broke while
+building it — a label escaping rule that turned `kube-system` into
+`kube_system`, an edge emitted once per pod, a service declared nowhere
+because its namespace was collapsed.
+"""
+
+from __future__ import annotations
+
+
+from fixtures_cluster_graph import realistic
+from kubby.tui import graph
+
+
+def _pod(name, ns="default", phase="Running", node="minikube", owner=("ReplicaSet", "w-1")):
+    return {
+        "name": name,
+        "namespace": ns,
+        "phase": phase,
+        "node": node,
+        "ip": "",
+        "owner_kind": owner[0],
+        "owner_name": owner[1],
+        "workload": {
+            "name": owner[1].rsplit("-", 1)[0] if owner[1] else name,
+            "kind": owner[0],
+            "inferred": False,
+        },
+    }
+
+
+def _svc(name, ns="default", port=80, backing=(), has_selector=True):
+    return {
+        "name": name,
+        "namespace": ns,
+        "type": "ClusterIP",
+        "cluster_ip": "10.96.0.1",
+        "has_selector": has_selector,
+        "ports": [{"port": port, "target": str(port), "node_port": None}],
+        "backing_pods": [{"namespace": n, "pod": p} for n, p in backing],
+    }
+
+
+def _model(**over):
+    base = {
+        "available": True,
+        "error": None,
+        "nodes": [],
+        "namespaces": [],
+        "services": [],
+        "ingresses": [],
+        "pod_count": 0,
+    }
+    base.update(over)
+    return base
+
+
+# ---------------------------------------------------------------------------
+# degenerate inputs — these must never raise
+# ---------------------------------------------------------------------------
+
+
+class TestDegenerate:
+    def test_unavailable_cluster_shows_the_reason(self):
+        src = graph.build_mermaid({"available": False, "error": "connection refused"})
+        assert 'NONE["connection refused"]' in src
+
+    def test_empty_cluster_is_still_a_valid_diagram(self):
+        # termaid renders *nothing* for an empty graph, which would leave a
+        # blank panel with no explanation.
+        assert 'NONE["no workloads"]' in graph.build_mermaid(_model())
+
+    def test_rendering_an_empty_model_does_not_raise(self):
+        text = graph.render(graph.build_mermaid(_model()), 60)
+        assert "no workloads" in text.plain
+
+    def test_malformed_source_renders_without_raising(self):
+        text = graph.render("this is not mermaid at all {{{", 60)
+        assert isinstance(text.plain, str)
+
+    def test_node_rects_on_malformed_source_is_empty_not_an_exception(self):
+        assert graph.node_rects("not mermaid {{{") == {}
+
+
+# ---------------------------------------------------------------------------
+# labels — where the escaping bugs lived
+# ---------------------------------------------------------------------------
+
+
+class TestLabels:
+    def test_dashes_survive_in_labels(self):
+        """Regression: sanitising labels with the id rule renamed
+        `kube-system` to `kube_system` and `53, 9153` to `53__9153`."""
+        src = graph.build_mermaid(
+            _model(
+                namespaces=[{"name": "kube-system", "pods": [_pod("coredns-1", "kube-system")],
+                             "workload_count": 1, "collapsed": False}],
+                services=[_svc("kube-dns", "kube-system", 53,
+                               backing=[("kube-system", "coredns-1")])],
+            )
+        )
+        # Ids are sanitised to underscores (they must be), but a *label*
+        # must not be: `subgraph ns_kube_system [kube-system]` is correct,
+        # `[kube_system]` is the regression.
+        assert "subgraph ns_kube_system [kube-system]" in src
+        assert 'svc_kube_system_kube_dns["kube-dns\\n53"]' in src
+
+    def test_multiple_ports_keep_their_comma(self):
+        svc = _svc("api", backing=[("default", "w-1")])
+        svc["ports"] = [{"port": 53, "target": "53", "node_port": None},
+                        {"port": 9153, "target": "9153", "node_port": None}]
+        src = graph.build_mermaid(
+            _model(namespaces=[{"name": "default", "pods": [_pod("w-1")],
+                                "workload_count": 1, "collapsed": False}],
+                    services=[svc])
+        )
+        assert "53, 9153" in src
+
+    def test_line_break_is_an_escape_never_a_raw_newline(self):
+        """A real newline in a label is parsed as a second node, which
+        silently halves the diagram."""
+        for line in graph.build_mermaid(realistic()).splitlines():
+            if line.count('"') == 2 and '"' in line:
+                assert "\n" not in line
+
+    def test_labels_that_would_break_out_are_stripped(self):
+        src = graph.build_mermaid(
+            _model(namespaces=[{"name": 'ev"il[ns]', "pods": [_pod("p-1")],
+                                "workload_count": 1, "collapsed": False}])
+        )
+        # The quotes and bracket that would end the label are gone, and the
+        # name is still recognisable.
+        assert 'evil' in src
+        assert '"ev"il' not in src
+
+    def test_overlong_namespace_label_is_truncated(self):
+        long_ns = "a-really-quite-long-namespace-name-indeed"
+        src = graph.build_mermaid(
+            _model(namespaces=[{"name": long_ns, "pods": [_pod("p-1", long_ns)],
+                                "workload_count": 1, "collapsed": False}])
+        )
+        assert long_ns not in src
+        assert "…" in src
+
+    def test_overlong_workload_label_is_truncated(self):
+        pod = _pod("p-1", owner=("ReplicaSet", "an-extremely-long-deployment-name-v2"))
+        src = graph.build_mermaid(
+            _model(namespaces=[{"name": "default", "pods": [pod],
+                                "workload_count": 1, "collapsed": False}])
+        )
+        assert "…" in src
+
+
+# ---------------------------------------------------------------------------
+# structure
+# ---------------------------------------------------------------------------
+
+
+class TestStructure:
+    def test_ingress_chains_client_to_service(self):
+        model = realistic()
+        src = graph.build_mermaid(model)
+        assert "YOU --> ing_ingress_nginx_shop" in src
+        assert "ing_ingress_nginx_shop --> svc_default_web_svc" in src
+
+    def test_service_points_at_the_workload_backing_it(self):
+        src = graph.build_mermaid(realistic())
+        assert "svc_default_web_svc --> w_ReplicaSet_web" in src
+
+    def test_service_with_no_endpoints_is_red(self):
+        src = graph.build_mermaid(realistic())
+        assert 'svc_default_db_svc["db-svc\\n0 endpoints"]:::bad' in src
+
+    def test_selectorless_service_is_not_reported_as_broken(self):
+        """The API server's own Service has no selector. Flagging it would
+        condemn the healthiest thing in the cluster."""
+        src = graph.build_mermaid(realistic())
+        assert "svc_default_kubernetes" in src
+        assert "svc_default_kubernetes[" in src
+        assert 'kubernetes\\n443"]:::bad' not in src
+        assert 'kubernetes\\n443"]:::manual' in src
+
+    def test_control_plane_namespace_is_collapsed(self):
+        src = graph.build_mermaid(realistic())
+        assert 'w_kube_system_collapsed["kube-system\\n2 workloads"]' in src
+        # and its individual pods are not drawn
+        assert "coredns-77d-xyz" not in src
+
+    def test_empty_namespaces_are_left_out(self):
+        """kube-public and kube-node-lease have no wiring; a box each is
+        noise on every fresh cluster. The tree still lists them."""
+        src = graph.build_mermaid(
+            _model(namespaces=[{"name": "kube-public", "pods": [], "workload_count": 0,
+                                "collapsed": True},
+                               {"name": "default", "pods": [_pod("w-1")],
+                                "workload_count": 1, "collapsed": False}])
+        )
+        assert "kube-public" not in src
+
+    def test_each_node_workload_edge_appears_once(self):
+        """Regression: one edge per *pod* meant seven near-identical lines
+        strung across the diagram and a picture three screens tall."""
+        src = graph.build_mermaid(realistic())
+        assert src.count("node_minikube --> w_kube_system_collapsed") == 1
+
+    def test_pods_spread_over_two_nodes_each_get_one_edge(self):
+        src = graph.build_mermaid(realistic())
+        assert "node_minikube --> w_ReplicaSet_web" in src
+        assert "node_worker_2 --> w_StatefulSet_postgres" in src
+
+    def test_no_duplicate_edges_at_all(self):
+        edges = [
+            line.strip()
+            for line in graph.build_mermaid(realistic()).splitlines()
+            if " --> " in line
+        ]
+        assert len(edges) == len(set(edges))
+
+    def test_services_are_declared_inside_their_namespace(self):
+        src = graph.build_mermaid(realistic())
+        default_block = src.split("subgraph ns_default")[1].split("end")[0]
+        assert "svc_default_web_svc[" in default_block
+
+    def test_ready_counts_come_from_pod_phases(self):
+        src = graph.build_mermaid(realistic())
+        assert 'web\\n3/3' in src
+        # one of the two api pods is still Pending
+        assert 'api\\n1/2' in src
+        # the worker's only pod is crashlooping
+        assert 'worker\\n0/1' in src
+
+    def test_direction_is_honoured(self):
+        assert graph.build_mermaid(realistic(), direction="LR").startswith("graph LR")
+        assert graph.build_mermaid(realistic(), direction="TB").startswith("graph TB")
+
+    def test_source_is_deterministic(self):
+        """A stable diagram matters: the cursor maps rectangles to objects by
+        id, and a picture that reshuffles on every refresh loses the
+        selection."""
+        assert graph.build_mermaid(realistic()) == graph.build_mermaid(realistic())
+
+
+# ---------------------------------------------------------------------------
+# rendering
+# ---------------------------------------------------------------------------
+
+
+class TestRender:
+    def test_produces_rich_text(self):
+        from rich.text import Text
+
+        assert isinstance(graph.render(graph.build_mermaid(realistic()), 60), Text)
+
+    def test_compacts_to_fit_a_generous_width(self):
+        src = graph.build_mermaid(realistic())
+        text = graph.render(src, 200)
+        assert graph._max_width(text) <= 200
+
+    def test_a_tight_width_still_renders_something(self):
+        text = graph.render(graph.build_mermaid(realistic()), 20)
+        assert text.plain.strip()
+
+    def test_falls_back_rather_than_raising_on_bad_source(self):
+        # A render that raised would take the TUI down on a refresh.
+        assert graph.render("}{ nonsense", 60).plain is not None
+
+
+class TestRenderBest:
+    def test_picks_the_direction_that_fits_better(self):
+        """A panel-shaped region is wider than tall, and the aspect-ratio
+        heuristic used to choose TB (42x151) over LR (63x72) on a real
+        cluster. Both overflow; the point is which one overflows less."""
+        source = graph.build_mermaid(realistic())
+        text, direction = graph.render_best(source, 62, 24)
+        assert direction == "LR"
+        assert graph._max_width(text) < 151
+
+    def test_never_raises_on_malformed_source(self):
+        text, direction = graph.render_best("}{ nonsense", 60, 20)
+        assert isinstance(text.plain, str)
+        assert direction == "TB"
+
+    def test_returns_a_direction_the_caller_can_keep(self):
+        _, direction = graph.render_best(graph.build_mermaid(realistic()), 200, 200)
+        assert direction in ("TB", "LR")
+
+
+class TestNodeRects:
+    def test_every_drawn_box_gets_a_rectangle(self):
+        rects = graph.node_rects(graph.build_mermaid(realistic()))
+        assert "YOU" in rects
+        assert "svc_default_web_svc" in rects
+        # x, y, w, h — all four present and positive
+        for rect in rects.values():
+            assert len(rect) == 4
+            assert rect[2] > 0 and rect[3] > 0
+
+    def test_rects_are_within_the_rendered_picture(self):
+        source = graph.build_mermaid(realistic())
+        rects = graph.node_rects(source)
+        height = len(graph.render(source, 200).plain.splitlines())
+        assert all(y < height for _, y, _, _ in rects.values())
