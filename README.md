@@ -113,7 +113,10 @@ it considers safe, and the loop goes around again — up to 3 rounds — until
 the agent reports `CLEAN`, or a finding needs a human. Nothing is pushed
 until the round passes the same `ruff` + `pytest` checks CI runs, a failing
 round hands its error output straight back to the agent, and a round whose
-agent crashes is retried by the next round instead of aborting the run.
+agent crashes is retried by the next round instead of aborting the run. A
+model that does not answer at all fails the run immediately, with a comment
+saying no review happened, instead of spending every round's budget on a
+dead connection.
 
 - **Opt out:** open the PR as a draft (label it `skip-agent-review` before
   marking it ready), or add that label before opening — the workflow only

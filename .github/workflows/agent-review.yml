@@ -65,6 +65,9 @@ jobs:
       PR_NUMBER: ${{ github.event.pull_request.number }}
       PR_TITLE: ${{ github.event.pull_request.title }}
       PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      # Base branch name, used to fetch the base when a stale fork checkout
+      # is missing the base commit (the git diff fallback needs it).
+      PR_BASE_REF: ${{ github.base_ref }}
       PR_HEAD_REF: ${{ github.head_ref }}
       MAX_ITERATIONS: '3'
       # Per-round wall-clock budget. A round is "review the diff, write the
@@ -76,9 +79,8 @@ jobs:
       PUSH_FIXES: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
       REVIEW_MODEL: ${{ vars.REVIEW_MODEL }}
       OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-      # The script uses this for gh/git only — it strips the token from the
-      # agent's environment before launching the model.
-      GH_TOKEN: ${{ github.token }}
+      # GH_TOKEN is deliberately absent here: see the step that writes it to
+      # a file below.
 
     steps:
       - uses: actions/checkout@v7
@@ -111,5 +113,22 @@ jobs:
       - name: Sanity check
         run: opencode --version
 
+      # The push token reaches the loop as file contents, never as an
+      # environment variable. /proc/<pid>/environ is the exec-time block — a
+      # later `unset` does not remove what exec captured — so a process that
+      # inherited GH_TOKEN can still be read back out of it, and out of
+      # `ps eww`, by anything with a shell in this job. The agent has one.
+      # This step runs where no agent exists yet, so the token never reaches
+      # a process the agent could inspect; from here it is passed to gh one
+      # invocation at a time.
+      - name: Hand the push token over as a file
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          umask 077
+          printf '%s' "$GH_TOKEN" > "$RUNNER_TEMP/gh-token"
+
       - name: Run the review loop
+        env:
+          GH_TOKEN_FILE: ${{ runner.temp }}/gh-token
         run: ./scripts/agent-review-loop.sh

@@ -22,7 +22,7 @@
 #
 # Environment
 #   PR_NUMBER PR_TITLE PR_BASE_SHA PR_HEAD_REF REPO   workflow inputs
-#   GH_TOKEN          repo token — stripped from the agent's environment
+#   GH_TOKEN_FILE     repo token, written by the workflow — read into a shell
 #   OPENCODE_API_KEY  OpenCode Console key (absent -> free-model fallback)
 #   REVIEW_MODEL      overrides the model that would otherwise be picked
 #   MAX_ITERATIONS    default 3
@@ -55,6 +55,24 @@ if TOP=$(git rev-parse --show-toplevel 2>/dev/null) && [[ "$SELF" == "$TOP/"* ]]
     fi
   fi
 fi
+
+# ---------------------------------------------------------------------------
+# Keep the push token out of the process environment.
+#
+# An inherited GH_TOKEN cannot be taken back: /proc/<pid>/environ is the block
+# captured at exec, so `unset` removes it from this shell's view but not from
+# the file the kernel still serves — nor from `ps eww`, which reads it. The
+# agent gets a shell in this job, so the workflow delivers the token as a
+# file instead and this process never has it in its environment to begin
+# with. It is read into an unexported variable and handed to gh one
+# invocation at a time by run_gh; the agent's round runs with both token
+# variables stripped from its environment as well.
+# ---------------------------------------------------------------------------
+GH_TOKEN_VALUE=${GH_TOKEN:-}
+if [[ -z "$GH_TOKEN_VALUE" && -n "${GH_TOKEN_FILE:-}" && -r "${GH_TOKEN_FILE:-}" ]]; then
+  GH_TOKEN_VALUE=$(<"$GH_TOKEN_FILE")
+fi
+unset GH_TOKEN GITHUB_TOKEN
 
 REPO=${REPO:-${GITHUB_REPOSITORY:-}}
 PR_NUMBER=${PR_NUMBER:?PR_NUMBER is required}
@@ -102,23 +120,55 @@ COMMENT_FILE="$ART/comment.md"
 banner() { printf '\n\033[1;35m── %s \033[0m\n' "$*"; }
 warn() { printf '\033[1;33m! %s\033[0m\n' "$*" >&2; }
 
+# The token travels into each gh child and no further: nothing that lives as
+# long as this script (or as an agent round) carries it in its environment.
+run_gh() {
+  if [[ -n "$GH_TOKEN_VALUE" ]]; then
+    env GH_TOKEN="$GH_TOKEN_VALUE" gh "$@"
+  else
+    gh "$@"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # PR plumbing
 # ---------------------------------------------------------------------------
 
+DIFF_EMPTY=false
+
+# What changed, as GitHub itself computes it. `gh pr diff` comes first
+# because the git fallbacks below silently produce an *empty* diff whenever
+# the base commit is missing from this clone — a fork checkout carries the
+# fork's own history, so a stale fork has no upstream base — and an empty
+# diff hands the agent nothing to review while looking exactly like a clean
+# one, right down to a possible `CLEAN` verdict.
 write_diff() {
   local out=$1
-  # merge-base is what the PR tab shows; fall back when the base commit is
-  # not in this clone (fork checkout).
+  DIFF_EMPTY=false
+  if [[ "$DRY_RUN" != 1 ]] &&
+    run_gh pr diff "$PR_NUMBER" --repo "$REPO" >"$out" 2>/dev/null &&
+    [[ -s "$out" ]]; then
+    return 0
+  fi
+  # Fallback: dry runs, or no usable token. merge-base is what the PR tab
+  # shows, so fetch the base branch first when its commit is not in this clone.
+  if ! git cat-file -e "$PR_BASE_SHA^{commit}" 2>/dev/null; then
+    if [[ -n "${PR_BASE_REF:-}" ]]; then
+      git fetch --no-tags origin "$PR_BASE_REF" 2>/dev/null || true
+    fi
+  fi
   if ! git diff --merge-base "$PR_BASE_SHA" HEAD >"$out" 2>/dev/null; then
     git diff "$PR_BASE_SHA" HEAD >"$out" 2>/dev/null || git diff HEAD >"$out"
+  fi
+  if [[ "$DRY_RUN" != 1 && ! -s "$out" ]]; then
+    DIFF_EMPTY=true
   fi
 }
 
 # The PR body is untrusted input: quoted as data, truncated, and optional.
 pr_body="(none provided)"
 if [[ "$DRY_RUN" != 1 ]]; then
-  fetched=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body -q .body 2>/dev/null | head -c 4000 || true)
+  fetched=$(run_gh pr view "$PR_NUMBER" --repo "$REPO" --json body -q .body 2>/dev/null | head -c 4000 || true)
   [[ -n "$fetched" ]] && pr_body=$fetched
 fi
 
@@ -135,13 +185,13 @@ post_comment() {
   # request gh prints the error body to stdout, so the id is filtered to
   # digits before anything is PATCHed with it.
   local id
-  id=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
+  id=$(run_gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
         --jq ".[] | select((.body // \"\") | contains(\"$MARKER\")) | .id" 2>/dev/null |
     grep -E '^[0-9]+$' | head -n1 || true)
   if [[ -n "$id" ]]; then
-    gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$file" >/dev/null
+    run_gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$file" >/dev/null
   else
-    gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "$file" >/dev/null
+    run_gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "$file" >/dev/null
   fi
 }
 
@@ -185,8 +235,8 @@ push_fixes() {
   # where the agent could read it back out. An absent token (a local test
   # run) simply pushes without one.
   local -a auth_cfg=()
-  if [[ -n "${GH_TOKEN:-}" ]]; then
-    auth_cfg=(-c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')")
+  if [[ -n "$GH_TOKEN_VALUE" ]]; then
+    auth_cfg=(-c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN_VALUE" | base64 | tr -d '\n')")
   fi
   git "${auth_cfg[@]}" push origin "HEAD:refs/heads/$PR_HEAD_REF"
 }
@@ -199,18 +249,18 @@ push_fixes() {
 # cosmetic, not a gap in verification.
 approve_ci_run() {
   local sha run_id="" attempt=0
-  [[ -z "${GH_TOKEN:-}" ]] && return 0 # local run: nothing was triggered
+  [[ -z "$GH_TOKEN_VALUE" ]] && return 0 # local run: nothing was triggered
   sha=$(git rev-parse HEAD)
   # The run appears a few seconds after the push.
   while [[ -z "$run_id" && $attempt -lt 3 ]]; do
     attempt=$((attempt + 1))
     sleep 8
-    run_id=$(gh api "repos/$REPO/actions/runs?head_sha=$sha" \
+    run_id=$(run_gh api "repos/$REPO/actions/runs?head_sha=$sha" \
       --jq '[.workflow_runs[] | select(.event == "pull_request")][0].id // empty' \
       2>/dev/null || true)
   done
   [[ -z "$run_id" ]] && return 0
-  if ! gh api -X POST "repos/$REPO/actions/runs/$run_id/approve" >/dev/null 2>&1; then
+  if ! run_gh api -X POST "repos/$REPO/actions/runs/$run_id/approve" >/dev/null 2>&1; then
     warn "CI run $run_id needs a manual approval (needs actions:write)"
   fi
 }
@@ -308,6 +358,9 @@ build_prompt() {
   dirty_count=$(git status --porcelain | wc -l)
   [[ $dirty_count -gt 0 ]] && extra=" — leftovers from an earlier round, yours to finish or discard"
   [[ "$REVIEW_ONLY" == true ]] && extra+=$'\n- Review only: this PR is from a fork, so you may not change files. Plan, then verdict CLEAN or BLOCKED.'
+  if [[ "$DIFF_EMPTY" == true ]]; then
+    extra+=$'\n- The PR diff is empty — it could not be computed in this clone. State that in the plan and return BLOCKED; never report CLEAN for a diff you were never shown.'
+  fi
 
   cat <<EOF
 Reviewing pull request #$PR_NUMBER in $REPO — round $round of up to $MAX_ITERATIONS.
@@ -401,6 +454,10 @@ probe_model() {
 # Main loop
 # ---------------------------------------------------------------------------
 
+# Compute the diff once, before anything is built from it: the comment's
+# guardrail warning and every round's prompt are derived from this file.
+write_diff "$ART/pr.diff"
+
 {
   printf '%s\n' "$MARKER"
   echo "## 🤖 Agent review loop"
@@ -413,8 +470,13 @@ probe_model() {
   # diff; they are not a defence against a branch owner (GitHub bounds those
   # with no secrets and a read-only token on fork PRs). Say so out loud
   # rather than let the claim outrun what is enforced.
-  guardrail_files=$(git diff --name-only "$PR_BASE_SHA" HEAD -- \
-    scripts/agent-review-loop.sh .opencode/agents/ 2>/dev/null || true)
+  #
+  # The paths come out of the diff the agent reviews, not a second git
+  # calculation — that is what stopped this warning from being silently
+  # skipped whenever the base commit was missing from the clone.
+  guardrail_files=$(grep -E '^diff --git a/(scripts/agent-review-loop\.sh|\.opencode/agents/)' \
+    "$ART/pr.diff" 2>/dev/null |
+    sed -E 's|^diff --git a/([^ ]+) b/.*|\1|' | sort -u || true)
   if [[ -n "$guardrail_files" ]]; then
     warn "this PR edits the review's own guardrail files:"
     printf '  %s\n' "$guardrail_files" >&2
@@ -428,6 +490,16 @@ probe_model() {
     while IFS= read -r guardrail_file; do
       printf "> - \`%s\`\n" "$guardrail_file"
     done <<<"$guardrail_files"
+    echo
+  fi
+  # An empty diff is the failure mode that produces a confident CLEAN about
+  # nothing at all, so it is worth saying before any round runs.
+  if [[ "$DIFF_EMPTY" == true ]]; then
+    warn "the PR diff came out empty — telling the agent to report that instead of reviewing nothing"
+    echo "> ⚠️ **The PR diff could not be computed in this checkout** — the"
+    echo "> attached file is empty. There is nothing here to review, so the"
+    echo "> agent must say so in its plan rather than report \`CLEAN\` on a"
+    echo "> diff it never saw."
     echo
   fi
 } >"$COMMENT_FILE"
