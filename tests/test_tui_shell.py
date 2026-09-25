@@ -22,6 +22,7 @@ from kubby.tui.panels import (
 )
 from kubby.tui.popups import HelpScreen
 from helpers import wait_until
+from conftest import FakeService
 
 PANEL_IDS = ("minikube", "tools", "images", "cluster")
 
@@ -107,6 +108,35 @@ class TestShell:
             # ...and now it does quit.
             await pilot.press("q")
             assert await wait_until(lambda: not app.is_running)
+
+    async def test_q_quits_from_every_panel(self, fake_service):
+        # `q` is the documented way out. It is checked per panel because the
+        # one test above only reaches it by way of the help overlay: a panel
+        # that swallowed the key (an OptionList or Tree claiming printable
+        # characters) would leave that test green and the app unquittable.
+        for panel_cls in (MinikubePanel, ToolsPanel, ImagesPanel, ClusterPanel):
+            app = KubbyApp(service=FakeService())
+            async with app.run_test(size=(100, 40)) as pilot:
+                await wait_until(lambda: app.system)
+                app.query_one(panel_cls).focus()
+                await pilot.pause()
+
+                await pilot.press("q")
+                assert await wait_until(lambda: not app.is_running), panel_cls.__name__
+
+    async def test_q_is_typed_not_quit_while_filtering(self, fake_service):
+        # The filter bar is a text field: `q` belongs in the query. Quitting
+        # from there would make the filter unusable for any name with a q.
+        app = KubbyApp(service=FakeService())
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.images)
+            app.query_one(ImagesPanel).focus()
+            await pilot.press("/")
+            await pilot.pause()
+
+            await pilot.press("q")
+            assert await wait_until(lambda: app.image_filter == "q")
+            assert app.is_running
 
     async def test_recheck_refetches_state(self, fake_service):
         app = KubbyApp(service=fake_service)

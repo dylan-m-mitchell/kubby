@@ -292,6 +292,13 @@ post_comment() {
 # neither ruff nor pytest looks at them. The loop script itself is in the
 # same position: an edit to it would not affect this run (the running copy
 # lives outside the worktree) but would change what future runs execute.
+#
+# `AGENTS.md` joins them for a different reason: OpenCode loads it as project
+# *instructions*, folded into this agent's system prompt. A PR that rewrote it
+# would be editing the rules the reviewer is reasoning under — the same class
+# of problem as rewriting the permission file, and the reason a file that is
+# otherwise ordinary documentation is protected here.
+#
 # The loop is the last gate before a push, so it refuses them outright.
 #
 # Returns 0 (printing the paths) when a protected path is staged, 1 when the
@@ -301,7 +308,7 @@ reject_protected() {
   local bad
   git add -A 2>/dev/null || true
   bad=$(git diff --cached --name-only 2>/dev/null |
-    grep -E '^(\.github/|\.opencode/agents/|scripts/agent-review-loop\.sh$)' || true)
+    grep -E '^(\.github/|\.opencode/agents/|scripts/agent-review-loop\.sh$|AGENTS\.md$)' || true)
   [[ -n "$bad" ]] || return 1
   warn "discarding protected paths:"
   printf '%s\n' "$bad" >&2
@@ -309,8 +316,8 @@ reject_protected() {
   git reset -q
   # Untracked additions cannot be checked out of anything — remove them;
   # tracked edits are restored from HEAD.
-  git clean -qfd -- .github .opencode/agents scripts/agent-review-loop.sh 2>/dev/null || true
-  git checkout -q -- .github .opencode/agents scripts/agent-review-loop.sh 2>/dev/null || true
+  git clean -qfd -- .github .opencode/agents scripts/agent-review-loop.sh AGENTS.md 2>/dev/null || true
+  git checkout -q -- .github .opencode/agents scripts/agent-review-loop.sh AGENTS.md 2>/dev/null || true
   return 0
 }
 
@@ -758,7 +765,7 @@ timer_stop "diff"
   # The paths come out of the diff the agent reviews, not a second git
   # calculation — that is what stopped this warning from being silently
   # skipped whenever the base commit was missing from the clone.
-  guardrail_files=$(grep -E '^diff --git a/(scripts/agent-review-loop\.sh|\.opencode/agents/|\.github/workflows/agent-review\.yml)' \
+  guardrail_files=$(grep -E '^diff --git a/(scripts/agent-review-loop\.sh|\.opencode/agents/|\.github/workflows/agent-review\.yml|AGENTS\.md)' \
     "$ART/pr.diff" 2>/dev/null |
     sed -E 's|^diff --git a/([^ ]+) b/.*|\1|' | sort -u || true)
   if [[ -n "$guardrail_files" ]]; then
@@ -889,8 +896,8 @@ for ((round = 1; round <= MAX_ITERATIONS; round++)); do
   elif [[ -n "$(git status --porcelain)" ]]; then
     if reject_protected; then
       protected_touched=true
-      action="⛔ Round $round changed protected paths (\`.github/\`, \`.opencode/agents/\`, \`scripts/agent-review-loop.sh\`) — discarded, never committed."
-      feedback="Round $round changed protected paths (.github/, .opencode/agents/ or scripts/agent-review-loop.sh). Those are off limits: drop that change. You may review them, never write them."
+      action="⛔ Round $round changed protected paths (\`.github/\`, \`.opencode/agents/\`, \`scripts/agent-review-loop.sh\`, \`AGENTS.md\`) — discarded, never committed."
+      feedback="Round $round changed protected paths (.github/, .opencode/agents/, scripts/agent-review-loop.sh or AGENTS.md). Those are off limits: drop that change. You may review them, never write them."
     elif run_gates "$round"; then
       commit_fixes "fix(review): apply review round $round fixes"
       if [[ "$PUSH_FIXES" == "true" && "$DRY_RUN" != 1 ]]; then
@@ -940,7 +947,7 @@ $(tail -n 40 "$ART/gates-$round.txt" 2>/dev/null || printf '(gate log missing)')
   # A protected path must never survive to the push, and it is worth
   # retrying rather than treating the round as reviewed.
   if [[ "$protected_touched" == true ]]; then
-    agent_error="round $round changed protected paths (.github/, .opencode/agents/, scripts/agent-review-loop.sh) and was discarded"
+    agent_error="round $round changed protected paths (.github/, .opencode/agents/, scripts/agent-review-loop.sh, AGENTS.md) and was discarded"
     outcome="⛔ protected paths were touched in round $round"
     continue
   fi

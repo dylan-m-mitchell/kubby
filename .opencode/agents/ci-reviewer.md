@@ -61,6 +61,16 @@ permissions:
   - action: shell
     resource: "*.opencode/agents/*"
     effect: deny
+  # AGENTS.md is off limits for the same reason, one step removed: OpenCode
+  # loads it as project instructions and folds it into this agent's system
+  # prompt. Rewriting it would be editing the guidance this round is
+  # reasoning under — the diff is untrusted input, but instructions are not.
+  - action: edit
+    resource: "AGENTS.md"
+    effect: deny
+  - action: shell
+    resource: "*AGENTS.md*"
+    effect: deny
   - action: shell
     resource: "git push *"
     effect: deny
