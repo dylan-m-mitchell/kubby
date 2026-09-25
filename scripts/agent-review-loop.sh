@@ -364,6 +364,40 @@ append_round() {
 }
 
 # ---------------------------------------------------------------------------
+# Reachability probe
+# ---------------------------------------------------------------------------
+
+# Fail fast when the model endpoint is unresponsive. A dead connection
+# otherwise burns AGENT_ROUND_TIMEOUT on *every* round: the run I reproduced
+# this on sat silent for 30 minutes, three timeouts in a row, before it could
+# say anything at all. A healthy model answers in seconds, so two failed
+# attempts are strong evidence of an outage rather than a bad moment — and
+# one dropped connection is not yet an outage. Dry runs have no model to
+# reach, so this is skipped there.
+probe_model() {
+  local attempt=0 rc
+  : >>"$ART/model-probe.log"
+  while [[ $attempt -lt 2 ]]; do
+    attempt=$((attempt + 1))
+    rc=0
+    timeout --kill-after=15 60 \
+      env -u GH_TOKEN -u GITHUB_TOKEN \
+      opencode run --standalone --auto \
+        --model "$REVIEW_MODEL" \
+        --title "PR #$PR_NUMBER reachability probe" \
+        "Reply with the single word OK." >>"$ART/model-probe.log" 2>&1 || rc=$?
+    if [[ $rc -eq 0 ]]; then
+      return 0
+    fi
+    warn "model probe $attempt/2 failed (exit $rc)"
+    sleep 15
+  done
+  warn "--- tail of .agent-review/model-probe.log ---"
+  tail -n 25 "$ART/model-probe.log" >&2 || true
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
@@ -398,6 +432,20 @@ append_round() {
   fi
 } >"$COMMENT_FILE"
 
+if [[ "$DRY_RUN" != 1 ]] && ! probe_model; then
+  {
+    echo "### Outcome"
+    echo
+    echo "❌ no review ran: \`$REVIEW_MODEL\` did not answer the reachability probe (two attempts)."
+    echo
+    echo "The model endpoint was unreachable from this runner — see \`model-probe.log\` in the job log. Nothing was reviewed and nothing was pushed, and the round budgets were deliberately not spent waiting on a dead connection. Re-run once the endpoint answers, or set \`REVIEW_MODEL\` / \`OPENCODE_API_KEY\` to a model that does."
+    echo
+    echo "<sub>Runs when the PR is opened · capped at $MAX_ITERATIONS rounds · open as a draft or add the \`skip-agent-review\` label to opt out.</sub>"
+  } >>"$COMMENT_FILE"
+  post_comment "$COMMENT_FILE" || warn "could not post the PR comment (read-only token?)"
+  exit 1
+fi
+
 feedback=""
 agent_error=""
 rounds_completed=0
@@ -417,7 +465,7 @@ for ((round = 1; round <= MAX_ITERATIONS; round++)); do
     # whole review from scratch, and only a failure on the final round is fatal.
     printf 'No plan: the agent did not finish this round.\n' >"$PLAN_FILE"
     agent_error="the agent did not finish round $round/$MAX_ITERATIONS — see the job log"
-    append_round "$round" ERROR "**This round did not finish** — the agent crashed or ran into its ${AGENT_ROUND_TIMEOUT}s limit." "$PLAN_FILE"
+    append_round "$round" ERROR "**This round did not finish** — the agent crashed, stalled on the model connection, or hit its ${AGENT_ROUND_TIMEOUT}s limit." "$PLAN_FILE"
     post_comment "$COMMENT_FILE" || warn "could not post the PR comment (read-only token?)"
     feedback="Round $round did not finish. Write the plan and verdict files first thing, then stop — no reading around before they exist."
     continue
