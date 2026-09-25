@@ -11,7 +11,6 @@ import sys
 
 from kubby.service import KubbyService
 from kubby.tui import graph as graph_mod
-from kubby.tui.app import KubbyApp
 
 
 def main() -> int:
