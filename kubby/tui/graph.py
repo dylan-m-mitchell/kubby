@@ -46,6 +46,36 @@ MAX_DETAIL = 34
 #: than the box it titles. Anything past this is cut with an ellipsis.
 MAX_NS_LABEL = 18
 
+#: Infrastructure namespaces still drawn box by box. The control plane is
+#: the answer to "what am I looking at" — apiserver, etcd, scheduler and
+#: controller-manager each say something a summary box cannot — so it is
+#: the one place the picture is allowed to be tall. Other infrastructure
+#: namespaces (the ingress controller, chiefly) stay collapsed, because
+#: they are a consequence of a setup choice rather than something to learn.
+EXPANDED_NAMESPACES = frozenset({"kube-system"})
+
+#: Infrastructure namespaces left out of the picture entirely.
+#:
+#: The ingress controller's namespace is the machinery behind a *setup
+#: choice* — enabling the addon — not part of the cluster's story. The part
+#: that teaches something, the Ingress rule and the host it answers to, is
+#: already drawn in the application's own namespace. Its three boxes and two
+#: admission jobs were otherwise most of the picture.
+#:
+#: This is a judgement about what is worth showing, not a fact kubby can
+#: establish: nothing in the API distinguishes this namespace from one
+#: holding someone's application.
+OMITTED_NAMESPACES = frozenset({"ingress-nginx"})
+
+#: Services whose box is not drawn. The DNS Service is the only one: its box
+#: and its edge say "DNS exists", which coredns's own label — "service names
+#: to addresses" — already says better, in the same words, without spending
+#: a box and an edge on it.
+#:
+#: The *Ingress* Service is a different matter and is never omitted: it is
+#: where external traffic visibly lands.
+UNSHOWN_SERVICES = frozenset({"kube-dns"})
+
 #: Mermaid ids must be alphanumeric. Every real k8s name is already
 #: dash-separated, so a bad id would mean a name we did not anticipate —
 #: and a bad id corrupts the source rather than failing loudly.
@@ -121,7 +151,7 @@ def _workload_label(workload: dict[str, Any], pods: list[dict[str, Any]]) -> str
         name, role = entry
         return _label(name, role, MAX_DETAIL)
 
-    ready = sum(1 for p in pods if p.get("phase") in ("Running", "Succeeded"))
+    ready = _ready_count(pods)
     detail = f"{ready}/{len(pods)}"
 
     ports = sorted(
@@ -138,7 +168,29 @@ def _workload_label(workload: dict[str, Any], pods: list[dict[str, Any]]) -> str
 
 
 def _is_healthy(pods: list[dict[str, Any]]) -> bool:
-    return all(p.get("phase") in ("Running", "Succeeded") for p in pods)
+    """True when every pod in the workload is actually serving.
+
+    Readiness, not phase: a container in ``CrashLoopBackOff`` or
+    ``RunContainerError`` keeps its pod in phase ``Running`` until it gives
+    up, so judging on phase paints a broken workload green. Pods with no
+    ``ready`` key (a test double, or an older payload) fall back to the
+    phase, which is the best that can be said about them.
+    """
+    for pod in pods:
+        if "ready" in pod:
+            if not pod["ready"]:
+                return False
+        elif pod.get("phase") not in ("Running", "Succeeded"):
+            return False
+    return True
+
+
+def _ready_count(pods: list[dict[str, Any]]) -> int:
+    return sum(
+        1
+        for p in pods
+        if (p["ready"] if "ready" in p else p.get("phase") in ("Running", "Succeeded"))
+    )
 
 
 def build_mermaid(cluster: dict[str, Any], direction: str = "TB") -> str:
@@ -216,7 +268,16 @@ def build_mermaid(cluster: dict[str, Any], direction: str = "TB") -> str:
     # A namespace with no pods has no wiring, and the picture is about
     # wiring. Drawing an empty box for kube-public and kube-node-lease on
     # every fresh cluster is noise, and the tree still lists them.
-    namespaces = [ns for ns in all_namespaces if ns.get("pods")]
+    #
+    # The panel holds roughly ten boxes before the layout stops being
+    # readable (measured: 9 boxes fit 59 columns, 24 came out at 151). So
+    # namespaces are dropped deliberately, in the order of least value:
+    # empty ones, then our own setup artefacts.
+    namespaces = [
+        ns
+        for ns in all_namespaces
+        if ns.get("pods") and ns["name"] not in OMITTED_NAMESPACES
+    ]
 
     # The client. Traffic enters the cluster here, which is the single most
     # useful thing to show someone who has not seen one before.
@@ -225,7 +286,12 @@ def build_mermaid(cluster: dict[str, Any], direction: str = "TB") -> str:
         lines.append('  YOU["you\\n(browser)"]')
 
     service_ids: dict[tuple[str, str], str] = {}
-    for svc in cluster.get("services") or []:
+    shown_services = [
+        svc
+        for svc in (cluster.get("services") or [])
+        if svc["name"] not in UNSHOWN_SERVICES
+    ]
+    for svc in shown_services:
         service_ids[(svc["namespace"], svc["name"])] = _service_id(svc)
 
     # Same kind+name in two namespaces must not share a Mermaid id, or the
@@ -244,9 +310,19 @@ def build_mermaid(cluster: dict[str, Any], direction: str = "TB") -> str:
 
     for ns in namespaces:
         name = ns["name"]
-        ns_services = [
-            svc for svc in (cluster.get("services") or []) if svc["namespace"] == name
-        ]
+        ns_services = [svc for svc in shown_services if svc["namespace"] == name]
+
+        if ns.get("collapsed") and name not in EXPANDED_NAMESPACES:
+            # Infrastructure, not the user's application. Drawn in full it is
+            # most of the picture — an ingress controller alone is three
+            # boxes and two admission jobs nobody asked about.
+            count = ns.get("workload_count") or len(ns["pods"])
+            box = _node_id("w", name, "collapsed")
+            lines.append(f'  {box}["{_label(name, f"{count} workloads", MAX_DETAIL)}"]:::infra')
+            for svc in ns_services:
+                _declare_service(lines, service_ids[(name, svc["name"])], svc, "  ")
+            continue
+
         ns_id = _node_id("ns", name)
         lines.append(f"  subgraph {ns_id} [{_safe_label(name, MAX_NS_LABEL)}]")
         for (pod_ns, kind, wl_name), entry in workloads.items():
@@ -279,7 +355,7 @@ def build_mermaid(cluster: dict[str, Any], direction: str = "TB") -> str:
                 edge(ing_id, sid)
 
     # Service -> the workload it actually backs.
-    for svc in cluster.get("services") or []:
+    for svc in shown_services:
         if not svc.get("backing_pods"):
             continue
         sid = service_ids[(svc["namespace"], svc["name"])]
@@ -294,19 +370,27 @@ def build_mermaid(cluster: dict[str, Any], direction: str = "TB") -> str:
             if entry.get("id"):
                 edge(sid, entry["id"])
 
-    # Node containment: which node actually runs what. One edge per
-    # workload on that node, not one per pod.
-    for node in cluster.get("nodes") or []:
-        node_id = node_ids.get(node["name"])
-        if node_id is None:
-            continue
-        for pod in pods:
-            if pod.get("node") != node["name"]:
+    # Node containment: which node actually runs what.
+    #
+    # Only drawn when there is more than one node. With a single node the
+    # answer is the same for every workload, so seventeen edges from the
+    # node box carry no information at all — they are pure layout cost, and
+    # on a real cluster they were what turned the picture 385 columns wide.
+    nodes = cluster.get("nodes") or []
+    if len(nodes) > 1:
+        for node in nodes:
+            node_id = node_ids.get(node["name"])
+            if node_id is None:
                 continue
-            workload = pod["workload"]
-            entry = workloads.get((pod["namespace"], workload["kind"], workload["name"]))
-            if entry and entry.get("id"):
-                edge(node_id, entry["id"])
+            for pod in pods:
+                if pod.get("node") != node["name"]:
+                    continue
+                workload = pod["workload"]
+                entry = workloads.get(
+                    (pod["namespace"], workload["kind"], workload["name"])
+                )
+                if entry and entry.get("id"):
+                    edge(node_id, entry["id"])
 
     lines.extend(edges)
     _colour_by_health(lines, workloads)
@@ -344,7 +428,7 @@ def _normalise(cluster: dict[str, Any]) -> dict[str, Any]:
     """
     def _pod(pod: dict[str, Any]) -> dict[str, Any]:
         workload = pod.get("workload") or {}
-        return {
+        out = {
             **pod,
             "name": pod.get("name") or "?",
             "namespace": pod.get("namespace") or "default",
@@ -356,6 +440,12 @@ def _normalise(cluster: dict[str, Any]) -> dict[str, Any]:
                 "inferred": bool(workload.get("inferred")),
             },
         }
+        # Absent rather than defaulted to False: a pod dict with no `ready`
+        # key is one we did not measure, and inventing `False` would paint
+        # every such workload red. `_is_healthy` falls back to the phase.
+        if "ready" in pod:
+            out["ready"] = bool(pod["ready"])
+        return out
 
     namespaces = []
     for ns in cluster.get("namespaces") or []:

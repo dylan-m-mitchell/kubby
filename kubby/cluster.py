@@ -29,10 +29,19 @@ from typing import Any
 #: reality whenever a selector is wrong or a manual Endpoint is added).
 SERVICE_NAME_LABEL = "kubernetes.io/service-name"
 
-#: Namespaces collapsed to a single box by default. On a fresh minikube the
-#: control plane is six or more pods, which would otherwise be most of the
-#: picture with the user's own application a small box off to one side.
-COLLAPSED_NAMESPACES = frozenset({"kube-system", "kube-public", "kube-node-lease"})
+#: Namespaces collapsed to a single box. These are cluster infrastructure
+#: rather than anyone's application: the control plane, the namespaces
+#: Kubernetes creates for itself, and the ingress controller's namespace.
+#: Drawn in full they are most of the picture, and the user's own workloads
+#: end up a small box off to one side.
+#:
+#: Note this is a naming convention, not a fact kubby can establish — there
+#: is nothing in the API that says "this namespace is infrastructure". A
+#: cluster with its own workloads in a namespace called ``kube-system``
+#: would be collapsed along with the control plane.
+COLLAPSED_NAMESPACES = frozenset(
+    {"kube-system", "kube-public", "kube-node-lease", "ingress-nginx"}
+)
 
 #: ``web-7d764666f9-87k8q`` -> ``web``. Only a last resort: the ReplicaSet ->
 #: Deployment link in ownerReferences is authoritative and is used when
@@ -169,15 +178,33 @@ def parse_pods(payload: Any) -> list[dict[str, Any]]:
         if isinstance(status_val, dict):
             phase = status_val.get("phase")
             phase = phase if isinstance(phase, str) and phase else "Unknown"
+            # Container readiness, not just the pod phase. A container stuck
+            # in CrashLoopBackOff or RunContainerError still reports the pod
+            # as `Running` until it finally gives up, so phase alone showed a
+            # broken workload in green — the one thing the picture must never
+            # do.
+            #
+            # With no container statuses at all there is nothing to measure,
+            # and absence of evidence is not evidence of failure: fall back
+            # to the phase. A Pending pod still reads as not-ready, because
+            # its phase says so.
+            statuses = status_val.get("containerStatuses") or []
+            if statuses:
+                ready = all(c.get("ready") is True for c in statuses)
+            else:
+                ready = phase in ("Running", "Succeeded")
         elif isinstance(status_val, str) and status_val:
             phase = status_val
+            ready = phase in ("Running", "Succeeded")
         else:
             phase = "Unknown"
+            ready = False
         pods.append(
             {
                 "name": name,
                 "namespace": meta.get("namespace") or "default",
                 "phase": phase,
+                "ready": ready,
                 "node": spec.get("nodeName") or "",
                 "ip": (spec.get("podIP") or ""),
                 "owner_kind": owner.get("kind") or "",

@@ -517,6 +517,10 @@ class KubbyService:
                         {
                             "name": pod["name"],
                             "status": pod["phase"],
+                            # Carried for the graph, which judges readiness on
+                            # this rather than the phase: a crashlooping
+                            # container keeps its pod in phase `Running`.
+                            "ready": pod["ready"],
                             "node": pod["node"],
                             "ip": pod["ip"],
                             "owner_kind": pod["owner_kind"],

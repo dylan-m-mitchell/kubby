@@ -49,6 +49,7 @@ class TestParsePods:
             "name": "web-7d764666f9-87k8q",
             "namespace": "default",
             "phase": "Running",
+            "ready": True,
             "node": "minikube",
             "ip": "10.244.0.9",
             "owner_kind": "ReplicaSet",
@@ -351,6 +352,65 @@ class TestParseIngress:
         }
         (ing,) = cluster.parse_ingress(payload)
         assert ing["backends"] == [{"name": "web-svc", "namespace": "ingress-nginx"}]
+
+
+class TestPodReadiness:
+    """Readiness, not phase. Judged on phase, a crashlooping container still
+    reports its pod as `Running`, so a broken workload came out green."""
+
+    def _pod(self, phase, statuses):
+        return {
+            "metadata": {"name": "p", "namespace": "default"},
+            "spec": {},
+            "status": {"phase": phase, "containerStatuses": statuses},
+        }
+
+    def test_running_pod_with_a_ready_container(self):
+        (pod,) = cluster.parse_pods(
+            {"items": [self._pod("Running", [{"name": "c", "ready": True}])]}
+        )
+        assert pod["ready"] is True
+
+    def test_crashlooping_container_is_not_ready_despite_running_phase(self):
+        (pod,) = cluster.parse_pods(
+            {
+                "items": [
+                    self._pod(
+                        "Running",
+                        [{"name": "c", "ready": False, "restartCount": 5}],
+                    )
+                ]
+            }
+        )
+        assert pod["phase"] == "Running"
+        assert pod["ready"] is False
+
+    def test_one_unready_container_makes_the_pod_unready(self):
+        (pod,) = cluster.parse_pods(
+            {
+                "items": [
+                    self._pod(
+                        "Running",
+                        [{"name": "a", "ready": True}, {"name": "b", "ready": False}],
+                    )
+                ]
+            }
+        )
+        assert pod["ready"] is False
+
+    def test_pending_pod_with_no_containers_is_not_ready(self):
+        (pod,) = cluster.parse_pods({"items": [self._pod("Pending", [])]})
+        assert pod["ready"] is False
+
+    def test_absent_evidence_falls_back_to_the_phase(self):
+        """Not "assume broken": a payload with nothing to measure should not
+        paint a healthy workload red."""
+        (pod,) = cluster.parse_pods({"items": [self._pod("Running", [])]})
+        assert pod["ready"] is True
+
+    def test_succeeded_pod_is_ready(self):
+        (pod,) = cluster.parse_pods({"items": [self._pod("Succeeded", [])]})
+        assert pod["ready"] is True
 
 
 # ---------------------------------------------------------------------------

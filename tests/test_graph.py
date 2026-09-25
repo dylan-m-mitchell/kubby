@@ -164,7 +164,7 @@ class TestLabels:
             _model(
                 namespaces=[{"name": "kube-system", "pods": [_pod("coredns-1", "kube-system")],
                              "workload_count": 1, "collapsed": False}],
-                services=[_svc("kube-dns", "kube-system", 53,
+                services=[_svc("my-svc", "kube-system", 53,
                                backing=[("kube-system", "coredns-1")])],
             )
         )
@@ -172,7 +172,7 @@ class TestLabels:
         # must not be: `subgraph ns_kube_system [kube-system]` is correct,
         # `[kube_system]` is the regression.
         assert "subgraph ns_kube_system [kube-system]" in src
-        assert 'svc_kube_system_kube_dns["kube-dns\\n53"]' in src
+        assert 'svc_kube_system_my_svc["my-svc\\n53"]' in src
 
     def test_multiple_ports_keep_their_comma(self):
         svc = _svc("api", backing=[("default", "w-1")])
@@ -337,6 +337,74 @@ class TestStructure:
         src = graph.build_mermaid(realistic())
         assert "w_Deployment_web[" in src
         assert "w_default_Deployment_web[" not in src
+
+    def test_a_crashlooping_workload_is_red_not_green(self):
+        """Regression: judged on phase, a container in CrashLoopBackOff keeps
+        its pod in phase Running, so a broken workload was drawn green."""
+        pod = _pod("web-1", phase="Running")
+        pod["ready"] = False
+        src = graph.build_mermaid(
+            _model(namespaces=[{"name": "default", "pods": [pod],
+                                "workload_count": 1, "collapsed": False}])
+        )
+        assert "0/1" in src
+        assert ":::ok" not in src
+
+    def test_a_ready_workload_is_green(self):
+        pod = _pod("web-1", phase="Running")
+        pod["ready"] = True
+        src = graph.build_mermaid(
+            _model(namespaces=[{"name": "default", "pods": [pod],
+                                "workload_count": 1, "collapsed": False}])
+        )
+        assert "1/1" in src
+        assert ":::ok" in src
+
+    def test_node_edges_only_when_there_is_a_choice_of_node(self):
+        """With one node the answer is the same for every workload, so the
+        edges carry nothing and cost a great deal of layout: on a real
+        cluster they were what made the picture 151 columns wide."""
+        model = realistic()
+        assert "node_minikube -->" in graph.build_mermaid(model)
+
+        model["nodes"] = [{"name": "minikube", "status": "Ready", "roles": []}]
+        model["node_facts"] = [model["node_facts"][0]]
+        single = graph.build_mermaid(model)
+        assert "node_minikube -->" not in single
+        # the node box itself is still drawn — it carries the capacity story
+        assert "node_minikube[" in single
+
+    def test_the_ingress_controllers_namespace_is_left_out(self):
+        """It is the machinery behind enabling the addon, not part of the
+        cluster's story, and its boxes were most of the picture."""
+        model = realistic()
+        model["namespaces"].append(
+            {"name": "ingress-nginx", "pods": [_pod("ingress-nginx-controller-x")],
+             "workload_count": 1, "collapsed": True}
+        )
+        src = graph.build_mermaid(model)
+        assert "ingress-nginx-controller" not in src
+        # but the Ingress rule itself, which does teach something, stays
+        assert "shop.example" in src
+
+    def test_the_dns_service_box_is_not_drawn(self):
+        """coredns's own label already says what DNS does, in the same words,
+        without a box and an edge."""
+        src = graph.build_mermaid(realistic())
+        assert "kube-dns" not in src
+        assert "service names to addresses" in src
+
+    def test_infrastructure_namespaces_collapse_but_the_control_plane_does_not(self):
+        model = realistic()
+        model["namespaces"].append(
+            {"name": "ingress-nginx", "pods": [_pod("controller-x")],
+             "workload_count": 1, "collapsed": True}
+        )
+        src = graph.build_mermaid(model)
+        # kube-system is expanded, box by box
+        assert "all cluster state lives here" in src
+        # an omitted namespace contributes nothing at all
+        assert "controller-x" not in src
 
     def test_source_is_deterministic(self):
         """A stable diagram matters: the cursor maps rectangles to objects by
