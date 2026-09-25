@@ -163,7 +163,6 @@ def _route_across_bands(
         return  # adjacent bands with no reserved row; nothing sensible to do
 
     down = dst.band > src.band
-    target_x = dst.x + dst.width // 2
     # Drop out of the source into the clear row below its band, run out to a
     # margin column that nothing else is drawn in, go down (or up) that
     # margin to the band the target is in, and come in along the clear row
@@ -186,20 +185,30 @@ def _route_across_bands(
     lane = target_gap if target_gap is not None else gap
     canvas.line([(margin, gap), (margin, lane)], EDGE_STYLE)
     # Step right of the band's heading before coming down, so the descent
-    # does not cut through the heading text. If the box is too narrow to
-    # enter clear of it, enter at its centre and accept the overlap rather
-    # than missing the box entirely.
+    # does not cut through the heading text. When the box is too narrow to be
+    # entered clear of its own heading — `kubby-demo` is ten characters and
+    # the first box in it starts at column zero — come in from the side
+    # instead, which clears the heading entirely.
     clear_of = placement.heading_right.get(dst.band, 0) + 2
-    target_x = min(max(target_x, clear_of), dst.x + dst.width - 1)
-    canvas.line([(margin, lane), (target_x, lane)], EDGE_STYLE)
-    if down:
-        canvas.line([(target_x, lane), (target_x, dst.y)], EDGE_STYLE)
-        canvas.arrow_head(target_x, dst.y, "down", EDGE_STYLE, force=True)
-    else:
-        canvas.line([(target_x, lane), (target_x, dst.y + dst.height)], EDGE_STYLE)
-        canvas.arrow_head(
-            target_x, dst.y + dst.height, "up", EDGE_STYLE, force=True
-        )
+    if clear_of <= dst.x + dst.width - 1:
+        entry = clear_of
+        canvas.line([(margin, lane), (entry, lane)], EDGE_STYLE)
+        canvas.line([(entry, lane), (entry, dst.y)], EDGE_STYLE)
+        canvas.arrow_head(entry, dst.y, "down", EDGE_STYLE, force=True)
+        return
+
+    side = dst.x - 1
+    if side < 0:
+        side = dst.x + dst.width
+        canvas.line([(margin, lane), (side, lane)], EDGE_STYLE)
+        canvas.line([(side, lane), (side, dst.y + dst.height // 2)], EDGE_STYLE)
+        canvas.arrow_head(side, dst.y + dst.height // 2, "left", EDGE_STYLE)
+        return
+    row = dst.y + dst.height // 2
+    canvas.line([(margin, lane), (side, lane)], EDGE_STYLE)
+    canvas.line([(side, lane), (side, row)], EDGE_STYLE)
+    canvas.line([(side, row), (dst.x, row)], EDGE_STYLE)
+    canvas.arrow_head(dst.x, row, "right", EDGE_STYLE, force=True)
 
 
 def _clear_row(canvas: Canvas, near: int, after: int, before: int) -> int:

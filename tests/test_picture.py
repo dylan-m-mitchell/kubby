@@ -264,6 +264,26 @@ class TestPlace:
             if src and dst and src.band == dst.band:
                 assert dst.x > src.x, f"{source} -> {target} goes backwards"
 
+    def test_a_service_sits_level_with_the_workload_it_feeds(self):
+        """Boxes in a layer are ordered by barycentre, with unconnected ones
+        last. Without it `db-svc` sorted above `web-svc`, the edge to `web`
+        had to double back, and its horizontal run landed on db-svc's row —
+        so one correct edge looked like it came out of the wrong box.
+        """
+        model = realistic()
+        model["namespaces"] = [
+            ns for ns in model["namespaces"] if ns["name"] == "default"
+        ]
+        model["services"] = [
+            s for s in model["services"] if s["namespace"] == "default"
+        ]
+        model["ingresses"] = []
+        built = diagram.build_diagram(model)
+        placement = place.place(built, 200)
+        svc = placement.boxes[_box(built, "web-svc").id]
+        web = placement.boxes[_box(built, "web").id]
+        assert abs(svc.y - web.y) <= max(svc.height, web.height)
+
     def test_every_box_gets_a_size_and_a_cell(self):
         placement = place.place(diagram.build_diagram(realistic()), 120)
         assert placement.boxes

@@ -100,7 +100,8 @@ def place(diagram: Diagram, width: int) -> Placement:
 
     for heading, component in components:
         layers = _layer(component, diagram)
-        columns = _columns(component, layers, diagram.nodes)
+        order = _order_within_layers(component, layers, diagram)
+        columns = _columns(component, layers, order, diagram.nodes)
         widest = max((b.width for column in columns for b in column), default=0)
         component_width = _span(columns, widest)
 
@@ -151,11 +152,21 @@ def _span(columns: list[list[PlacedBox]], widest: int) -> int:
 
 
 def _columns(
-    component: list[str], layers: dict[str, int], nodes: dict[str, Node]
+    component: list[str],
+    layers: dict[str, int],
+    order: dict[str, int],
+    nodes: dict[str, Node],
 ) -> list[list[PlacedBox]]:
-    """Group a component's boxes into columns, one per layer."""
+    """Group a component's boxes into columns, one per layer.
+
+    *layers* decides which column a box is in — which is what makes an edge
+    point rightwards — and *order* decides its place within that column.
+    Keeping them separate matters: the crossing-reduction pass produces
+    rows, and feeding those in as layers collapsed the whole component into
+    a single column.
+    """
     by_layer: dict[int, list[PlacedBox]] = {}
-    for node_id in sorted(component):
+    for node_id in component:
         node = nodes[node_id]
         box = PlacedBox(
             id=node_id,
@@ -164,6 +175,8 @@ def _columns(
             height=len(node.lines) + 2,
         )
         by_layer.setdefault(layers.get(node_id, 0), []).append(box)
+    for column in by_layer.values():
+        column.sort(key=lambda b: order.get(b.id, 0))
     return [by_layer[key] for key in sorted(by_layer)]
 
 
@@ -183,6 +196,62 @@ def _ordered_components(diagram: Diagram) -> list[tuple[str, list[str]]]:
         scored.append((rank, heading, members))
     scored.sort(key=lambda item: (item[0], item[1]))
     return [(heading, members) for _rank, heading, members in scored]
+
+
+def _order_within_layers(
+    component: list[str], layers: dict[str, int], diagram: Diagram
+) -> dict[str, int]:
+    """Assign a row to every box, ordering each layer to reduce crossings.
+
+    Two passes of the barycentre heuristic: a box is placed at the average
+    row of the boxes it links to, looking backwards at its sources and then
+    forwards at its targets.
+
+    Without it, a Service and its workload can end up on rows where the edge
+    between them has to double back, and the horizontal run then sits on the
+    row of some *other* box — so the arrow appears to come out of that box
+    instead. `db-svc 0 endpoints ───► web` was exactly that, from a single
+    correct edge.
+    """
+    inside = set(component)
+    outgoing: dict[str, list[str]] = {node: [] for node in component}
+    incoming: dict[str, list[str]] = {node: [] for node in component}
+    for source, target in diagram.edges:
+        if source in inside and target in inside:
+            outgoing[source].append(target)
+            incoming[target].append(source)
+
+    # Rows are per layer: a box is placed at the average row of the boxes it
+    # links to, and those are in the *neighbouring* layer. Comparing against
+    # positions in its own layer instead — which is the obvious mistake —
+    # makes the pass a no-op, because a node's neighbours are never in its
+    # own layer.
+    rows: dict[str, float] = {node: 0.0 for node in component}
+    by_layer: dict[int, list[str]] = {}
+    for node in component:
+        by_layer.setdefault(layers[node], []).append(node)
+    for members in by_layer.values():
+        members.sort()
+
+    for _ in range(2):
+        for neighbours in (incoming, outgoing):
+            for layer in sorted(by_layer):
+                group = by_layer[layer]
+                if not group:
+                    continue
+                for node in group:
+                    linked = [rows[m] for m in neighbours[node]]
+                    if linked:
+                        rows[node] = sum(linked) / len(linked)
+                # Unconnected boxes sort last within their layer. Left to
+                # sort by name they would push a connected pair out of line
+                # with each other: `db-svc` sorted above `web-svc` and the
+                # edge between `web-svc` and `web` had to double back,
+                # which made its arrow look like it came out of `db-svc`.
+                group.sort(key=lambda n: (not neighbours[n], rows[n], n))
+                for index, node in enumerate(group):
+                    rows[node] = float(index)
+    return {node: int(rows[node]) for node in component}
 
 
 def _layer(component: list[str], diagram: Diagram) -> dict[str, int]:
