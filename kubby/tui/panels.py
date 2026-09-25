@@ -213,31 +213,22 @@ class MinikubePanel(PanelBase, Vertical, can_focus=True):
 
 
 class ToolsPanel(PanelBase, OptionList):
-    """Managed tools and their install state."""
+    """Which managed tools are present, and at what version.
+
+    Read-only. kubby does not install anything — a missing tool is
+    reported with where to get it (see `Tool.website`), and the preflight
+    points at the same place when a missing tool actually blocks starting a
+    cluster.
+    """
 
     BORDER_TITLE = "tools"
     JUMP_KEY = "2"
     EMPTY_TEXT = "no tools"
 
-    BINDINGS = LIST_NAV_BINDINGS + [
-        Binding("i", "request('install')", "install"),
-        Binding("I", "request('install_all')", "install all"),
-    ]
+    BINDINGS = LIST_NAV_BINDINGS
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(markup=False, **kwargs)
-
-    def action_request(self, action: str) -> None:
-        self._request(action, self.selected_tool() if action == "install" else None)
-
-    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if action != "request":
-            return super().check_action(action, parameters)
-        if self.app.is_busy:
-            return None
-        if parameters and parameters[0] == "install":
-            return self.selected_tool() is not None
-        return True
 
     def selected_tool(self) -> str | None:
         """Registry key of the highlighted row (None for the empty state)."""
@@ -251,7 +242,8 @@ class ToolsPanel(PanelBase, OptionList):
         return option.id
 
     def set_tools(self, tools: list[dict[str, Any]]) -> None:
-        # Keep the user's selection across a refresh (post-install, rows move).
+        # Keep the user's selection across a refresh, so the row they are
+        # looking at does not move under them.
         selected = self.selected_tool()
         self.clear_options()
         if not tools:
@@ -266,7 +258,13 @@ class ToolsPanel(PanelBase, OptionList):
             else:
                 row = Text("✗ ", style="red")
                 row.append(f"{label:<9}")
+                # kubby cannot install it, so say where it comes from. The
+                # registry's `website` is already carried through
+                # `get_status()`; this is the first thing that renders it.
                 row.append("not installed", style="dim")
+                site = str(tool.get("website") or "")
+                if site:
+                    row.append(f"  {site}", style="dim italic")
             self.add_option(Option(row, id=str(tool.get("key"))))
         if selected is not None:
             for index, tool in enumerate(tools):

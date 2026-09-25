@@ -265,7 +265,7 @@ class KubbyApp(App[None]):
         self.cluster: dict[str, Any] = {}
         self.images: list[dict[str, Any]] = []
 
-        #: True while a minikube job or an install is streaming.
+        #: True while a minikube job is streaming.
         self.busy = False
         self.busy_label = ""
         #: Client-side image filter (``/``), kept across refreshes.
@@ -340,8 +340,6 @@ class KubbyApp(App[None]):
             "start": self._start_cluster,
             "stop": self._stop_cluster,
             "delete": self._confirm_delete,
-            "install": self._install_one,
-            "install_all": self._install_all,
             "filter": self._open_filter,
             "settings": self._open_settings,
         }.get(message.action)
@@ -529,26 +527,6 @@ class KubbyApp(App[None]):
     def _delete_confirmed(self, accepted: bool | None) -> None:
         if accepted:
             self._kick_job("delete")
-
-    # ----- installs (worker: they block for minutes) ---------------------
-
-    def _install_one(self, key: Any) -> None:
-        if key:
-            self._run_install(str(key))
-
-    def _install_all(self, _payload: Any) -> None:
-        self._run_install(None)
-
-    @work(thread=True, exclusive=True, group="install")
-    def _run_install(self, key: str | None) -> None:
-        # Busy + log must be up before the first byte streams; `_call_on_ui`
-        # blocks until the UI thread has run it, so the order is guaranteed.
-        self._call_on_ui(self._begin_job, f"install {key}" if key else "install all")
-        if key:
-            result = self.service.install_tool(key)
-        else:
-            result = self.service.install_all()
-        self._call_on_ui(self._finish_job, bool(result.get("ok", False)))
 
     # ----- image filter --------------------------------------------------
 

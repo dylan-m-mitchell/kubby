@@ -194,87 +194,48 @@ class TestMinikubeActions:
             assert await wait_until(lambda: "delete_minikube" in fake_service.calls)
 
 
-class TestInstallActions:
-    async def test_install_keys_are_greyed_out_while_a_job_runs(self, fake_service):
-        fake_service.cluster["running"] = False
+class TestToolsPanelIsReadOnly:
+    """kubby no longer installs tools; the panel reports and points, nothing more."""
+
+    @staticmethod
+    def _rows(panel):
+        return [str(panel.get_option_at_index(i).prompt) for i in range(panel.option_count)]
+
+    async def test_missing_tool_names_where_to_get_it(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)):
+            await wait_until(lambda: app.system)
+            rows = self._rows(app.query_one(ToolsPanel))
+            # helm is the missing one in FakeService.
+            assert "not installed" in rows[1]
+            assert "https://helm.sh/" in rows[1]
+
+    async def test_installed_rows_carry_no_link(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)):
+            await wait_until(lambda: app.system)
+            rows = self._rows(app.query_one(ToolsPanel))
+            assert "1.38.1" in rows[0] and "https://" not in rows[0]
+
+    async def test_navigates_but_i_and_I_do_nothing(self, fake_service):
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)) as pilot:
             await wait_until(lambda: app.system)
-            await pilot.press("s")
-            assert await wait_until(lambda: app.busy)
-
-            app.query_one(ToolsPanel).focus()
+            panel = app.query_one(ToolsPanel)
+            panel.focus()
             await pilot.pause()
-            calls_before = list(fake_service.calls)
+
+            await pilot.press("j", "j")
+            await pilot.pause()
+            assert panel.highlighted == 2
+            await pilot.press("k")
+            await pilot.pause()
+            assert panel.highlighted == 1
+
+            before = list(fake_service.calls)
             await pilot.press("i", "I")
             await pilot.pause()
-            assert list(fake_service.calls) == calls_before  # nothing installed
-            assert app.active_bindings["i"].enabled is False  # greyed, still listed
-            assert '"i" install' in keybar(app)
-
-    async def test_install_streams_and_then_finishes(self, fake_service):
-        fake_service.install_delay = 0.2  # a window where the UI is busy
-        app = KubbyApp(service=fake_service)
-        async with app.run_test(size=(100, 40)) as pilot:
-            await wait_until(lambda: app.system)
-            tools = app.query_one(ToolsPanel)
-            tools.focus()
-            await pilot.pause()
-            tools.highlighted = 1  # helm
-
-            await pilot.press("i")
-            assert await wait_until(lambda: app.busy)
-            log = app.query_one(LogPanel)
-            assert log.display is True and log.job_active
-            assert "install_tool:helm" in fake_service.calls
-            # Greyed while it streams — asserted inside the busy window.
-            assert app.active_bindings["i"].enabled is False
-            assert '"i" install' in keybar(app)
-
-            assert await wait_until(lambda: len(log.history) >= 2)
-            assert log.history[0] == "$ installing tool helm"
-
-            assert await wait_until(lambda: not app.busy)
-            assert log.display is False
-            # _finish_job clears busy *before* spawning the refresh worker,
-            # so the count can still be 1 for a moment — poll for it rather
-            # than racing the thread the way a bare assert does.
-            assert await wait_until(lambda: fake_service.calls.count("get_status") >= 2)
-
-    async def test_install_all_covers_every_tool(self, fake_service):
-        fake_service.install_delay = 0.1
-        app = KubbyApp(service=fake_service)
-        async with app.run_test(size=(100, 40)) as pilot:
-            await wait_until(lambda: app.system)
-            app.query_one(ToolsPanel).focus()
-            await pilot.pause()
-
-            await pilot.press("I")
-            assert await wait_until(lambda: "install_all" in fake_service.calls)
-            assert await wait_until(lambda: not app.busy)
-
-    async def test_a_failed_install_pins_the_log_open(self, fake_service):
-        fake_service.install_result = {
-            "ok": False, "installed": [], "failed": ["helm"], "skipped": 0,
-            "error": "checksum mismatch",
-        }
-        app = KubbyApp(service=fake_service)
-        async with app.run_test(size=(100, 40)) as pilot:
-            await wait_until(lambda: app.system)
-            tools = app.query_one(ToolsPanel)
-            tools.focus()
-            await pilot.pause()
-            tools.highlighted = 1  # helm
-
-            await pilot.press("i")
-            assert await wait_until(lambda: not app.busy and "install_tool:helm" in fake_service.calls)
-
-            log = app.query_one(LogPanel)
-            assert log.display is True and log.pinned  # rule 5: failure pins
-
-            await pilot.press("x")
-            await pilot.pause()
-            assert log.display is False and not log.pinned  # rule 3: hide clears
+            assert fake_service.calls == before
 
 
 class TestLogDismissal:
@@ -808,7 +769,6 @@ class TestKeybarAndHelp:
                 assert expected in text, expected
             for expected in ('"?" help', '"q" quit'):
                 assert expected in glob, expected
-            assert '"i" install' not in text
             assert '"S" stop' not in text  # cluster is down: nothing to stop
             assert '"x" hide log' not in text  # idle: nothing to dismiss
             # R is an action, not chrome: it belongs with the panel keys.
@@ -817,7 +777,9 @@ class TestKeybarAndHelp:
             app.query_one(ToolsPanel).focus()
             await pilot.pause()
             text = keybar(app)
-            assert '"i" install' in text and '"I" install all' in text
+            # Read-only panel: no action keys of its own (j/k are hidden
+            # navigation), so the bar carries only the app-wide re-check.
+            assert "install" not in text
             assert '"s" start' not in text
             # The pinned pair is unchanged by the panel switch.
             assert '"?" help' in globals_bar(app) and '"q" quit' in globals_bar(app)
@@ -887,7 +849,6 @@ class TestKeybarAndHelp:
                 # (the overlay pads columns, so keys and labels are checked apart)
                 ('"s"', "start"), ('"S"', "stop"), ('"d"', "delete"),  # minikube
                 ('"o"', "settings"),
-                ('"i"', "install"), ('"I"', "install all"),             # tools
                 ('"/"', "filter"),                                      # images
                 ('"enter/space"', "expand / collapse"),                 # namespaces
                 # Vim movement: j/k are the movement keys of record, listed

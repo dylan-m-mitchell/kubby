@@ -20,7 +20,7 @@ class TestCheckReport:
         out = capsys.readouterr().out
         assert out.startswith("kubby self-check\n================\n")
         # Header fields the smoke test relies on.
-        for field in ("project:", "python:", "platform:", "package mgr:", "elevation:"):
+        for field in ("project:", "python:", "platform:", "package mgr:", "root prompt:"):
             assert field in out
         assert "Managed tools" in out
         # Every managed tool is listed with an installed/not-found status.

@@ -1,8 +1,6 @@
 """Tests for the tool registry: construction invariants and version parsers."""
 from __future__ import annotations
 
-import pytest
-
 from kubby.installer.tools import (
     APT,
     DNF,
@@ -24,7 +22,6 @@ def _tool(**overrides) -> Tool:
         website="https://example.com/",
         version_args=("--version",),
         parse_version=_parse_semver_token(),
-        install_script="true",
     )
     fields.update(overrides)
     return Tool(**fields)
@@ -34,10 +31,6 @@ class TestToolInvariants:
     def test_registry_keys_match_tool_keys(self):
         assert set(TOOLS) == {tool.key for tool in TOOLS.values()}
 
-    def test_every_registry_tool_has_exactly_one_install_method(self):
-        for key, tool in TOOLS.items():
-            assert (tool.install_script is None) != (tool.pkg_name is None), key
-
     def test_registry_tools_have_metadata(self):
         for tool in TOOLS.values():
             assert tool.label
@@ -45,16 +38,11 @@ class TestToolInvariants:
             assert tool.website.startswith("https://")
             assert tool.version_args
 
-    def test_install_script_and_pkg_name_both_set_raises(self):
-        with pytest.raises(ValueError, match="exactly one of"):
-            _tool(install_script="true", pkg_name="demo")
-
-    def test_neither_install_script_nor_pkg_name_raises(self):
-        with pytest.raises(ValueError, match="exactly one of"):
-            _tool(install_script=None, pkg_name=None)
-
-    def test_pkg_name_only_is_valid(self):
-        assert _tool(install_script=None, pkg_name="demo").pkg_name == "demo"
+    def test_every_tool_points_somewhere_to_get_it(self):
+        # `website` is how a missing tool is answered now that kubby no
+        # longer installs anything, so it has to be real on every entry.
+        for key, tool in TOOLS.items():
+            assert tool.website.startswith("https://"), key
 
 
 class TestSemverParser:
