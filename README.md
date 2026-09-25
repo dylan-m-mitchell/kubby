@@ -53,9 +53,10 @@ stays visible with diagnostics so you can read what went wrong.
 | `kubby --check` | Print install status for all managed tools, then exit              |
 | `kubby --debug` | Enable Textual devtools: needs `textual-dev` installed *and* a running `textual dev` server to stream to |
 
-Inside the app: `tab` cycles panels, `?` opens the key reference, `q`
-quits. Each panel lists its own keys in the keybar at the bottom of the
-screen — greyed keys are unavailable in the current state.
+Inside the app: `1`–`4` jump straight to a panel, `tab` cycles them, `?`
+opens the key reference, `q` quits. Each panel lists its own keys in the
+keybar at the bottom of the screen — greyed keys are unavailable in the
+current state.
 
 ## Managed CLIs
 

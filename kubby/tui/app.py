@@ -59,6 +59,17 @@ log = logging.getLogger("kubby")
 APP_KEYS: tuple[tuple[str, str, str, bool], ...] = (
     ("tab", "focus_next", "next panel", False),
     ("shift+tab", "focus_previous", "previous panel", False),
+    # Direct jumps. The point is reaching any panel in one keypress instead
+    # of tabbing there, so the number *is* the tab selector.
+    #
+    # Hidden from the keybar on purpose: four more entries would crowd out
+    # the focused panel's own keys on a single line at 100 columns. They are
+    # in the help overlay instead, which is the documented place to look up
+    # keys (`?`), and the numbering follows the visual order of the layout.
+    ("1", "focus_minikube", "minikube panel", False),
+    ("2", "focus_tools", "tools panel", False),
+    ("3", "focus_images", "images panel", False),
+    ("4", "focus_cluster", "namespaces panel", False),
     ("R", "recheck", "re-check", True),
     ("x", "dismiss_log", "hide log", True),
     ("question_mark", "show_help", "help", True),
@@ -493,6 +504,27 @@ class KubbyApp(App[None]):
         self.query_one(ImagesPanel).set_images(self.images, self.image_filter)
 
     # ----- actions -------------------------------------------------------
+
+    def _focus_panel(self, selector: str) -> None:
+        """Jump straight to a panel by id.
+
+        `set_focus` rather than `Widget.focus()` for the same reason
+        `on_mount` uses it: focus() only schedules the change, so the
+        keybar would render against the panel the user just left.
+        """
+        self.screen.set_focus(self.query_one(selector))
+
+    def action_focus_minikube(self) -> None:
+        self._focus_panel("#minikube")
+
+    def action_focus_tools(self) -> None:
+        self._focus_panel("#tools")
+
+    def action_focus_images(self) -> None:
+        self._focus_panel("#images")
+
+    def action_focus_cluster(self) -> None:
+        self._focus_panel("#cluster")
 
     def action_recheck(self) -> None:
         self.refresh_data()

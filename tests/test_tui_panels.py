@@ -389,6 +389,78 @@ class TestImageFilter:
             assert "no image matches" in prompt
 
 
+class TestNumberKeyTabs:
+    """1-4 jump straight to a panel; tab still cycles as before."""
+
+    async def test_each_number_jumps_to_its_panel(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.system)
+            panels = {
+                "1": MinikubePanel,
+                "2": ToolsPanel,
+                "3": ImagesPanel,
+                "4": ClusterPanel,
+            }
+            # Start on minikube, then walk the numbers out of order so a
+            # binding that always focused the same widget would fail.
+            app.query_one(MinikubePanel).focus()
+            await pilot.pause()
+
+            for key, panel_cls in panels.items():
+                await pilot.press(key)
+                assert await wait_until(lambda c=panel_cls: app.screen.focused is app.query_one(c))
+                # Focus is synchronous, so the keybar is never a step behind.
+                assert '"tab"' not in keybar(app)  # hidden by design
+
+    async def test_number_keys_are_ordinary_text_while_filtering(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.images)
+            images = app.query_one(ImagesPanel)
+            images.focus()
+            await pilot.press("/")
+            await pilot.pause()
+            bar = app.query_one("#filter-bar", Input)
+            assert app.screen.focused is bar
+
+            # A digit typed into the filter must not steal focus to minikube.
+            await pilot.press("1", "2")
+            await pilot.pause()
+            assert app.screen.focused is bar
+            assert await wait_until(lambda: app.image_filter == "12")
+
+    async def test_number_keys_do_not_reach_through_a_modal(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.system)
+            await pilot.press("?")
+            await pilot.pause()
+            assert isinstance(app.screen, HelpScreen)
+
+            await pilot.press("1")
+            await pilot.pause()
+            # ModalScreen stops the non-priority binding chain, so the
+            # underlying screen keeps focus and the overlay stays up.
+            assert isinstance(app.screen, HelpScreen)
+
+    async def test_help_lists_the_number_keys(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.system)
+            await pilot.press("?")
+            await pilot.pause()
+            text = str(app.screen.query_one("#help-body", Static).content)
+            for key, label in (
+                ('"1"', "minikube panel"),
+                ('"2"', "tools panel"),
+                ('"3"', "images panel"),
+                ('"4"', "namespaces panel"),
+            ):
+                assert key in text, key
+                assert label in text, label
+
+
 class TestKeybarAndHelp:
     async def test_keybar_follows_the_focused_panel(self, fake_service):
         fake_service.cluster["running"] = False
