@@ -83,6 +83,16 @@ fi
 # without locking the plan and verdict files out of reach.
 ART=${ART:-$PWD/.agent-review}
 mkdir -p "$ART"
+# Also ignore it in git's local exclude file. The tracked .gitignore entry
+# only exists on branches that carry it — a PR branch predating that change
+# would otherwise let `git add -A` commit the plan, verdict and gate logs
+# into the contributor's branch, and `git clean -fd` (review-only path)
+# delete $ART mid-run. .git/info/exclude is local-only and never committed.
+if _excl_git_dir=$(git rev-parse --git-dir 2>/dev/null); then
+  mkdir -p "$_excl_git_dir/info"
+  grep -qxF '.agent-review/' "$_excl_git_dir/info/exclude" 2>/dev/null ||
+    printf '.agent-review/\n' >>"$_excl_git_dir/info/exclude"
+fi
 export ART
 export PLAN_FILE="$ART/plan.md"
 export VERDICT_FILE="$ART/verdict.txt"
@@ -367,11 +377,16 @@ for ((round = 1; round <= MAX_ITERATIONS; round++)); do
       commit_fixes "fix(review): apply review round $round fixes"
       if [[ "$PUSH_FIXES" == "true" && "$DRY_RUN" != 1 ]]; then
         if push_fixes; then
+          # A push can fail in one round and succeed in the next (transient
+          # network, a branch that moved): only the latest attempt decides
+          # whether the run ends red.
+          push_failed=false
           action="Fixes applied and pushed to \`$PR_HEAD_REF\` as \`$(git rev-parse --short HEAD)\`."
           feedback="Round $round was pushed; the diff you now see already contains those fixes."
         else
           action="Fixes committed locally but the push failed — see the job log."
           push_failed=true
+          feedback="Round $round was committed but the push failed. Do not assume your changes landed; the next round must re-check the diff."
         fi
       else
         action="Fixes committed locally as \`$(git rev-parse --short HEAD)\` (push disabled)."
