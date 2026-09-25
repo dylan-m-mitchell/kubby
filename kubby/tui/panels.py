@@ -96,8 +96,9 @@ class PanelBase:
         self.post_message(PanelAction(action, payload))
 
 
-#: Vim-style vertical movement, shared by the two single-column list panels
-#: so ``j``/``k`` is written once.
+#: Vim-style vertical movement, shared by the navigable panels (both
+#: single-column list panels and the namespaces tree) so ``j``/``k`` is
+#: written once.
 #:
 #: A constant rather than a mixin on purpose: Textual *replaces* BINDINGS
 #: along the MRO instead of merging them, so a mixin's bindings are silently
@@ -368,6 +369,8 @@ class ClusterPanel(PanelBase, Tree):
         IndexError from the same lookup: a collapsed or empty tree must be a
         no-op here rather than a crash on a keypress.
         """
+        if self.cursor_line < 0:
+            return None
         try:
             return self._tree_lines[self.cursor_line]
         except IndexError:
