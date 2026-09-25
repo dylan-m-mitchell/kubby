@@ -230,7 +230,10 @@ class TestInstallActions:
 
             assert await wait_until(lambda: not app.busy)
             assert log.display is False
-            assert fake_service.calls.count("get_status") >= 2  # refreshed after
+            # _finish_job clears busy *before* spawning the refresh worker,
+            # so the count can still be 1 for a moment — poll for it rather
+            # than racing the thread the way a bare assert does.
+            assert await wait_until(lambda: fake_service.calls.count("get_status") >= 2)
 
     async def test_install_all_covers_every_tool(self, fake_service):
         fake_service.install_delay = 0.1
