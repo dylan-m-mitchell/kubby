@@ -674,14 +674,29 @@ class TestVimNavigation:
             text = str(app.screen.query_one("#help-body", Static).content)
 
             for label in (
-                "move down / up",          # j/k, all three panels
-                "collapse, or out to the parent",   # h on the tree
-                "expand, or in to the first pod",   # l on the tree
-                "not applicable — one column",      # why h/l is absent on lists
+                "down",                              # j
+                "up",                                # k
+                "also move",                         # arrows, demoted to a note
+                "collapse, or out to the parent",    # h on the tree
+                "expand, or in to the first pod",    # l on the tree
+                "not applicable — one column",       # why h/l is absent on lists
             ):
                 assert label in text, label
-            # The arrows are documented alongside j/k, since they still work.
-            assert "j/k or up/down" in text
+
+    async def test_jk_are_listed_before_the_arrows(self, fake_service):
+        # j/k are the movement keys of record. A combined "j/k or up/down"
+        # row would read as equals; they are deliberately separate rows, and
+        # j comes before k comes before the arrow note.
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.system)
+            await pilot.press("?")
+            await pilot.pause()
+            text = str(app.screen.query_one("#help-body", Static).content)
+
+            assert text.index('"j"') < text.index('"k"') < text.index('"up/down"')
+            # ...and each is a row of its own rather than a combined one.
+            assert '"j/k' not in text
 
     async def test_arrows_still_move(self, fake_service):
         # hjkl is an addition, not a replacement: the arrows were working
@@ -811,8 +826,11 @@ class TestKeybarAndHelp:
                 ('"i"', "install"), ('"I"', "install all"),             # tools
                 ('"/"', "filter"),                                      # images
                 ('"enter/space"', "expand / collapse"),                 # namespaces
-                # Vim movement: j/k everywhere, h/l on the tree only.
-                ('"j/k or up/down"', "move down / up"),
+                # Vim movement: j/k are the movement keys of record, listed
+                # one per row; the arrows are a fallback note beneath them.
+                ('"j"', "down"),
+                ('"k"', "up"),
+                ('"up/down"', "also move"),
                 ('"h"', "collapse, or out to the parent"),
                 ('"l"', "expand, or in to the first pod"),
                 ('"q"', "quit"), ('"?"', "help"), ('"R"', "re-check"),
