@@ -15,8 +15,10 @@
 # (findings that need a human), or when MAX_ITERATIONS is exhausted.
 #
 # Exit status
-#   0  gates are green and nothing is pending in the working tree
-#   1  the agent crashed, or its changes never passed the gates
+#   0  gates are green with nothing pending — including when only the final
+#      round's agent flaked, having been reviewed by an earlier round
+#   1  no round ever finished, the changes never passed the gates, or a
+#      committed fix could not be pushed
 #
 # Environment
 #   PR_NUMBER PR_TITLE PR_BASE_SHA PR_HEAD_REF REPO   workflow inputs
@@ -26,8 +28,33 @@
 #   MAX_ITERATIONS    default 3
 #   PUSH_FIXES        "false" for fork PRs: review-only, no edits, no pushes
 #   DRY_RUN           "1": stub the agent, skip gh calls and pushes (testing)
+#   FAKE_VERDICT      dry-run verdict (default: round 1 FIXED, later CLEAN)
+#   FAKE_EDIT         "0": the dry-run agent stops editing files
+#   FAKE_FAIL_ROUNDS  "2,3": those dry-run rounds fail like a crashed agent
 #
 set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Run from a copy outside the worktree.
+#
+# The agent edits files in this repository while bash is still reading this
+# script, and bash parses a script as it executes it — an edit landing
+# mid-run corrupts the parse and kills the loop with a syntax error. (This
+# happened: an agent fix to this file ended the round with exit 2.) Executing
+# a copy under a temp directory makes the running text immutable no matter
+# what the agent commits.
+# ---------------------------------------------------------------------------
+SELF=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")
+if TOP=$(git rev-parse --show-toplevel 2>/dev/null) && [[ "$SELF" == "$TOP/"* ]]; then
+  LOOP_HOME=${LOOP_HOME:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}}
+  if [[ -n "$LOOP_HOME" && "$LOOP_HOME" != "$TOP" && "$LOOP_HOME" != "$TOP/"* ]]; then
+    mkdir -p "$LOOP_HOME" 2>/dev/null || true
+    # If the copy fails for any reason, run in place rather than not at all.
+    if cp "$SELF" "$LOOP_HOME/agent-review-loop.sh" 2>/dev/null; then
+      exec bash "$LOOP_HOME/agent-review-loop.sh" "$@"
+    fi
+  fi
+fi
 
 REPO=${REPO:-${GITHUB_REPOSITORY:-}}
 PR_NUMBER=${PR_NUMBER:?PR_NUMBER is required}
@@ -35,6 +62,7 @@ PR_TITLE=${PR_TITLE:-"(untitled)"}
 PR_BASE_SHA=${PR_BASE_SHA:?PR_BASE_SHA is required}
 PR_HEAD_REF=${PR_HEAD_REF:-}
 MAX_ITERATIONS=${MAX_ITERATIONS:-3}
+AGENT_ROUND_TIMEOUT=${AGENT_ROUND_TIMEOUT:-600}
 PUSH_FIXES=${PUSH_FIXES:-true}
 DRY_RUN=${DRY_RUN:-0}
 REVIEW_ONLY=false
@@ -50,7 +78,10 @@ else
   REVIEW_MODEL=opencode/mimo-v2.6-flash-free
 fi
 
-ART=${ART:-${RUNNER_TEMP:-/tmp}/agent-review}
+# Scratch space lives inside the worktree (and is gitignored) so that the
+# agent's permission set can close the filesystem around the repository
+# without locking the plan and verdict files out of reach.
+ART=${ART:-$PWD/.agent-review}
 mkdir -p "$ART"
 export ART
 export PLAN_FILE="$ART/plan.md"
@@ -90,10 +121,13 @@ post_comment() {
     return 0
   fi
   # Fork PRs get a read-only token; a comment we cannot post must not fail
-  # the round — the same text lands in the job summary instead.
+  # the round — the same text lands in the job summary instead. On a failed
+  # request gh prints the error body to stdout, so the id is filtered to
+  # digits before anything is PATCHed with it.
   local id
   id=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
-        --jq ".[] | select((.body // \"\") | contains(\"$MARKER\")) | .id" 2>/dev/null | head -n1 || true)
+        --jq ".[] | select((.body // \"\") | contains(\"$MARKER\")) | .id" 2>/dev/null |
+    grep -E '^[0-9]+$' | head -n1 || true)
   if [[ -n "$id" ]]; then
     gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$file" >/dev/null
   else
@@ -111,11 +145,13 @@ commit_fixes() {
 push_fixes() {
   # The token goes into an http header for this call only: actions/checkout
   # ran with persist-credentials:false, so no credential sits in git config
-  # where the agent could read it back out.
-  local auth
-  auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
-  git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
-    push origin "HEAD:refs/heads/$PR_HEAD_REF"
+  # where the agent could read it back out. An absent token (a local test
+  # run) simply pushes without one.
+  local -a auth_cfg=()
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    auth_cfg=(-c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')")
+  fi
+  git "${auth_cfg[@]}" push origin "HEAD:refs/heads/$PR_HEAD_REF"
 }
 
 # ---------------------------------------------------------------------------
@@ -152,10 +188,15 @@ read_verdict() {
 
 run_agent() {
   local prompt=$1 round=$2
+  AGENT_NOTE=""
 
   if [[ "$DRY_RUN" == 1 ]]; then
     # Local stand-in for the agent: round 1 changes something and later
-    # rounds report clean, unless FAKE_VERDICT overrides.
+    # rounds report clean, unless FAKE_VERDICT overrides. FAKE_FAIL_ROUNDS
+    # ("2,3") makes those rounds fail the way a crashed agent does.
+    if [[ ",${FAKE_FAIL_ROUNDS:-}," == *",$round,"* ]]; then
+      return 1
+    fi
     local v=${FAKE_VERDICT:-}
     [[ -z "$v" && $round -eq 1 ]] && v=FIXED
     [[ -z "$v" ]] && v=CLEAN
@@ -176,16 +217,29 @@ run_agent() {
   fi
 
   # GH_TOKEN and GITHUB_TOKEN are stripped: the agent needs the provider
-  # credential and nothing else from the outside world.
-  if ! env -u GH_TOKEN -u GITHUB_TOKEN \
-      opencode run --standalone --auto \
-        --agent ci-reviewer \
-        --model "$REVIEW_MODEL" \
-        --title "PR #$PR_NUMBER review (round $round)" \
-        "${attach[@]}" \
-        "$prompt" 2>&1 | tee "$ART/agent-$round.log"; then
+  # credential and nothing else from the outside world. The wall-clock limit
+  # is what keeps a wandering model from spending the whole job elsewhere —
+  # a round that wrote its verdict before the limit still counts.
+  local rc=0
+  timeout --kill-after=30 "$AGENT_ROUND_TIMEOUT" \
+    env -u GH_TOKEN -u GITHUB_TOKEN \
+    opencode run --standalone --auto \
+      --agent ci-reviewer \
+      --model "$REVIEW_MODEL" \
+      --title "PR #$PR_NUMBER review (round $round)" \
+      "${attach[@]}" \
+      "$prompt" 2>&1 | tee "$ART/agent-$round.log" || rc=$?
+
+  if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+    if [[ -s "$VERDICT_FILE" ]]; then
+      AGENT_NOTE="⏱ Ran into the ${AGENT_ROUND_TIMEOUT}s round limit — the plan above is what the agent had written by then."
+      warn "round $round hit the ${AGENT_ROUND_TIMEOUT}s limit; using the verdict already written"
+      return 0
+    fi
+    warn "round $round hit the ${AGENT_ROUND_TIMEOUT}s limit with no verdict"
     return 1
   fi
+  return $rc
 }
 
 build_prompt() {
@@ -209,13 +263,20 @@ $pr_body
 
 ## Where things stand
 - Base: $PR_BASE_SHA   Head: $(git rev-parse HEAD)
-- The PR diff is attached to this message and at $ART/pr.diff
+- The PR diff is at $ART/pr.diff (also attached to this message unless it
+  is too large to attach)
 - Working tree: $dirty_count path(s) already modified$extra
+- Scope: review the diff and the files it touches (plus their tests). Do
+  not read workflows, docs or config the diff does not mention, and do not
+  explore the repository structure — the diff is the assignment.
 ${feedback:-}
 
 ## Output
 Write the fix plan to $PLAN_FILE and the verdict to $VERDICT_FILE
-(exactly one word: CLEAN, FIXED, or BLOCKED). Both files are required.
+(exactly one word: CLEAN, FIXED, or BLOCKED). Both files are required, and
+the moment they exist you must summarise and end your turn — this round has
+a hard ${AGENT_ROUND_TIMEOUT}s wall-clock limit, and anything still in flight
+when it expires is lost.
 EOF
 }
 
@@ -255,6 +316,7 @@ append_round() {
 
 feedback=""
 agent_error=""
+rounds_completed=0
 push_failed=false
 outcome=""
 
@@ -266,14 +328,24 @@ for ((round = 1; round <= MAX_ITERATIONS; round++)); do
   prompt=$(build_prompt "$round")
 
   if ! run_agent "$prompt" "$round"; then
-    agent_error="the agent exited non-zero in round $round — see the job log"
-    printf 'No plan: the agent did not finish.\n' >"$PLAN_FILE"
-    append_round "$round" ERROR "**$agent_error**" "$PLAN_FILE"
-    outcome="❌ agent error"
-    break
+    # A crashed round is not the end of the loop — the next round retries the
+    # whole review from scratch, and only a failure on the final round is fatal.
+    printf 'No plan: the agent did not finish this round.\n' >"$PLAN_FILE"
+    agent_error="the agent did not finish round $round/$MAX_ITERATIONS — see the job log"
+    append_round "$round" ERROR "**This round did not finish** — the agent crashed or ran into its ${AGENT_ROUND_TIMEOUT}s limit." "$PLAN_FILE"
+    post_comment "$COMMENT_FILE" || warn "could not post the PR comment (read-only token?)"
+    feedback="Round $round did not finish. Write the plan and verdict files first thing, then stop — no reading around before they exist."
+    continue
   fi
+  agent_error="" # this round completed; an earlier failure no longer counts
+  # Nor may an earlier round's failure message outlive this one: if the gates
+  # now pass, the outcome reported at the end must describe the latest round.
+  outcome=""
 
   verdict=$(read_verdict)
+  if [[ "$verdict" != ERROR ]]; then
+    rounds_completed=$((rounds_completed + 1))
+  fi
   [[ -f "$PLAN_FILE" ]] || printf 'No plan written by the agent.\n' >"$PLAN_FILE"
 
   gate_failed=false
@@ -318,6 +390,7 @@ $(tail -n 40 "$ART/gates-$round.txt" 2>/dev/null || printf '(gate log missing)')
     feedback=""
   fi
 
+  [[ -n "${AGENT_NOTE:-}" ]] && action+=" $AGENT_NOTE"
   append_round "$round" "$verdict" "$action" "$PLAN_FILE"
   post_comment "$COMMENT_FILE" || warn "could not post the PR comment (read-only token?)"
 
@@ -338,20 +411,32 @@ $(tail -n 40 "$ART/gates-$round.txt" 2>/dev/null || printf '(gate log missing)')
       break
       ;;
     ERROR)
-      agent_error="the agent finished round $round without writing a verdict"
-      outcome="❌ no verdict"
-      break
+      # The run succeeded but the model never wrote its verdict: treat it
+      # like a missed round and give the next one a chance.
+      agent_error="the agent finished round $round/$MAX_ITERATIONS without writing a verdict"
+      feedback="Round $round ended without $VERDICT_FILE. Write both files before ending your turn."
+      continue
       ;;
   esac
 done
 
 status_overall=0
-if [[ -n "$agent_error" || "$push_failed" == true ]]; then
+if [[ "$push_failed" == true ]]; then
   status_overall=1
-  outcome="❌ $outcome"
+  outcome="❌ fixes were committed but could not be pushed"
 elif [[ -n "$(git status --porcelain)" ]]; then
   status_overall=1
-  outcome="$outcome (last round never went green)"
+  outcome="${outcome:-⚠️ fixes pending} (last round never went green)"
+elif [[ -n "$agent_error" ]]; then
+  if [[ $rounds_completed -gt 0 ]]; then
+    # An earlier round reviewed this PR and left it green. A model that
+    # flaked on the final round is worth reporting loudly, not worth a red
+    # check on a PR the loop already reviewed.
+    outcome="⚠️ reviewed in an earlier round, but one round did not finish — see its note above"
+  else
+    status_overall=1
+    outcome="❌ $agent_error"
+  fi
 elif [[ -z "$outcome" ]]; then
   outcome="🛑 iteration cap reached — findings above may remain"
 fi

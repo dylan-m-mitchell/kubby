@@ -17,6 +17,12 @@ name: Agent review loop
 # on a free model. Set the REVIEW_MODEL repository variable to pick a model
 # explicitly. Draft PRs and PRs labelled skip-agent-review are not reviewed;
 # fork PRs are reviewed but never edited or pushed to (read-only token).
+#
+# Two details worth knowing when reading the logs: the script re-executes a
+# copy of itself outside the worktree (bash parses a script as it runs, so an
+# agent edit landing mid-run would otherwise corrupt the parse), and a round
+# whose agent crashes or times out is retried by the next round rather than
+# aborting the job.
 on:
   pull_request:
     types: [opened, reopened, ready_for_review]
@@ -45,6 +51,11 @@ jobs:
       PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
       PR_HEAD_REF: ${{ github.head_ref }}
       MAX_ITERATIONS: '3'
+      # Per-round wall-clock budget. A round is "review the diff, write the
+      # plan, apply fixes, run the gates" — a slow model gets cut off at the
+      # end of it rather than eating the whole job, and a round that wrote
+      # its plan before the cut-off still counts.
+      AGENT_ROUND_TIMEOUT: '600'
       # Same-repo PRs can be pushed to; forks cannot (and must not be).
       PUSH_FIXES: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
       REVIEW_MODEL: ${{ vars.REVIEW_MODEL }}

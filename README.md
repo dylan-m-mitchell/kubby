@@ -111,17 +111,19 @@ Opening a PR also starts the **agent review loop**
 reviews the diff, posts a fix plan as a sticky PR comment, applies the fixes
 it considers safe, and the loop goes around again — up to 3 rounds — until
 the agent reports `CLEAN`, or a finding needs a human. Nothing is pushed
-until the round passes the same `ruff` + `pytest` checks CI runs, and a
-failing round hands its error output straight back to the agent.
+until the round passes the same `ruff` + `pytest` checks CI runs, a failing
+round hands its error output straight back to the agent, and a round whose
+agent crashes is retried by the next round instead of aborting the run.
 
 - **Opt out:** open the PR as a draft, or add the `skip-agent-review` label.
 - **Model:** set the `REVIEW_MODEL` repository variable to choose one.
   Without it, adding the `OPENCODE_API_KEY` secret (an OpenCode Console
   service-account key) selects a paid model; with neither, the loop falls
   back to a free model so it still runs.
-- **Guardrails:** the agent cannot commit, push, edit `.github/`, or reach
-  the network — the surrounding script owns every GitHub action, and fork
-  PRs are reviewed but never edited (their token is read-only).
+- **Guardrails:** the agent never commits or pushes — the script owns every
+  GitHub action — and it cannot write `.github/` or its own permission file,
+  cannot `curl`/`wget`/fetch/search, and stays inside the worktree. Fork PRs
+  are reviewed but never edited (their token is read-only).
 
 ## Requirements
 
