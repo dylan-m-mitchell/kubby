@@ -167,23 +167,38 @@ def render_status(
     return out
 
 
-def _is_global(binding: Any) -> bool:
-    """True for this app's own bindings, false for the focused panel's.
+#: The two keys pinned to the right edge of the keybar.
+#:
+#: These are the always-available, most-reached-for keys, and they must not
+#: move when the focused panel's own key count changes. Everything else —
+#: the panel's keys *and* the app-wide actions like ``R`` re-check and ``x``
+#: hide log — stays on the left, because that is where the things you press
+#: to *do* something live.
+#:
+#: The trade-off is deliberate: ``R`` and ``x`` therefore slide left and
+#: right with the panel keys. An earlier version pinned every app-wide key,
+#: which stopped ``R`` moving but left it sitting among the chrome, reading
+#: like one of the two quit keys. Only these two are worth a fixed position.
+PINNED_KEYS: frozenset[str] = frozenset({"question_mark", "q"})
+
+
+def _is_pinned(binding: Any) -> bool:
+    """True for the bindings that belong in the pinned right-hand half.
 
     Marked with an ``id`` when ``BINDINGS`` is built rather than inferred
     from the key: a panel that later binds ``q`` would otherwise be
-    misfiled into the globals half of the keybar.
+    misfiled into the pinned half and jump around with it.
     """
-    return str(getattr(binding, "id", "") or "").startswith("global:")
+    return str(getattr(binding, "id", "") or "").startswith("pinned:")
 
 
 def render_keybar(app: "KubbyApp") -> Text:
-    """Keys for the *focused panel* — the left-hand half of the keybar."""
+    """Left half: the focused panel's keys, then the app-wide actions."""
     out = Text()
     first = True
     for active in app.active_bindings.values():
         binding = active.binding
-        if not binding.show or _is_global(binding):
+        if not binding.show or _is_pinned(binding):
             continue
         if not first:
             out.append("   ")
@@ -196,17 +211,17 @@ def render_keybar(app: "KubbyApp") -> Text:
 
 
 def render_globals(app: "KubbyApp") -> Text:
-    """App-wide keys — pinned to the right so they never shift.
+    """Right half: the pinned `?` help and `q` quit keys.
 
-    `?` and `q` used to slide left and right as the focused panel's own
-    keys came and went. Keeping them in their own region, right-aligned,
-    means they sit in the same place on every panel.
+    These two used to slide left and right as the focused panel's own keys
+    came and went, because they shared a line with them. Their own
+    right-aligned region means they sit in the same place on every panel.
     """
     out = Text()
     first = True
     for active in app.active_bindings.values():
         binding = active.binding
-        if not binding.show or not _is_global(binding):
+        if not binding.show or not _is_pinned(binding):
             continue
         if not first:
             out.append("   ")
@@ -224,9 +239,15 @@ class KubbyApp(App[None]):
     CSS_PATH = "styles.tcss"
     TITLE = "kubby"
     BINDINGS = [
-        # The `global:` id is what tells the keybar renderer which half of
-        # the bar this binding belongs to — see `_is_global`.
-        Binding(key, action, description, show=show, id=f"global:{key}")
+        # The `pinned:` id is what tells the keybar renderer which half of
+        # the bar this binding belongs to — see `_is_pinned`.
+        Binding(
+            key,
+            action,
+            description,
+            show=show,
+            id=f"pinned:{key}" if key in PINNED_KEYS else None,
+        )
         for key, action, description, show in APP_KEYS
     ]
 
@@ -275,10 +296,10 @@ class KubbyApp(App[None]):
             placeholder="filter images — enter applies, esc clears",
             id="filter-bar",
         )
-        # Two regions in one row: the focused panel's keys on the left, the
-        # app-wide keys pinned to the right edge. One bar rendered both in a
-        # single line made `?` and `q` slide left and right every time the
-        # panel's own key count changed.
+        # Two regions in one row: the focused panel's keys and the app-wide
+        # actions on the left, `?` and `q` pinned to the right edge. One bar
+        # rendered both in a single line made those two slide left and right
+        # every time the panel's own key count changed.
         with Horizontal(id="keybar-row"):
             yield Static("", id="keybar")
             yield Static("", id="keybar-globals")

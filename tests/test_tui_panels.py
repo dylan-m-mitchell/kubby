@@ -117,7 +117,7 @@ class TestMinikubeActions:
             # Output streams from a service thread while the job runs.
             fake_service.on_log("$ minikube start --driver=podman")
             assert await wait_until(lambda: log.history[-1:] == ["$ minikube start --driver=podman"])
-            assert '"x" hide log' in globals_bar(app)
+            assert '"x" hide log' in keybar(app)
 
             fake_service.finish_job(ok=True)
             assert await wait_until(lambda: not app.busy)
@@ -352,7 +352,7 @@ class TestImageFilter:
             # has focus, so it can't re-trigger itself mid-query — and the
             # keybar switches to the key that actually closes the bar.
             assert '"/" filter' not in keybar(app)
-            assert '"esc" close filter' in globals_bar(app)
+            assert '"esc" close filter' in keybar(app)
 
             # q / x / R are ordinary characters while typing — none of them
             # may quit, dismiss the log or re-check the host.
@@ -794,22 +794,26 @@ class TestKeybarAndHelp:
         async with app.run_test(size=(100, 40)) as pilot:
             await wait_until(lambda: app.system)
 
-            # Panel keys live on the left; the app-wide ones on the right.
+            # Left: the panel's keys plus the app-wide actions. Right: only
+            # the two pinned keys.
             text = keybar(app)
             glob = globals_bar(app)
-            for expected in ('"s" start', '"R" re-check', '"?" help', '"q" quit'):
-                haystack = text if expected.startswith('"s"') else glob
-                assert expected in haystack, expected
+            for expected in ('"s" start', '"R" re-check'):
+                assert expected in text, expected
+            for expected in ('"?" help', '"q" quit'):
+                assert expected in glob, expected
             assert '"i" install' not in text
             assert '"S" stop' not in text  # cluster is down: nothing to stop
-            assert '"x" hide log' not in glob  # idle: nothing to dismiss
+            assert '"x" hide log' not in text  # idle: nothing to dismiss
+            # R is an action, not chrome: it belongs with the panel keys.
+            assert '"R" re-check' not in glob
 
             app.query_one(ToolsPanel).focus()
             await pilot.pause()
             text = keybar(app)
             assert '"i" install' in text and '"I" install all' in text
             assert '"s" start' not in text
-            # The globals are unchanged by the panel switch.
+            # The pinned pair is unchanged by the panel switch.
             assert '"?" help' in globals_bar(app) and '"q" quit' in globals_bar(app)
 
             # Keys that are greyed out stay listed but visibly disabled.
@@ -842,11 +846,26 @@ class TestKeybarAndHelp:
                 # ...while the left half genuinely does change.
                 panel_keys.add(str(app.query_one("#keybar", Static).content))
 
-            assert len(seen) == 1, f"globals moved between panels: {seen}"
+            assert len(seen) == 1, f"pinned keys moved between panels: {seen}"
             _, _, right_edge = seen.pop()
             assert right_edge == app.screen.size.width, right_edge
             # Panels do differ, so this is not passing vacuously.
             assert len(panel_keys) > 1, panel_keys
+
+    async def test_only_help_and_quit_are_pinned(self, fake_service):
+        # Guards the grouping, not just the position. An earlier version
+        # pinned every app-wide key, which put `R` re-check up there looking
+        # like one of the two chrome keys; it is an action and belongs on the
+        # left with the rest.
+        fake_service.cluster["running"] = False
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)):
+            await wait_until(lambda: app.system)
+
+            assert '"?" help' in globals_bar(app)
+            assert '"q" quit' in globals_bar(app)
+            assert '"R" re-check' in keybar(app)
+            assert '"R" re-check' not in globals_bar(app)
 
     async def test_help_lists_every_panel(self, fake_service):
         app = KubbyApp(service=fake_service)
