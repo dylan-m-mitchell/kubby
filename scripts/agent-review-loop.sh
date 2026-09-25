@@ -326,12 +326,18 @@ push_fixes() {
   git "${auth_cfg[@]}" push origin "HEAD:refs/heads/$PR_HEAD_REF"
 }
 
-# A push made with GITHUB_TOKEN does not simply start CI: GitHub parks the
-# run it triggers in `action_required`, so the loop's own commits would sit
-# there waiting for a human click. Approve the run we just caused so those
-# commits get the real workflow's verification too. Best effort — the gates
-# below already run the identical checks, so a run we fail to approve is
-# cosmetic, not a gap in verification.
+# A push made with GITHUB_TOKEN does start CI on this path — the exemption
+# GitHub documents for token pushes does not cover the pull_request
+# synchronize event, and every commit this loop has pushed has come back with
+# a passing CI run. What may happen is that the run arrives parked in
+# `action_required`, so approve the run we just caused and those commits get
+# the real workflow's verification without waiting for a human click.
+#
+# Best effort, and deliberately unverified: whether GitHub actually parks
+# these runs has not been observed, because every run so far has passed
+# without help. That is why the lookup below gives up quietly after three
+# tries instead of failing the round — the gates already ran the identical
+# checks, so a missed approval is cosmetic, not a gap in verification.
 approve_ci_run() {
   local sha run_id="" attempt=0
   [[ -z "$GH_TOKEN_VALUE" ]] && return 0 # local run: nothing was triggered

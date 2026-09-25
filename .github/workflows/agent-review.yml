@@ -6,11 +6,18 @@ name: Agent review loop
 # something only a human can decide, or the 2-round cap is reached.
 #
 # Why the loop lives in one job rather than re-triggering itself:
-# pushes made with GITHUB_TOKEN do not start new workflow runs, so the agent's
-# commits cannot re-fire this workflow (or ci.yml). That is deliberate — it
-# means no runaway recursion — and it is why the script runs ruff + pytest
-# itself before every push: the gates it enforces are the gates the PR would
-# have gotten from CI on a human push.
+# a push to the PR branch *does* start new runs. GitHub's exemption for
+# GITHUB_TOKEN pushes does not cover this path — the loop's own commits have
+# each started a CI run, and they passed. Recursion is prevented by the
+# `github.actor != 'github-actions[bot]'` condition on the job below, not by
+# the token: without that condition this workflow re-enters itself on every
+# commit it makes. ci.yml has no such guard and should not have one — the
+# loop's commits are meant to get real CI verification.
+#
+# That is also why the script runs ruff + pytest itself before every push. It
+# cannot wait for CI to come back and only then decide whether the commit is
+# safe, so it enforces the same gates up front; CI then verifies the push
+# independently afterwards.
 #
 # Setup: none. With no secret and no variable the loop reviews on a free
 # OpenCode model, which is the supported configuration — it costs nothing and
@@ -52,9 +59,12 @@ concurrency:
 permissions:
   contents: write
   pull-requests: write
-  # A push made with GITHUB_TOKEN parks the CI run it triggers in
+  # The push does start a CI run, and that run may arrive parked in
   # `action_required`; the loop approves the run it caused so its commits
-  # still get the real workflow's verification.
+  # still get the real workflow's verification. Whether approval was actually
+  # needed has not been observed directly — every run this loop has caused has
+  # passed — so the approval stays best-effort and this permission is only
+  # load-bearing if GitHub does park the run.
   actions: write
 
 jobs:
