@@ -174,7 +174,7 @@ def _route_across_bands(
     # using the gap above the *source* rather than above the *target* sent a
     # short edge on a journey the length of the whole picture.
     drop_x = src.x + src.width // 2
-    margin = placement.width + 1
+    margin = placement.width
     if down:
         canvas.line([(drop_x, src.y + src.height), (drop_x, gap)], EDGE_STYLE)
     else:

@@ -128,7 +128,9 @@ def place(diagram: Diagram, width: int) -> Placement:
                 placement.boxes[box.id] = box
             band_bottom = max(band_bottom, y - NODE_GAP)
         placement.headings.append((offset, band_top, heading))
-        placement.heading_right[band] = offset + len(heading)
+        placement.heading_right[band] = max(
+            placement.heading_right.get(band, 0), offset + len(heading)
+        )
         x = offset + component_width
 
     placement.width = max(

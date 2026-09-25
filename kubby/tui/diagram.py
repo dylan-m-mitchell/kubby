@@ -185,7 +185,8 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
         driver_text = f"minikube, {driver} driver" if driver else "minikube, auto driver"
         diagram.add(Node("host", ["your computer", driver_text], "host", "host"))
         for fact in facts:
-            lines = [str(fact.get("name") or "?")]
+            fact_name = str(fact.get("name") or "?")
+            lines = [fact_name]
             for extra in (
                 fact.get("os_image"),
                 fact.get("runtime"),
@@ -193,8 +194,8 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
             ):
                 if extra:
                     lines.append(str(extra))
-            diagram.add(Node(_node_id(fact["name"]), lines, "node", "node"))
-            diagram.link("host", _node_id(fact["name"]))
+            diagram.add(Node(_node_id(fact_name), lines, "node", "node"))
+            diagram.link("host", _node_id(fact_name))
 
     # --- the client, when there is somewhere for traffic to come from ----
     if cluster.get("ingresses"):
@@ -250,7 +251,7 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
     for svc in cluster.get("services") or []:
         if str(svc.get("namespace") or "default") not in kept:
             continue
-        if svc["name"] == "kube-dns":
+        if svc.get("name") == "kube-dns":
             # coredns's own label already says what DNS does, in the same
             # words. This box and its edge would say it less well.
             continue
@@ -267,11 +268,11 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
             # No selector is not broken: the API server's own Service has
             # none, and so does one fronting hand-managed Endpoints.
             detail, healthy = (", ".join(ports) if ports else "no ports"), True
-        svc_id = _service_id(namespace, str(svc["name"]))
+        svc_id = _service_id(namespace, str(svc.get("name") or "?"))
         diagram.add(
             Node(
                 svc_id,
-                [str(svc["name"]), detail],
+                [str(svc.get("name") or "?"), detail],
                 "infra" if namespace in INFRA_NAMESPACES else "app",
                 namespace,
                 healthy=healthy,
@@ -303,8 +304,8 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
     # --- ingress, and the way in ------------------------------------------
     for ing in cluster.get("ingresses") or []:
         hosts = ", ".join(sorted({r["host"] for r in ing.get("rules") or []})) or "*"
-        ing_id = _ingress_id(str(ing.get("namespace") or "default"), str(ing["name"]))
-        diagram.add(Node(ing_id, [str(ing["name"]), hosts], "client", "client"))
+        ing_id = _ingress_id(str(ing.get("namespace") or "default"), str(ing.get("name") or "?"))
+        diagram.add(Node(ing_id, [str(ing.get("name") or "?"), hosts], "client", "client"))
         if "you" in diagram.nodes:
             diagram.link("you", ing_id)
         for backend in ing.get("backends") or []:

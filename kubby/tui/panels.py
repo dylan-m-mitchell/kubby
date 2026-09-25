@@ -349,8 +349,8 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
     Read-only for now, which is a deliberate first step rather than a
     limitation: the layout that positions the boxes already reports where
     each one landed, so moving a cursor between them later is a search over
-    those rectangles and not a layout engine. See ``node_rects`` in
-    :mod:`kubby.tui.paint`.
+    those rectangles and not a layout engine. See ``Placement.rect`` in
+    :mod:`kubby.tui.place`.
 
     It scrolls because a real cluster does not fit a terminal panel. A
     13-workload cluster came out 72 columns by 63 lines against a panel of

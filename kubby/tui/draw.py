@@ -160,7 +160,7 @@ class Canvas:
             for x in range(rect.x, rect.right + 1):
                 if not self.inside(x, y):
                     continue
-                self._force(x, y, horizontal if y in (rect.y, rect.bottom) else " ")
+                self._force(x, y, horizontal if y in (rect.y, rect.bottom) else " ", style)
         for offset in range(rect.height):
             self._force(rect.x, rect.y + offset, vertical, style)
             self._force(rect.right, rect.y + offset, vertical, style)
