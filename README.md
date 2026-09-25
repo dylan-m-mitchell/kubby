@@ -100,6 +100,56 @@ pip install pyinstaller   # one-time
 See `kubby.spec` for what gets bundled (the TUI stylesheet, Textual's data
 files, onefile mode).
 
+## Continuous integration
+
+Every PR runs lint, tests and a binary build (`.github/workflows/ci.yml`);
+tagging `vX.Y.Z` builds, smoke-tests and publishes a release
+(`.github/workflows/release.yml`).
+
+Opening a PR also starts the **agent review loop**
+(`.github/workflows/agent-review.yml`). The `ci-reviewer` OpenCode agent
+reviews the diff, posts a fix plan as a sticky PR comment, applies the fixes
+it considers safe, and the loop goes around again — up to 2 rounds of 3
+minutes each — until the agent reports `CLEAN`, or a finding needs a human.
+Nothing is pushed until the round passes the same `ruff` + `pytest` checks CI
+runs (the script runs them, not the agent), a failing round hands its error
+output straight back to the agent, and a round whose agent crashes is retried
+by the next round instead of aborting the run. A preflight probe runs the real
+agent on a throwaway `git status` first, so a dead model endpoint or a
+misconfigured permission file fails the job in about a minute instead of
+spending every round's budget discovering it. A round also *ends* as soon as
+its plan and verdict files exist, so a model that keeps summarising after
+finishing is not billed for it.
+
+- **Cost: nothing.** With no secret and no repository variable the loop reviews
+  on `opencode/muse-spark-1.3-contributor-free` — a free model, and the
+  supported configuration rather than a fallback. That default was chosen by
+  running all six free OpenCode models through this loop on the same review
+  task: two of them (`mimo-v2.6-flash-free`, the previous default, and
+  `nemotron-3.5-lightning-free`) drop the connection and return no verdict at
+  all, and a third (`ling-3.0-flash-fin-free`) edits files it was told to
+  leave alone. Set `REVIEW_MODEL` to pin a different free model, or add the
+  `OPENCODE_API_KEY` secret (an OpenCode Console service-account key) to use a
+  paid one. Fork PRs never see a secret either way.
+- **Free models drop connections.** That is routine, not a finding about your
+  PR, and the loop treats it that way: a round that lost its socket is retried
+  once, and if it happens again the round is reported as an infrastructure
+  failure — "nothing was reviewed, nothing was changed" — rather than as a
+  crashed agent. Only a verdict stops the round early; a transport blip never
+  turns into a finding.
+- **Opt out:** open the PR as a draft, add the `skip-agent-review` label,
+  then mark it ready for review. Labels are only read when the workflow
+  starts — on open/reopen/ready-for-review — so the label must already be
+  on the PR at that moment; adding it later never takes effect. The same
+  applies to the loop as a whole: it does not re-run on a plain push, so a
+  hand-pushed fix is not re-reviewed until the PR is closed and reopened.
+- **Guardrails:** the agent never commits or pushes — the script owns every
+  GitHub action — and it cannot write `.github/` or its own permission file,
+  cannot `curl`/`wget`/fetch/search, and stays inside the worktree. Denials
+  are final: the agent is told not to retry or route around them, because a
+  round spent investigating its own permissions is a round the PR waits for.
+  Fork PRs are reviewed but never edited (their token is read-only).
+
 ## Requirements
 
 - Any interactive terminal on Linux (X11/Wayland not required)
@@ -109,6 +159,11 @@ files, onefile mode).
 ## Layout
 
 ```
+.github/workflows/      ci.yml, release.yml, agent-review.yml
+.opencode/agents/
+  ci-reviewer.md        # the PR review agent (permissions + system prompt)
+scripts/
+  agent-review-loop.sh  # review → plan → fix → gate → push, ≤ 2 rounds
 kubby/
   __init__.py
   __main__.py             # python -m kubby

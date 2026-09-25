@@ -42,3 +42,7 @@ Thumbs.db
 # PyInstaller build artifacts (dist/ and build/ covered above)
 *.manifest
 warn-*.txt
+
+# CI review-loop scratch space (scripts/agent-review-loop.sh): plans, gate
+# logs and the PR diff live here so they never dirty the working tree
+.agent-review/

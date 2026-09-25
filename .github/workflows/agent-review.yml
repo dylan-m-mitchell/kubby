@@ -1,0 +1,169 @@
+name: Agent review loop
+
+# Opens the agentic loop when a PR is opened: the ci-reviewer agent reviews
+# the diff, writes a fix plan into a sticky PR comment, applies the fixes it
+# considers safe, and the loop repeats until the agent reports CLEAN, reports
+# something only a human can decide, or the 2-round cap is reached.
+#
+# Why the loop lives in one job rather than re-triggering itself:
+# a push to the PR branch *does* start new runs. GitHub's exemption for
+# GITHUB_TOKEN pushes does not cover this path — the loop's own commits have
+# each started a CI run, and they passed. Recursion is prevented by the
+# `github.actor != 'github-actions[bot]'` condition on the job below, not by
+# the token: without that condition this workflow re-enters itself on every
+# commit it makes. ci.yml has no such guard and should not have one — the
+# loop's commits are meant to get real CI verification.
+#
+# That is also why the script runs ruff + pytest itself before every push. It
+# cannot wait for CI to come back and only then decide whether the commit is
+# safe, so it enforces the same gates up front; CI then verifies the push
+# independently afterwards.
+#
+# Setup: none. With no secret and no variable the loop reviews on a free
+# OpenCode model, which is the supported configuration — it costs nothing and
+# needs no account. Set the REVIEW_MODEL repository variable to pin a
+# different free model, or add the OPENCODE_API_KEY repository secret (an
+# OpenCode Console service-account key) to use a paid one. Draft PRs and PRs
+# labelled skip-agent-review are not reviewed; fork PRs are reviewed but never
+# edited or pushed to (read-only token), and never see a secret.
+#
+# Free models drop connections as a matter of course, so a round that lost its
+# socket is retried once and, if it happens again, reported as an
+# infrastructure failure rather than a finding about the PR. Three details
+# worth knowing when reading the logs: the script re-executes a copy of itself
+# outside the worktree (bash parses a script as it runs, so an agent edit
+# landing mid-run would otherwise corrupt the parse), a round ends as soon as
+# its plan and verdict files exist rather than at the wall clock, and a round
+# that fails outright is retried by the next round rather than aborting the
+# job.
+#
+# Threat model, stated plainly: this runs on `pull_request`, so the workflow,
+# the loop script and the agent's permission file come from the branch under
+# review. That is inherent to running PR code, and it bounds what the guardrails
+# below can claim — they are what stops an *honest agent misled by the diff*
+# (prompt injection in added text) from touching `.github/`, exfiltrating a
+# credential or pushing half-tested changes. A *hostile branch owner* is
+# bounded by GitHub instead: fork PRs get no secrets and a read-only token,
+# and anyone who can push a branch to this repo already holds equivalent power.
+# Never change the event to `pull_request_target` — that would hand secrets to
+# untrusted code. When a PR edits the guardrail files themselves the loop says
+# so in its sticky comment rather than staying quiet about it.
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+
+concurrency:
+  group: agent-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  # The push does start a CI run, and that run may arrive parked in
+  # `action_required`; the loop approves the run it caused so its commits
+  # still get the real workflow's verification. Whether approval was actually
+  # needed has not been observed directly — every run this loop has caused has
+  # passed — so the approval stays best-effort and this permission is only
+  # load-bearing if GitHub does park the run.
+  actions: write
+
+jobs:
+  review:
+    name: review and fix
+    if: >-
+      !github.event.pull_request.draft &&
+      github.actor != 'github-actions[bot]' &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-agent-review')
+    runs-on: ubuntu-latest
+    # Generous headroom over the loop's own ceiling (preflight + 2 x 180s
+    # rounds + gates), but far below the old 60: a run that is going to
+    # overrun is a run burning minutes nobody reads.
+    timeout-minutes: 25
+    env:
+      REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      # Base branch name, used to fetch the base when a stale fork checkout
+      # is missing the base commit (the git diff fallback needs it).
+      PR_BASE_REF: ${{ github.base_ref }}
+      PR_HEAD_REF: ${{ github.head_ref }}
+      # Most PRs need 0-1 rounds; a third rarely produces anything a second
+      # one did not, and it is a third full agent budget plus a third gate run.
+      MAX_ITERATIONS: '2'
+      # Per-round wall-clock budget. A round is "review the diff, write the
+      # plan, apply fixes" — the script runs the gates afterwards, so a slow
+      # model gets cut off at the end of the round rather than eating the
+      # whole job, and a round that wrote its plan before the cut-off counts.
+      AGENT_ROUND_TIMEOUT: '180'
+      # Same-repo PRs can be pushed to; forks cannot (and must not be).
+      PUSH_FIXES: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+      REVIEW_MODEL: ${{ vars.REVIEW_MODEL }}
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      # GH_TOKEN is deliberately absent here: see the step that writes it to
+      # a file below.
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Review the head, not the temporary merge commit: what the agent
+          # fixes must be what lands on the branch.
+          ref: ${{ github.event.pull_request.head.sha }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          fetch-depth: 0
+          # No credential in git config: the agent has a shell in this repo
+          # and must not be able to read the token out of .git/config.
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+          # Shares nothing with the other jobs' caches on purpose: setup-uv
+          # cache keys collide across jobs otherwise.
+          cache-suffix: agent-review
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # The gates run inside the loop's per-round budget, so a cold uv cache
+      # is charged to the agent's wall clock: the first `uvx ruff@0.16.8`
+      # downloads and unpacks ruff, and the first `uv run pytest` builds the
+      # venv. Both are one-off costs that belong here, before the clock that
+      # matters starts, and both are then cached for every round. Collection
+      # only — this warms imports and the venv without running the suite.
+      - name: Warm the gates
+        run: |
+          time uvx ruff@0.16.8 --version
+          # A collection error is a real gate failure, not a warm-up problem:
+          # report it here but let the loop's own gates be the verdict.
+          time uv run pytest --collect-only -q ||
+            echo "collection failed; the loop's gates will report it"
+
+      # @opencode/cli is the V2 line (the older `opencode-ai` package is V1).
+      # Pinned exactly: a review bot must not silently change behaviour on
+      # someone else's release day.
+      - name: Install OpenCode
+        run: npm install --global @opencode/cli@2.0.16
+
+      - name: Sanity check
+        run: opencode --version
+
+      # The push token reaches the loop as file contents, never as an
+      # environment variable. /proc/<pid>/environ is the exec-time block — a
+      # later `unset` does not remove what exec captured — so a process that
+      # inherited GH_TOKEN can still be read back out of it, and out of
+      # `ps eww`, by anything with a shell in this job. The agent has one.
+      # This step runs where no agent exists yet, so the token never reaches
+      # a process the agent could inspect; from here it is passed to gh one
+      # invocation at a time.
+      - name: Hand the push token over as a file
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          umask 077
+          printf '%s' "$GH_TOKEN" > "$RUNNER_TEMP/gh-token"
+
+      - name: Run the review loop
+        env:
+          GH_TOKEN_FILE: ${{ runner.temp }}/gh-token
+        run: ./scripts/agent-review-loop.sh
