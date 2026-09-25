@@ -54,9 +54,9 @@ stays visible with diagnostics so you can read what went wrong.
 | `kubby --debug` | Enable Textual devtools: needs `textual-dev` installed *and* a running `textual dev` server to stream to |
 
 Inside the app: `1`–`4` jump straight to a panel, `?` opens the key
-reference, `q` quits. Each panel shows its number in its own title, so the
-key to press is visible where you press it. `tab` is deliberately unmapped
-and free for whatever needs it next. Each panel lists its own keys in the
+reference, `q` quits. Each panel shows its number in brackets in its own
+title — `(1) minikube` — so the key to press is visible where you press it.
+`tab` is deliberately unmapped and free for whatever needs it next. Each panel lists its own keys in the
 keybar at the bottom of the screen — greyed keys are unavailable in the
 current state.
 

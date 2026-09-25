@@ -4,8 +4,8 @@ The layout mirrors the plan's sketch: a left sidebar (minikube, tools,
 images) beside a right-hand namespaces tree, a streaming log strip, and a
 keybar.  Every panel is bordered, focusable and lazygit-style, and the
 focused one gets a brighter border/title.  Each panel carries its jump key
-in its own title ("1 minikube", "2 tools", …) so the number is visible
-where you press it.
+in its own title ("(1) minikube", "(2) tools", …), in brackets so the digit
+cannot be misread for part of the name.
 
 Panels are dumb about *doing*: a key press becomes a `PanelAction`
 message, `kubby.tui.app` performs it (in a worker, against the service)
@@ -69,7 +69,12 @@ class PanelBase:
         # literally, so "[bold]1[/]" would show up as those characters.
         title = Text()
         if self.JUMP_KEY:
-            title.append(f"{self.JUMP_KEY} ", style="bold cyan")
+            # Parentheses mark the digit as a key rather than part of the
+            # name — "1 minikube" alone reads like a version. The brackets
+            # are dim so the digit itself carries the emphasis.
+            title.append("(", style="dim")
+            title.append(self.JUMP_KEY, style="bold cyan")
+            title.append(") ", style="dim")
         title.append(self.BORDER_TITLE)
         self.border_title = title
 

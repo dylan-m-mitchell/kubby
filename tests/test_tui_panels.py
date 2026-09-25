@@ -471,10 +471,10 @@ class TestPanelTitles:
             await wait_until(lambda: app.system)
             bound = {b.key for b in app.BINDINGS}
             for panel_cls, expected in (
-                (MinikubePanel, "1 minikube"),
-                (ToolsPanel, "2 tools"),
-                (ImagesPanel, "3 images"),
-                (ClusterPanel, "4 namespaces"),
+                (MinikubePanel, "(1) minikube"),
+                (ToolsPanel, "(2) tools"),
+                (ImagesPanel, "(3) images"),
+                (ClusterPanel, "(4) namespaces"),
             ):
                 panel = app.query_one(panel_cls)
                 # Textual keeps a border title as a *string* carrying Rich
@@ -502,8 +502,8 @@ class TestPanelTitles:
                     str(app.query_one(panel_cls).border_title)
                 ).plain
 
-            assert title_of(ClusterPanel) == "4 namespaces"
-            assert title_of(MinikubePanel) == "1 minikube"
+            assert title_of(ClusterPanel) == "(4) namespaces"
+            assert title_of(MinikubePanel) == "(1) minikube"
 
     async def test_tab_is_not_bound(self, fake_service):
         app = KubbyApp(service=fake_service)
