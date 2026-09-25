@@ -11,7 +11,15 @@ from textual.widgets import Input, Static
 
 from helpers import wait_until
 from kubby.tui.app import KubbyApp
-from kubby.tui.panels import ClusterPanel, ImagesPanel, LogPanel, MinikubePanel, ToolsPanel
+from kubby.tui.panels import (
+    ClusterPanel,
+    ClusterTree,
+    GraphPanel,
+    ImagesPanel,
+    LogPanel,
+    MinikubePanel,
+    ToolsPanel,
+)
 from kubby.tui.popups import ConfirmModal, HelpScreen, PrereqModal
 
 
@@ -34,7 +42,7 @@ class TestClusterTree:
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)):
             await wait_until(lambda: app.images)
-            tree = app.query_one(ClusterPanel)
+            tree = app.query_one(ClusterTree)
             default, kube_system = tree.root.children
 
             assert [str(node.label) for node in tree.root.children] == [
@@ -53,7 +61,7 @@ class TestClusterTree:
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)):
             await wait_until(lambda: app.images)
-            _default, kube_system = app.query_one(ClusterPanel).root.children
+            _default, kube_system = app.query_one(ClusterTree).root.children
             healthy: Text = kube_system.children[0].label
             broken: Text = kube_system.children[1].label
 
@@ -65,7 +73,7 @@ class TestClusterTree:
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)) as pilot:
             await wait_until(lambda: app.images)
-            tree = app.query_one(ClusterPanel)
+            tree = app.query_one(ClusterTree)
             tree.focus()
             await pilot.pause()
             assert tree.cursor_line == 0
@@ -488,7 +496,7 @@ class TestVimNavigation:
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)) as pilot:
             await wait_until(lambda: app.images)
-            tree = app.query_one(ClusterPanel)
+            tree = app.query_one(ClusterTree)
             tree.focus()
             tree.cursor_line = 0
             await pilot.pause()
@@ -505,7 +513,7 @@ class TestVimNavigation:
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)) as pilot:
             await wait_until(lambda: app.images)
-            tree = app.query_one(ClusterPanel)
+            tree = app.query_one(ClusterTree)
             tree.focus()
             # A namespace's only parent is the hidden synthetic root.
             tree.cursor_line = 2  # kube-system
@@ -541,7 +549,7 @@ class TestVimNavigation:
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)) as pilot:
             await wait_until(lambda: app.images)
-            tree = app.query_one(ClusterPanel)
+            tree = app.query_one(ClusterTree)
             tree.focus()
             tree.cursor_line = 0
             await pilot.pause()
@@ -563,7 +571,7 @@ class TestVimNavigation:
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)) as pilot:
             await wait_until(lambda: app.images)
-            tree = app.query_one(ClusterPanel)
+            tree = app.query_one(ClusterTree)
             tree.focus()
             tree.cursor_line = 1  # a pod
             await pilot.pause()
@@ -695,6 +703,144 @@ class TestVimNavigation:
             assert tools.highlighted == len(tools.options) - 1
 
 
+class TestClusterGraphView:
+    """The cluster panel: a picture by default, the tree one keypress away."""
+
+    @staticmethod
+    def _picture(app):
+        return str(app.query_one(GraphPanel).query_one("#graph-picture").content)
+
+    async def test_the_graph_is_the_default_view(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)):
+            await wait_until(lambda: app.cluster)
+            panel = app.query_one(ClusterPanel)
+            assert panel.view == "graph"
+            assert app.query_one(GraphPanel).display is True
+            assert app.query_one(ClusterTree).display is False
+
+    async def test_t_switches_to_the_tree_and_g_back(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.cluster)
+            panel = app.query_one(ClusterPanel)
+            panel.focus()
+            await pilot.pause()
+
+            await pilot.press("t")
+            await pilot.pause()
+            assert panel.view == "tree"
+            assert app.query_one(ClusterTree).display is True
+            assert app.query_one(GraphPanel).display is False
+
+            await pilot.press("g")
+            await pilot.pause()
+            assert panel.view == "graph"
+            assert app.query_one(GraphPanel).display is True
+
+    async def test_focus_follows_the_visible_view(self, fake_service):
+        """Otherwise the keys go to a hidden widget and the panel reads as
+        unresponsive."""
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.cluster)
+            app.query_one(ClusterPanel).focus()
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            assert app.focused is app.query_one(ClusterTree)
+            await pilot.press("g")
+            await pilot.pause()
+            assert app.focused is app.query_one(GraphPanel)
+
+    async def test_the_picture_actually_draws_boxes(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)):
+            await wait_until(lambda: app.cluster)
+            picture = self._picture(app)
+            # Box-drawing characters mean the renderer ran, not just the
+            # placeholder text.
+            assert "┌" in picture or "╭" in picture
+
+    async def test_service_wiring_reaches_the_picture(self, fake_service):
+        fake_service.services = [
+            {
+                "name": "web-svc", "namespace": "default", "type": "ClusterIP",
+                "cluster_ip": "10.96.0.1", "has_selector": True,
+                "ports": [{"port": 80, "target": "80", "node_port": None}],
+                "backing_pods": [{"namespace": "default", "pod": "web-1"}],
+            }
+        ]
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)):
+            await wait_until(lambda: app.cluster)
+            await wait_until(lambda: "web-svc" in self._picture(app))
+
+    async def test_unavailable_cluster_says_why(self, fake_service):
+        fake_service.cluster["running"] = False
+        fake_service.cluster["error"] = "connection refused"
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)):
+            await wait_until(lambda: app.cluster)
+            picture = self._picture(app)
+            assert "cannot draw the cluster" in picture
+            assert "connection refused" in picture
+
+    async def test_jk_scroll_the_picture(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.cluster)
+            graph_panel = app.query_one(GraphPanel)
+            graph_panel.focus()
+            await pilot.pause()
+            before = graph_panel.scroll_offset.y
+            await pilot.press("j")
+            await pilot.pause()
+            assert graph_panel.scroll_offset.y >= before
+
+    async def test_a_refresh_redraws_without_losing_the_view(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.cluster)
+            app.query_one(ClusterPanel).focus()
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            await pilot.press("R")
+            await pilot.pause()
+            assert await wait_until(
+                lambda: "get_cluster_graph" in fake_service.calls
+            )
+            assert app.query_one(ClusterPanel).view == "tree"
+
+    async def test_the_picture_is_centred_not_left_aligned(self, fake_service):
+        """A tree is a list and reads fine flush left. A picture has a shape
+        and wants the space either side of it."""
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(120, 44)):
+            await wait_until(lambda: app.cluster)
+            picture = self._picture(app)
+            first = picture.splitlines()[0]
+            assert first.startswith(" "), "picture is flush left"
+            assert len(first) - len(first.lstrip()) > 0
+
+    async def test_jk_still_drive_the_tree_in_tree_view(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.cluster)
+            app.query_one(ClusterPanel).focus()
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            tree = app.query_one(ClusterTree)
+            tree.focus()
+            await pilot.pause()
+            before = tree.cursor_line
+            await pilot.press("j")
+            await pilot.pause()
+            assert tree.cursor_line == before + 1
+
+
 class TestPanelTitles:
     """Each panel shows its own jump key, and that key is the one bound."""
 
@@ -707,7 +853,7 @@ class TestPanelTitles:
                 (MinikubePanel, "(1) minikube"),
                 (ToolsPanel, "(2) tools"),
                 (ImagesPanel, "(3) images"),
-                (ClusterPanel, "(4) namespaces"),
+                (ClusterPanel, "(4) cluster"),
             ):
                 panel = app.query_one(panel_cls)
                 # Textual keeps a border title as a *string* carrying Rich
@@ -735,7 +881,7 @@ class TestPanelTitles:
                     str(app.query_one(panel_cls).border_title)
                 ).plain
 
-            assert title_of(ClusterPanel) == "(4) namespaces"
+            assert title_of(ClusterPanel) == "(4) cluster"
             assert title_of(MinikubePanel) == "(1) minikube"
 
     async def test_tab_is_not_bound(self, fake_service):

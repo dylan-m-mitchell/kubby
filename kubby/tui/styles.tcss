@@ -46,6 +46,13 @@ Screen {
     border-title-style: bold;
 }
 
+/* The two cluster views sit *inside* the cluster panel's own border, so they
+   must not draw a second one — a border inside a border reads as two panels
+   and makes the picture look boxed in twice. */
+.panel-inner {
+    background: $panel-bg;
+}
+
 #minikube {
     height: 6;
 }

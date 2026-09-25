@@ -60,6 +60,7 @@ import subprocess
 import threading
 from typing import Any, Callable
 
+from kubby import cluster as cluster_mod
 from kubby import images as images_mod
 from kubby import settings as settings_mod
 from kubby.installer import (
@@ -501,17 +502,30 @@ class KubbyService:
                 pass
 
         # --- pods ---
+        # `node` and `owner_*` are read here as well as name/status: the
+        # graph needs them, and re-fetching `get pods -A` to get them would
+        # double the most expensive call in a refresh. The tree ignores the
+        # extra keys.
         pods_by_ns: dict[str, list[dict[str, str]]] = {}
         pod_count = 0
         pods_resp = _run(["kubectl", "get", "pods", "-A", "-o", "json"])
         if pods_resp and pods_resp.returncode == 0:
             try:
-                for item in json.loads(pods_resp.stdout).get("items", []):
-                    ns = item["metadata"]["namespace"]
-                    pod_name = item["metadata"]["name"]
-                    phase = item.get("status", {}).get("phase", "Unknown")
+                for pod in cluster_mod.parse_pods(json.loads(pods_resp.stdout)):
+                    ns = pod["namespace"]
                     pods_by_ns.setdefault(ns, []).append(
-                        {"name": pod_name, "status": phase}
+                        {
+                            "name": pod["name"],
+                            "status": pod["phase"],
+                            # Carried for the graph, which judges readiness on
+                            # this rather than the phase: a crashlooping
+                            # container keeps its pod in phase `Running`.
+                            "ready": pod["ready"],
+                            "node": pod["node"],
+                            "ip": pod["ip"],
+                            "owner_kind": pod["owner_kind"],
+                            "owner_name": pod["owner_name"],
+                        }
                     )
                     pod_count += 1
             except (json.JSONDecodeError, KeyError):
@@ -534,6 +548,105 @@ class KubbyService:
             "nodes": nodes,
             "namespaces": namespaces,
             "pod_count": pod_count,
+        }
+
+    # ------------------------------------------------------------------
+    # cluster graph (the topology picture)
+    # ------------------------------------------------------------------
+
+    def get_cluster_graph(self, info: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Return the cluster's *wiring*, not just its inventory.
+
+        Deliberately separate from :meth:`get_cluster_info`: the tree needs
+        a third of this, and the extra calls should not be paid for by a
+        view that is not on screen. Every call here is independent and
+        degrades to empty on failure, exactly as the node/namespace/pod
+        calls do — one dead API must not blank the whole picture.
+
+        Pass *info* when the caller already has it. A refresh fetches the
+        inventory anyway, and re-running :meth:`get_cluster_info` here would
+        repeat three of the round-trips for nothing.
+
+        Costs four extra ``kubectl`` calls on top of the inventory. That is
+        only affordable because kubby has no auto-refresh; this runs when the
+        user presses ``R``.
+        """
+        def _json(args: list[str], timeout: int = 15) -> dict[str, Any]:
+            """Run kubectl and parse its JSON, or ``{}`` if anything fails."""
+            try:
+                proc = subprocess.run(
+                    args, capture_output=True, text=True, timeout=timeout,
+                    env=self._subprocess_env(),
+                )
+            except (subprocess.TimeoutExpired, OSError):
+                log.warning("kubectl failed: %s", " ".join(args))
+                return {}
+            if proc.returncode != 0 or not proc.stdout.strip():
+                return {}
+            try:
+                data = json.loads(proc.stdout)
+            except json.JSONDecodeError:
+                log.warning("kubectl returned unparsable JSON: %s", " ".join(args))
+                return {}
+            return data if isinstance(data, dict) else {}
+
+        if not shutil.which("kubectl"):
+            return {"available": False, "error": "kubectl not found on PATH"}
+
+        if info is None:
+            info = self.get_cluster_info()
+        if not info.get("running"):
+            return {"available": False, "error": info.get("error") or "cluster not running"}
+
+        # `get pods -A` already ran as part of the inventory and carries the
+        # node and owner fields, so the pods are reused rather than
+        # re-fetched. Two shapes have to be reconciled on the way: the
+        # inventory keys pods by namespace and calls the phase `status`,
+        # while the graph wants both on the pod itself.
+        pods = [
+            {"namespace": ns.get("name") or "default", **pod}
+            for ns in (info.get("namespaces") or [])
+            for pod in ns.get("pods") or []
+        ]
+
+        model = cluster_mod.build_model(
+            nodes=info.get("nodes") or [],
+            # The inventory's node list carries only name/status/roles. The
+            # architecture layer wants the rest of `nodeInfo` — the OS, the
+            # runtime, the CPU and memory a Pod can actually ask for — so the
+            # node object is asked for again rather than widened for the
+            # tree, which needs none of it.
+            node_facts=cluster_mod.parse_node_facts(
+                _json(["kubectl", "get", "nodes", "-o", "json"])
+            ),
+            # The driver the user configured, for the "how minikube runs"
+            # line. Empty means auto, which the picture says rather than
+            # guessing at.
+            driver=str(
+                (settings_mod.load()["minikube"].get("driver") or "").strip()
+            ),
+            namespaces=[str(n.get("name") or "") for n in (info.get("namespaces") or [])],
+            pods=pods,
+            workloads=cluster_mod.parse_workloads(
+                _json(["kubectl", "get", "deploy,statefulset,daemonset", "-A", "-o", "json"])
+            ),
+            replica_sets=cluster_mod.parse_replica_sets(
+                _json(["kubectl", "get", "replicasets", "-A", "-o", "json"])
+            ),
+            services=cluster_mod.parse_services(_json(["kubectl", "get", "svc", "-A", "-o", "json"])),
+            # EndpointSlice, not Endpoints: v1 Endpoints is deprecated as of
+            # Kubernetes 1.33 and a current cluster warns about it on stdout.
+            endpoint_slices=cluster_mod.parse_endpoint_slices(
+                _json(["kubectl", "get", "endpointslices", "-A", "-o", "json"])
+            ),
+            ingresses=cluster_mod.parse_ingress(_json(["kubectl", "get", "ingress", "-A", "-o", "json"])),
+        )
+        return {
+            "available": True,
+            "error": None,
+            "context": info.get("context"),
+            "version": info.get("version"),
+            **model,
         }
 
     # ------------------------------------------------------------------

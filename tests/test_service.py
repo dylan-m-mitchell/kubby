@@ -354,6 +354,186 @@ class TestClusterInfo:
 
 
 # ---------------------------------------------------------------------------
+# cluster graph
+# ---------------------------------------------------------------------------
+
+
+class TestClusterGraph:
+    """`get_cluster_graph()` — the wiring behind the picture.
+
+    Each fake answers one resource type, so a test can prove that any single
+    failing call degrades to empty instead of blanking the whole graph.
+    """
+
+    @staticmethod
+    def _cp(stdout="", stderr="", rc=0):
+        return subprocess.CompletedProcess(args=[], returncode=rc,
+                                           stdout=stdout, stderr=stderr)
+
+    @staticmethod
+    def _fake_kubectl(responses: dict[str, object], seen: list | None = None):
+        """Build a fake `subprocess.run` keyed by a substring of the argv.
+
+        Anything unrecognised fails, so a new call added to the service shows
+        up as a failing test rather than silently returning nothing.
+        """
+        def fake_run(args, **kwargs):
+            joined = " ".join(args)
+            if seen is not None:
+                seen.append(joined)
+            for needle, payload in responses.items():
+                if needle in joined:
+                    if isinstance(payload, str):
+                        return TestClusterGraph._cp(rc=1, stderr=payload)
+                    return TestClusterGraph._cp(stdout=json.dumps(payload))
+            if joined == "kubectl config current-context":
+                return TestClusterGraph._cp(stdout="minikube\n")
+            if joined.startswith("kubectl version"):
+                return TestClusterGraph._cp(
+                    stdout=json.dumps({"serverVersion": {"gitVersion": "v1.35.1"}}))
+            if "get nodes" in joined:
+                return TestClusterGraph._cp(stdout=json.dumps(
+                    {"items": [{"metadata": {"name": "minikube"},
+                                "status": {"conditions": [{"type": "Ready",
+                                                           "status": "True"}]}}]}))
+            if "get namespaces" in joined:
+                return TestClusterGraph._cp(stdout=json.dumps(
+                    {"items": [{"metadata": {"name": "default"}},
+                               {"metadata": {"name": "kube-system"}}]}))
+            return TestClusterGraph._cp(rc=1, stderr="unexpected")
+        return fake_run
+
+    @pytest.fixture
+    def wired(self, monkeypatch):
+        """A cluster with one service fronted by an ingress, one pod."""
+        monkeypatch.setattr(service_mod.shutil, "which",
+                            lambda name: "/usr/bin/kubectl" if name == "kubectl" else None)
+        responses = {
+            "get pods -A": {"items": [{
+                "metadata": {"name": "web-7d-abc", "namespace": "default",
+                             "ownerReferences": [{"kind": "ReplicaSet",
+                                                  "name": "web-7d"}]},
+                "spec": {"nodeName": "minikube", "podIP": "10.244.0.9"},
+                "status": {"phase": "Running"},
+            }]},
+            "get deploy,statefulset,daemonset": {"items": [
+                {"kind": "Deployment", "metadata": {"name": "web", "namespace": "default"},
+                 "status": {"readyReplicas": 1, "replicas": 1}}]},
+            "get replicasets": {"items": [
+                {"kind": "ReplicaSet",
+                 "metadata": {"name": "web-7d", "namespace": "default",
+                              "ownerReferences": [{"kind": "Deployment", "name": "web"}]}}]},
+            "get svc -A": {"items": [
+                {"metadata": {"name": "web-svc", "namespace": "default"},
+                 "spec": {"type": "ClusterIP", "clusterIP": "10.96.0.20",
+                          "selector": {"app": "web"},
+                          "ports": [{"port": 80, "targetPort": 8080}]}}]},
+            "get endpointslices": {"items": [
+                {"metadata": {"name": "web-svc-abc", "namespace": "default",
+                              "labels": {"kubernetes.io/service-name": "web-svc"}},
+                 "endpoints": [{"addresses": ["10.244.0.9"],
+                                "targetRef": {"kind": "Pod", "name": "web-7d-abc",
+                                              "namespace": "default"}}]}]},
+            "get ingress -A": {"items": [
+                {"metadata": {"name": "web", "namespace": "default"},
+                 "spec": {"ingressClassName": "nginx",
+                          "rules": [{"host": "shop.example",
+                                     "http": {"paths": [{"backend": {
+                                         "service": {"name": "web-svc",
+                                                     "namespace": "default"}}}]}}]}}]},
+        }
+        seen: list[str] = []
+        monkeypatch.setattr(service_mod.subprocess, "run",
+                            self._fake_kubectl(responses, seen))
+        return seen
+
+    def test_wires_service_to_pod_through_the_endpointslice(self, wired):
+        graph = KubbyService().get_cluster_graph()
+        assert graph["available"] is True
+        (svc,) = graph["services"]
+        assert svc["backing_pods"] == [{"namespace": "default", "pod": "web-7d-abc"}]
+        # and the pod is named by its Deployment, not its ReplicaSet hash
+        (pod,) = graph["namespaces"][0]["pods"]
+        assert pod["workload"]["name"] == "web"
+
+    def test_ingress_backend_service_is_recorded(self, wired):
+        graph = KubbyService().get_cluster_graph()
+        (ing,) = graph["ingresses"]
+        assert ing["rules"] == [
+            {"host": "shop.example", "service": "web-svc", "namespace": "default"}
+        ]
+
+    def test_uses_endpointslices_not_the_deprecated_endpoints_api(self, wired):
+        KubbyService().get_cluster_graph()
+        assert not any("get endpoints " in call or call.endswith("get endpoints")
+                       for call in wired)
+        assert any("get endpointslices" in call for call in wired)
+
+    def test_each_call_fails_independently(self, monkeypatch):
+        """One dead API must not blank the picture."""
+        monkeypatch.setattr(service_mod.shutil, "which",
+                            lambda name: "/usr/bin/kubectl" if name == "kubectl" else None)
+        responses = {
+            # ingress is the one that breaks
+            "get ingress -A": "error: the server is currently unable to serve the request",
+            "get svc -A": {"items": [
+                {"metadata": {"name": "db-svc", "namespace": "default"},
+                 "spec": {"type": "ClusterIP", "selector": {"app": "db"},
+                          "ports": [{"port": 5432}]}}]},
+        }
+        monkeypatch.setattr(service_mod.subprocess, "run",
+                            self._fake_kubectl(responses))
+        graph = KubbyService().get_cluster_graph()
+        assert graph["available"] is True
+        assert graph["ingresses"] == []
+        # the service with no endpoints is exactly the diagnostic we want
+        assert graph["services"][0]["backing_pods"] == []
+
+    def test_unparsable_json_degrades_to_empty(self, monkeypatch):
+        monkeypatch.setattr(service_mod.shutil, "which",
+                            lambda name: "/usr/bin/kubectl" if name == "kubectl" else None)
+
+        def fake_run(args, **kwargs):
+            joined = " ".join(args)
+            if joined == "kubectl config current-context":
+                return TestClusterGraph._cp(stdout="minikube\n")
+            if joined.startswith("kubectl version"):
+                return TestClusterGraph._cp(
+                    stdout=json.dumps({"serverVersion": {"gitVersion": "v1.35.1"}}))
+            if "get nodes" in joined or "get namespaces" in joined:
+                return TestClusterGraph._cp(stdout=json.dumps({"items": []}))
+            if "get svc" in joined:
+                return TestClusterGraph._cp(stdout="not json at all")
+            return TestClusterGraph._cp(rc=1, stderr="")
+
+        monkeypatch.setattr(service_mod.subprocess, "run", fake_run)
+        graph = KubbyService().get_cluster_graph()
+        assert graph["available"] is True
+        assert graph["services"] == []
+
+    def test_no_kubectl_is_unavailable_not_an_exception(self, monkeypatch):
+        monkeypatch.setattr(service_mod.shutil, "which", lambda name: None)
+        graph = KubbyService().get_cluster_graph()
+        assert graph["available"] is False
+        assert "kubectl" in graph["error"]
+
+    def test_cluster_down_is_unavailable(self, monkeypatch):
+        monkeypatch.setattr(service_mod.shutil, "which",
+                            lambda name: "/usr/bin/kubectl" if name == "kubectl" else None)
+
+        def fake_run(args, **kwargs):
+            joined = " ".join(args)
+            if joined == "kubectl config current-context":
+                return TestClusterGraph._cp(stdout="minikube\n")
+            return TestClusterGraph._cp(rc=1, stderr="connection refused")
+
+        monkeypatch.setattr(service_mod.subprocess, "run", fake_run)
+        graph = KubbyService().get_cluster_graph()
+        assert graph["available"] is False
+        assert graph["error"] == "connection refused"
+
+
+# ---------------------------------------------------------------------------
 # misc
 # ---------------------------------------------------------------------------
 

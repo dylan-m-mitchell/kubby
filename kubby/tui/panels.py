@@ -26,10 +26,12 @@ from typing import Any, ClassVar
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import OptionList, RichLog, Static, Tree
 from textual.widgets.option_list import Option
+
+from kubby.tui import graph as graph_mod
 
 
 class PanelFocused(Message):
@@ -339,7 +341,155 @@ class ImagesPanel(PanelBase, OptionList):
         return row
 
 
-class ClusterPanel(PanelBase, Tree):
+class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
+    """A drawn picture of the cluster's wiring, scrollable.
+
+    Read-only for now, which is a deliberate first step rather than a
+    limitation: the layout that positions the boxes already reports where
+    each one landed, so moving a cursor between them later is a search over
+    those rectangles and not a layout engine. See ``node_rects`` in
+    :mod:`kubby.tui.graph`.
+
+    It scrolls because a real cluster does not fit a terminal panel. A
+    13-workload cluster came out 72 columns by 63 lines against a panel of
+    roughly 62 by 24, and no amount of compaction fixes that — the overflow
+    is boxes side by side, not spacing. The renderer picks whichever
+    direction overflows less, so what does overflow is the axis that
+    scrolls the way a person expects.
+    """
+
+    BORDER_TITLE = "cluster graph"
+    JUMP_KEY = "4"
+    EMPTY_TEXT = "no cluster"
+
+    #: Sits inside the cluster panel's own border, so it must not draw a
+    #: second one — a border inside a border reads as two panels.
+    DEFAULT_CLASSES = "panel-inner"
+
+    #: Listed explicitly rather than mixed in, because Textual *replaces*
+    #: BINDINGS along the MRO instead of merging them, and ScrollableWidget
+    #: has its own. j/k are the movement keys of record everywhere in this
+    #: app; on a picture they scroll it — the same gesture as moving a
+    #: cursor, over a canvas instead of a list.
+    BINDINGS = [
+        Binding("j", "scroll_down", "scroll", show=False),
+        Binding("k", "scroll_up", "scroll", show=False),
+    ]
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._cluster: dict[str, Any] = {}
+        self._picture = Static("", id="graph-picture")
+
+    def compose(self) -> ComposeResult:
+        yield self._picture
+
+    def set_cluster(self, cluster: dict[str, Any]) -> None:
+        self._cluster = cluster or {}
+        self.render_picture()
+
+    def refresh_picture(self) -> None:
+        self.render_picture()
+
+    def render_picture(self) -> None:
+        """Draw the picture for the current cluster and panel size."""
+        cluster = self._cluster
+        if not cluster:
+            self._picture.update(Text(self.EMPTY_TEXT, style="dim"))
+            self.border_subtitle = None
+            return
+
+        if not cluster.get("available", True):
+            # Say *why* rather than showing an empty panel: a picture that
+            # silently fails to draw looks like a broken cluster.
+            body = Text("cannot draw the cluster", style="dim")
+            body.append(f"\n{cluster.get('error') or 'unavailable'}",
+                        style="yellow")
+            self._picture.update(body)
+            self.border_subtitle = None
+            return
+
+        self.border_subtitle = f"{cluster.get('pod_count') or 0} pods"
+        source = graph_mod.build_mermaid(cluster)
+        width = max(20, self.size.width)
+        picture, _direction = graph_mod.render_best(
+            source, width, max(5, self.size.height)
+        )
+        # Centred rather than left-aligned, which is what the tree looks like
+        # because a tree is a list. A picture with a shape wants the space
+        # either side of it. Only applied when it fits — see `center`.
+        self._picture.update(graph_mod.center(picture, width))
+
+
+class ClusterPanel(PanelBase, Vertical, can_focus=True):
+    """The cluster, in two views: a picture, or the namespace tree.
+
+    The graph is the default. Someone who does not yet know what the pieces
+    are gets a picture of how they connect, which is the question the tree
+    cannot answer; the tree stays one keypress away for the times you want
+    to walk namespaces and pods row by row.
+
+    Both views are always mounted and only one is displayed, so switching is
+    instant and neither view loses its scroll position or cursor.
+    """
+
+    BORDER_TITLE = "cluster"
+    JUMP_KEY = "4"
+    EMPTY_TEXT = "no cluster"
+
+    BINDINGS = [
+        Binding("g", "show_graph", "graph"),
+        Binding("t", "show_tree", "tree"),
+    ]
+
+    #: Which view is showing. `graph` is the default: it is the reason this
+    #: panel exists now, and the tree is a keypress away.
+    DEFAULT_VIEW = "graph"
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.view = self.DEFAULT_VIEW
+
+    def compose(self) -> ComposeResult:
+        yield GraphPanel()
+        yield ClusterTree()
+
+    # ----- switching views ---------------------------------------------
+
+    def _show(self, view: str) -> None:
+        self.view = view
+        self.query_one(GraphPanel).display = view == "graph"
+        self.query_one(ClusterTree).display = view == "tree"
+        # Focus has to follow the visible view or the keys go to a hidden
+        # widget and the panel reads as unresponsive.
+        target = (
+            self.query_one(GraphPanel) if view == "graph" else self.query_one(ClusterTree)
+        )
+        target.focus()
+        self.post_message(PanelFocused(self))
+
+    def action_show_graph(self) -> None:
+        self._show("graph")
+
+    def action_show_tree(self) -> None:
+        self._show("tree")
+
+    def on_mount(self) -> None:
+        self.query_one(GraphPanel).display = self.view == "graph"
+        self.query_one(ClusterTree).display = self.view == "tree"
+
+    def set_cluster(self, info: dict[str, Any]) -> None:
+        """Hand the cluster to both views; each picks the part it needs."""
+        self.query_one(ClusterTree).set_cluster(info)
+        self.query_one(GraphPanel).set_cluster(info.get("graph") or {})
+
+    def refresh_picture(self) -> None:
+        """Redraw the graph after a resize, when the new width is known."""
+        if self.view == "graph":
+            self.query_one(GraphPanel).refresh_picture()
+
+
+class ClusterTree(PanelBase, Tree):
     """Namespaces with their pods.
 
     Navigable with ``j``/``k`` and collapsible with ``h``/``l``, vim-style;
@@ -349,6 +499,9 @@ class ClusterPanel(PanelBase, Tree):
     BORDER_TITLE = "namespaces"
     JUMP_KEY = "4"
     EMPTY_TEXT = "no cluster"
+
+    #: Sits inside the cluster panel's border, so it must not draw one.
+    DEFAULT_CLASSES = "panel-inner"
 
     BINDINGS = LIST_NAV_BINDINGS + [
         Binding("h", "vim_collapse", "collapse", show=False),
