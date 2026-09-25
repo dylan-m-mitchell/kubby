@@ -304,6 +304,40 @@ class TestStructure:
         assert graph.build_mermaid(realistic(), direction="LR").startswith("graph LR")
         assert graph.build_mermaid(realistic(), direction="TB").startswith("graph TB")
 
+    def test_same_workload_name_in_two_namespaces_stays_two_boxes(self):
+        """Regression, caught in review: `Deployment/web` in `shop` and
+        `Deployment/web` in `admin` produced the same Mermaid id, so the
+        picture merged them into a single box and one namespace's workload
+        silently vanished. An entirely ordinary cluster shape."""
+        model = _model(
+            namespaces=[
+                {"name": "shop", "pods": [_pod("web-1", "shop")],
+                 "workload_count": 1, "collapsed": False},
+                {"name": "admin", "pods": [_pod("web-1", "admin")],
+                 "workload_count": 1, "collapsed": False},
+            ]
+        )
+        for ns in model["namespaces"]:
+            ns["pods"][0]["workload"] = {
+                "name": "web", "kind": "Deployment", "inferred": False
+            }
+        src = graph.build_mermaid(model)
+        boxes = [
+            line.strip().split("[")[0]
+            for line in src.splitlines()
+            if line.strip().startswith("w_") or " w_" in line
+        ]
+        boxes = [b for b in boxes if b.startswith("w_")]
+        assert len(boxes) == 2
+        assert len(set(boxes)) == 2
+
+    def test_unambiguous_workload_ids_stay_short(self):
+        """Only a real collision should pay for a namespaced id; otherwise
+        the source (and every golden string) churns for nothing."""
+        src = graph.build_mermaid(realistic())
+        assert "w_Deployment_web[" in src
+        assert "w_default_Deployment_web[" not in src
+
     def test_source_is_deterministic(self):
         """A stable diagram matters: the cursor maps rectangles to objects by
         id, and a picture that reshuffles on every refresh loses the
