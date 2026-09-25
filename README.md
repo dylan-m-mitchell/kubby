@@ -53,8 +53,10 @@ stays visible with diagnostics so you can read what went wrong.
 | `kubby --check` | Print install status for all managed tools, then exit              |
 | `kubby --debug` | Enable Textual devtools: needs `textual-dev` installed *and* a running `textual dev` server to stream to |
 
-Inside the app: `1`–`4` jump straight to a panel, `tab` cycles them, `?`
-opens the key reference, `q` quits. Each panel lists its own keys in the
+Inside the app: `1`–`4` jump straight to a panel, `?` opens the key
+reference, `q` quits. Each panel shows its number in its own title, so the
+key to press is visible where you press it. `tab` is deliberately unmapped
+and free for whatever needs it next. Each panel lists its own keys in the
 keybar at the bottom of the screen — greyed keys are unavailable in the
 current state.
 

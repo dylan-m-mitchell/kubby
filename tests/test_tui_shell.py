@@ -1,4 +1,4 @@
-"""Phase 2 gate: the TUI shell launches, renders, cycles focus, helps, quits.
+"""Phase 2 gate: the TUI shell launches, renders, moves focus, helps, quits.
 
 Every test drives a real `KubbyApp` through Textual's pilot, with a
 `FakeService` so nothing touches the host.
@@ -48,24 +48,32 @@ class TestShell:
             assert "1/1 nodes" in str(status.content)
             assert "APT" in str(status.content)
 
-    async def test_focus_cycles_through_panels(self, fake_service):
+    async def test_tab_is_inert_and_numbers_move_focus(self, fake_service):
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)) as pilot:
             await wait_until(lambda: app.system)
 
+            # Focus starts on the first panel.
+            assert app.screen.focused.id == PANEL_IDS[0]
+
+            # tab is unmapped: it must not cycle, or fall through to anything
+            # else. It is held for a future feature.
+            for key in ("tab", "shift+tab"):
+                await pilot.press(key)
+                await pilot.pause()
+                assert app.screen.focused.id == PANEL_IDS[0], key
+
+            # Numbers walk the panels in layout order instead.
             visited = [app.screen.focused.id]
-            for _ in range(len(PANEL_IDS)):
-                await pilot.press("tab")
+            for number in ("2", "3", "4", "1"):
+                await pilot.press(number)
                 await pilot.pause()
                 visited.append(app.screen.focused.id)
             assert visited == list(PANEL_IDS) + [PANEL_IDS[0]]
 
-            # shift+tab walks backwards.
-            await pilot.press("shift+tab")
-            await pilot.pause()
-            assert app.screen.focused.id == PANEL_IDS[-1]
-
             # The focused panel is visually distinguished (lazygit style).
+            app.query_one(ClusterPanel).focus()
+            await pilot.pause()
             focused = app.screen.focused
             blurred = app.query_one(MinikubePanel)
             assert blurred is not focused

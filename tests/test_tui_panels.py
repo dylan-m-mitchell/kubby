@@ -410,8 +410,9 @@ class TestNumberKeyTabs:
             for key, panel_cls in panels.items():
                 await pilot.press(key)
                 assert await wait_until(lambda c=panel_cls: app.screen.focused is app.query_one(c))
-                # Focus is synchronous, so the keybar is never a step behind.
-                assert '"tab"' not in keybar(app)  # hidden by design
+                # The number keys stay out of the keybar: four entries would
+                # push the focused panel's own keys off a 100-column line.
+                assert "minikube panel" not in keybar(app)
 
     async def test_number_keys_are_ordinary_text_while_filtering(self, fake_service):
         app = KubbyApp(service=fake_service)
@@ -461,6 +462,65 @@ class TestNumberKeyTabs:
                 assert label in text, label
 
 
+class TestPanelTitles:
+    """Each panel shows its own jump key, and that key is the one bound."""
+
+    async def test_panel_titles_match_their_jump_keys(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)):
+            await wait_until(lambda: app.system)
+            bound = {b.key for b in app.BINDINGS}
+            for panel_cls, expected in (
+                (MinikubePanel, "1 minikube"),
+                (ToolsPanel, "2 tools"),
+                (ImagesPanel, "3 images"),
+                (ClusterPanel, "4 namespaces"),
+            ):
+                panel = app.query_one(panel_cls)
+                # Textual keeps a border title as a *string* carrying Rich
+                # markup, so the styled number arrives as something like
+                # "[bold cyan]1 [/bold cyan]minikube". Parse it back to the
+                # words the user actually reads.
+                title = Text.from_markup(str(panel.border_title)).plain
+                assert title == expected, f"{panel_cls.__name__}: {title!r}"
+                # The digit in the title is the digit that jumps there —
+                # the whole point of showing it.
+                assert panel.JUMP_KEY in bound, panel_cls.__name__
+
+    async def test_titles_survive_a_data_refresh(self, fake_service):
+        # set_cluster/set_tools rebuild panel content; a title clobbered by a
+        # refresh is how the number silently disappears.
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.system)
+            await pilot.press("R")
+            assert await wait_until(
+                lambda: fake_service.calls.count("get_status") >= 2
+            )
+            def title_of(panel_cls: type) -> str:
+                return Text.from_markup(
+                    str(app.query_one(panel_cls).border_title)
+                ).plain
+
+            assert title_of(ClusterPanel) == "4 namespaces"
+            assert title_of(MinikubePanel) == "1 minikube"
+
+    async def test_tab_is_not_bound(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.system)
+            assert "tab" not in {b.key for b in app.BINDINGS}
+            assert "shift+tab" not in {b.key for b in app.BINDINGS}
+
+            # Pressing it moves focus nowhere, which is what "unmapped" has
+            # to mean in practice — not "cycles as before".
+            app.query_one(MinikubePanel).focus()
+            await pilot.pause()
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.screen.focused is app.query_one(MinikubePanel)
+
+
 class TestKeybarAndHelp:
     async def test_keybar_follows_the_focused_panel(self, fake_service):
         fake_service.cluster["running"] = False
@@ -507,11 +567,16 @@ class TestKeybarAndHelp:
                 ('"/"', "filter"),                                      # images
                 ('"enter/space"', "expand / collapse"),                 # namespaces
                 ('"q"', "quit"), ('"?"', "help"), ('"R"', "re-check"),
-                ('"x"', "hide log"), ('"tab"', "next panel"),
-                ('"esc"', "close filter"), ('"shift+tab"', "previous panel"),
+                ('"x"', "hide log"),
+                ('"esc"', "close filter"),
+                # Numbers jump between panels; tab is deliberately unmapped.
+                ('"1"', "minikube panel"), ('"2"', "tools panel"),
+                ('"3"', "images panel"), ('"4"', "namespaces panel"),
             ):
                 assert key in text, key
                 assert label in text, label
+            # An unmapped tab leaves nothing behind in the reference.
+            assert "tab" not in text
             await pilot.press("escape")
             await pilot.pause()
             assert not isinstance(app.screen, HelpScreen)

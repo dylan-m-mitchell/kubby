@@ -2,8 +2,10 @@
 
 The layout mirrors the plan's sketch: a left sidebar (minikube, tools,
 images) beside a right-hand namespaces tree, a streaming log strip, and a
-keybar.  Every panel is bordered, focusable and lazygit-style — Tab
-cycles between them and the focused one gets a brighter border/title.
+keybar.  Every panel is bordered, focusable and lazygit-style, and the
+focused one gets a brighter border/title.  Each panel carries its jump key
+in its own title ("1 minikube", "2 tools", …) so the number is visible
+where you press it.
 
 Panels are dumb about *doing*: a key press becomes a `PanelAction`
 message, `kubby.tui.app` performs it (in a worker, against the service)
@@ -49,11 +51,27 @@ class PanelBase:
     """
 
     BORDER_TITLE: ClassVar[str] = ""
+    #: The number that jumps straight to this panel. It is rendered into the
+    #: panel's own title so the key you press is visible where you press it,
+    #: instead of only in the help overlay. The app builds its binding from
+    #: the same digit; `test_panel_titles_match_their_jump_keys` is what
+    #: keeps the two from drifting apart.
+    JUMP_KEY: ClassVar[str] = ""
     #: Shown when a panel has nothing to display.
     EMPTY_TEXT: ClassVar[str] = ""
     #: Every concrete panel picks up the `.panel` stylesheet rules
     #: (border, background, focus highlight) automatically.
     DEFAULT_CLASSES = "panel"
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # A Text, not a markup string: Textual renders a border title
+        # literally, so "[bold]1[/]" would show up as those characters.
+        title = Text()
+        if self.JUMP_KEY:
+            title.append(f"{self.JUMP_KEY} ", style="bold cyan")
+        title.append(self.BORDER_TITLE)
+        self.border_title = title
 
     def on_focus(self) -> None:
         self.post_message(PanelFocused(self))
@@ -86,6 +104,7 @@ class MinikubePanel(PanelBase, Vertical, can_focus=True):
     start/stop/delete keys."""
 
     BORDER_TITLE = "minikube"
+    JUMP_KEY = "1"
     EMPTY_TEXT = "no cluster"
 
     BINDINGS = [
@@ -158,6 +177,7 @@ class ToolsPanel(PanelBase, OptionList):
     """Managed tools and their install state."""
 
     BORDER_TITLE = "tools"
+    JUMP_KEY = "2"
     EMPTY_TEXT = "no tools"
 
     BINDINGS = [
@@ -224,6 +244,7 @@ class ImagesPanel(PanelBase, OptionList):
     """Local podman images (no network), filterable with ``/``."""
 
     BORDER_TITLE = "images"
+    JUMP_KEY = "3"
     EMPTY_TEXT = "no local images"
 
     BINDINGS = [
@@ -282,6 +303,7 @@ class ClusterPanel(PanelBase, Tree):
     """Namespaces with their pods, expandable (arrows / enter / left-right)."""
 
     BORDER_TITLE = "namespaces"
+    JUMP_KEY = "4"
     EMPTY_TEXT = "no cluster"
 
     def __init__(self, **kwargs: Any) -> None:

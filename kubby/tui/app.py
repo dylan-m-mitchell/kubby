@@ -34,6 +34,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
+from textual.screen import Screen
 from textual.widgets import Input, Static
 
 from kubby import settings as settings_mod
@@ -50,26 +51,23 @@ from kubby.tui.panels import (
 from kubby.tui.popups import ConfirmModal, HelpScreen, PrereqModal, SettingsScreen
 
 log = logging.getLogger("kubby")
-
 #: (key, action, description, show) — the single source of truth for
 #: app-wide bindings: it builds ``BINDINGS``, the keybar (``show``) and the
-#: help overlay. tab/shift+tab are real bindings but stay out of the
-#: keybar: panel cycling is implied, and the bar already lists every
-#: panel's own keys.
+#: help overlay.
+#:
+#: The number keys go straight to a panel. They are hidden from the keybar on
+#: purpose: four more entries would push the focused panel's own keys off a
+#: 100-column line, and each panel already shows its number in its own title.
+#: They stay in the help overlay, which is the documented place to look up
+#: keys.
+#:
+#: Tab is deliberately unmapped. Cycling is a poor way to cross the layout,
+#: and an unmapped tab is available to whatever wants it next.
 APP_KEYS: tuple[tuple[str, str, str, bool], ...] = (
-    ("tab", "focus_next", "next panel", False),
-    ("shift+tab", "focus_previous", "previous panel", False),
-    # Direct jumps. The point is reaching any panel in one keypress instead
-    # of tabbing there, so the number *is* the tab selector.
-    #
-    # Hidden from the keybar on purpose: four more entries would crowd out
-    # the focused panel's own keys on a single line at 100 columns. They are
-    # in the help overlay instead, which is the documented place to look up
-    # keys (`?`), and the numbering follows the visual order of the layout.
-    ("1", "focus_minikube", "minikube panel", False),
-    ("2", "focus_tools", "tools panel", False),
-    ("3", "focus_images", "images panel", False),
-    ("4", "focus_cluster", "namespaces panel", False),
+    ("1", "focus_panel('#minikube')", "minikube panel", False),
+    ("2", "focus_panel('#tools')", "tools panel", False),
+    ("3", "focus_panel('#images')", "images panel", False),
+    ("4", "focus_panel('#cluster')", "namespaces panel", False),
     ("R", "recheck", "re-check", True),
     ("x", "dismiss_log", "hide log", True),
     ("question_mark", "show_help", "help", True),
@@ -77,6 +75,32 @@ APP_KEYS: tuple[tuple[str, str, str, bool], ...] = (
     # Listed only while the filter bar is open (see `check_action`).
     ("escape", "close_filter", "close filter", True),
 )
+
+
+#: Textual's Screen ships `tab`/`shift+tab` for focus cycling, which is why
+#: unbinding them on the App is not enough on its own. Everything else Screen
+#: binds is kept — in particular `ctrl+c` → `copy_text`, which shadows the
+#: App's own `ctrl+c` → `help_quit` and silently does nothing in kubby (no
+#: text is ever selected, so `copy_text` always raises `SkipAction`).
+#:
+#: The kept bindings are copied from `Screen.BINDINGS` rather than written
+#: out here, so an upstream change to those defaults is inherited instead of
+#: silently diverging from the version of Textual we happen to pin.
+_SCREEN_BINDINGS_WITHOUT_TAB = [
+    binding for binding in Screen.BINDINGS if binding.key not in ("tab", "shift+tab")
+]
+
+
+class PanelScreen(Screen[None], inherit_bindings=False):
+    """The main screen, with focus cycling unbound.
+
+    Panel focus moves by number, so the cycling bindings are removed rather
+    than left to compete with whatever wants `tab` next. `inherit_bindings
+    =False` is what actually drops them: a subclass's BINDINGS otherwise
+    *merge* with the base class's, so listing nothing would keep Screen's.
+    """
+
+    BINDINGS = _SCREEN_BINDINGS_WITHOUT_TAB
 
 
 class LogLine(Message):
@@ -198,6 +222,9 @@ class KubbyApp(App[None]):
         self.filter_open = False
 
     # ----- compose / lifecycle -----------------------------------------
+
+    def get_default_screen(self) -> PanelScreen:
+        return PanelScreen(id="_default")
 
     @property
     def is_busy(self) -> bool:
@@ -514,17 +541,9 @@ class KubbyApp(App[None]):
         """
         self.screen.set_focus(self.query_one(selector))
 
-    def action_focus_minikube(self) -> None:
-        self._focus_panel("#minikube")
-
-    def action_focus_tools(self) -> None:
-        self._focus_panel("#tools")
-
-    def action_focus_images(self) -> None:
-        self._focus_panel("#images")
-
-    def action_focus_cluster(self) -> None:
-        self._focus_panel("#cluster")
+    def action_focus_panel(self, selector: str) -> None:
+        """Bound from ``APP_KEYS`` as ``focus_panel('#id')``."""
+        self._focus_panel(selector)
 
     def action_recheck(self) -> None:
         self.refresh_data()
