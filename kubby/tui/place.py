@@ -24,6 +24,7 @@ insisting on a certain size.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from kubby.tui.diagram import Diagram, Node
 
@@ -73,11 +74,20 @@ class PlacedContainer:
 
     id: str
     label: str
+    detail: str = ""
     x: int = 0
     y: int = 0
     width: int = 0
     height: int = 0
     band: int = 0
+    #: A free column inside the frame, to the right of its contents, for edges
+    #: between boxes stacked in one column to run down. -1 when the frame has
+    #: no such column. Reserving it here rather than borrowing one at draw
+    #: time is the point: the only column guaranteed to be free is one the
+    #: layout put there on purpose, because a borrowed one is the frame's own
+    #: border, and an edge drawn across that is the inconsistent-arrow
+    #: problem all over again.
+    lane: int = -1
 
 
 @dataclass
@@ -106,74 +116,44 @@ class Placement:
 
 
 def place(diagram: Diagram, width: int) -> Placement:
-    """Lay *diagram* out to fit *width* columns, wrapping where it must."""
+    """Lay *diagram* out to fit *width* columns, wrapping where it must.
+
+    Containers nest, and the nesting is the shape of the thing being drawn:
+    your computer contains minikube, minikube contains the control plane and
+    the namespaces, a namespace contains its Services and workloads. A
+    container is placed whole, so wrapping can never split one across two
+    bands and a frame is always exactly as big as what is inside it.
+    """
     placement = Placement()
-    if not diagram.nodes:
+    if not diagram.nodes and not diagram.containers:
         return placement
 
-    # Containers are the unit of placement, not loose boxes. A namespace is
-    # placed whole — its objects inside a frame around them — so wrapping
-    # can never split one across two bands, and so the frame is always
-    # exactly as big as its contents.
     band_top = 0
     band_bottom = 0
     band = 0
     x = 0
 
-    for container in diagram.ordered_containers():
-        members = [m for m in container.members if m in diagram.nodes]
-        if not members:
-            continue
-        columns = _columns(
-            members, _layer(members, diagram), _order(members, diagram), diagram.nodes
-        )
-        widest = max((b.width for column in columns for b in column), default=0)
-        # A container wider than the panel cannot be wrapped — it is the
-        # smallest unit placed — so it overflows and the panel scrolls.
-        outer_width = _span(columns, widest)
-        inner = CONTAINER_PAD * 2 + 1  # left, right, and the title row
-        total_width = outer_width + inner
+    for top in diagram.ordered_containers():
+        frame_width, _ = _measure(top, diagram, width)
 
-        needed = x + (GUTTER if x else 0) + total_width
-        if x and needed > width:
+        if x and x + GUTTER + frame_width > width:
+            # This container cannot start on the current band. Wrap, leaving
+            # a clear row between the two so a cross-band edge has somewhere
+            # to run.
             placement.gaps[band] = band_bottom + 1
             band += 1
             band_top = band_bottom + COMPONENT_GAP
             x = 0
 
         offset = x + (GUTTER if x else 0)
-        top = band_top
-        content_bottom = top
-        for index, column in enumerate(columns):
-            column_x = offset + CONTAINER_PAD + index * (widest + GUTTER)
-            y = top + CONTAINER_PAD + 1
-            for box in column:
-                box.x = column_x
-                box.y = y
-                box.band = band
-                y += box.height + NODE_GAP
-                content_bottom = max(content_bottom, y - NODE_GAP)
-                placement.boxes[box.id] = box
-
-        frame = PlacedContainer(
-            id=container.id,
-            label=container.label,
-            x=offset,
-            y=top,
-            width=total_width,
-            # +1 for the bottom border below the last box. Sized to *its own*
-            # contents: sizing to the band left every container padded out to
-            # the height of the tallest one beside it.
-            height=(content_bottom - top) + CONTAINER_PAD + 1,
-            band=band,
-        )
-        placement.containers[container.id] = frame
-        placement.headings.append((offset, top, container.label))
+        frame = _emit(top, diagram, placement, offset, band_top, band, width)
+        if frame is None:
+            continue
         placement.heading_right[band] = max(
-            placement.heading_right.get(band, 0), offset + len(container.label)
+            placement.heading_right.get(band, 0), offset + len(top.label)
         )
         band_bottom = max(band_bottom, frame.y + frame.height - 1)
-        x = offset + total_width
+        x = offset + frame.width
 
     placement.width = max(
         max((b.x + b.width for b in placement.boxes.values()), default=1),
@@ -190,18 +170,268 @@ def place(diagram: Diagram, width: int) -> Placement:
     return placement
 
 
+@dataclass
+class _Item:
+    """One thing inside a container: a nested container, or a box."""
+
+    kind: str  # "container" or "box"
+    id: str
+    width: int
+    height: int
+
+
+def _inner_width(container_id: str, diagram: Diagram, available: int) -> int:
+    """How much room a container's contents have, once its borders take
+    their share."""
+    depth = 0
+    current = container_id
+    while current is not None:
+        found = next(
+            (c for c in diagram.containers if c.id == current), None
+        )
+        if found is None:
+            break
+        depth += 1
+        current = found.parent
+    return max(12, available - depth * (CONTAINER_PAD * 2 + 1))
+
+
+def _items(container: Any, diagram: Diagram, available: int) -> list[_Item]:
+    """A container's contents: nested containers, and boxes of its own.
+
+    A box that already belongs to a child container is not an item here —
+    it is placed with its container, so a frame is never drawn around one
+    while the other sits outside it.
+    """
+    out: list[_Item] = []
+    for child in diagram.children_of(container.id):
+        child_width, child_height = _measure(child, diagram, available)
+        out.append(_Item("container", child.id, child_width, child_height))
+    for node_id in container.members:
+        if node_id not in diagram.nodes:
+            continue
+        owner = diagram.container_of(node_id)
+        # A box that belongs to a *child* container is placed with that
+        # child, not here — but a box that belongs to this one is a loose
+        # item of this one. Skipping both emptied every frame.
+        if owner is not None and owner.id != container.id:
+            continue
+        node = diagram.nodes[node_id]
+        out.append(
+            _Item(
+                "box",
+                node_id,
+                max((len(line) for line in node.lines), default=0) + 2 + 2 * BOX_PAD,
+                len(node.lines) + 2,
+            )
+        )
+    return out
+
+
+def _box_columns(container: Any, diagram: Diagram) -> list[tuple[int, int, list]]:
+    """A container's own boxes, grouped into columns by layer.
+
+    Returns ``[(width, height, boxes), ...]``, one entry per column.
+    """
+    loose = [
+        node_id
+        for node_id in container.members
+        if node_id in diagram.nodes
+        and (
+            (owner := diagram.container_of(node_id)) is None
+            or owner.id == container.id
+        )
+    ]
+    if not loose:
+        return []
+    stacks = _columns(
+        loose, _layer(loose, diagram), _order(loose, diagram), diagram.nodes
+    )
+    out: list[tuple[int, int, list]] = []
+    for stack in stacks:
+        width = max((b.width for b in stack), default=0)
+        height = sum(b.height + NODE_GAP for b in stack) - NODE_GAP
+        out.append((width, height, stack))
+    return out
+
+
+def _flow(items: list[tuple[int, int, Any]], available: int) -> list[list[tuple[int, int, Any]]]:
+    """Pack items into rows no wider than *available*.
+
+    Without this a container lays all of its children out in one row, so four
+    namespaces inside minikube came out 254 columns wide — the nesting
+    compounded the width instead of containing it.
+    """
+    rows: list[list[tuple[int, int, Any]]] = []
+    row: list[tuple[int, int, Any]] = []
+    used = 0
+    for item in items:
+        width = item[0]
+        if row and used + width > available:
+            rows.append(row)
+            row, used = [], 0
+        row.append(item)
+        used += width + GUTTER
+    if row:
+        rows.append(row)
+    return rows or [[]]
+
+
+#: A free column kept inside a frame for edges to run down. See
+#: ``PlacedContainer.lane``.
+CONTAINER_LANE = 1
+
+
+def _content_size(
+    container: Any, diagram: Diagram, available: int
+) -> tuple[int, int, int, list]:
+    """The contents' size, the lane they need, and the flow they packed into.
+
+    Returns ``(width, height, lane_offset, rows)``. *lane_offset* is where
+    inside the frame the spare routing column goes, or -1 when none is
+    needed. It is measured against the frame's content origin, so the caller
+    adds its own ``inner_x``.
+    """
+    columns = _box_columns(container, diagram)
+    items: list[tuple[int, int, Any]] = [
+        (w, h, ("boxes", boxes)) for w, h, boxes in columns
+    ]
+    for child in diagram.children_of(container.id):
+        child_width, child_height = _measure(child, diagram, available)
+        items.append((child_width, child_height, ("container", child)))
+
+    rows = _flow(items, max(12, available - CONTAINER_PAD * 2 - 1))
+    content_width = 0
+    content_height = 0
+    for row in rows:
+        row_width = sum(i[0] for i in row) + GUTTER * max(0, len(row) - 1)
+        row_height = max((i[1] for i in row), default=0)
+        content_width = max(content_width, row_width)
+        content_height += row_height
+    if len(rows) > 1:
+        content_height += COMPONENT_GAP * (len(rows) - 1)
+
+    lane = -1
+    if _needs_lane(diagram, rows):
+        lane = content_width
+        content_width += CONTAINER_LANE
+    return content_width, content_height, lane, rows
+
+
+def _needs_lane(diagram: Diagram, rows: list) -> bool:
+    """Whether any two of a container's own boxes end up in different rows.
+
+    Boxes in the same row are joined by a straight horizontal run, which
+    needs nothing reserved. Boxes in different rows are stacked in one
+    column — which is what wrapping a narrow panel forces — and the run
+    between them has to go down, either through the gap between them or out
+    to a column the layout set aside. Reserving it here is deliberate: the
+    only column otherwise free is the frame's own border, and an edge drawn
+    across that is the inconsistent-junction problem all over again.
+    """
+    row_of: dict[str, int] = {}
+    for index, row in enumerate(rows):
+        for _width, _height, (kind, payload) in row:
+            if kind != "boxes":
+                continue
+            for box in payload:
+                row_of[box.id] = index
+    if not row_of:
+        return False
+    return any(
+        source in row_of and target in row_of and row_of[source] != row_of[target]
+        for source, target in diagram.edges
+    )
+
+
+def _measure(container: Any, diagram: Diagram, available: int) -> tuple[int, int]:
+    """How big a container's frame will be, without placing anything."""
+    inner = _inner_width(container.id, diagram, available)
+    content_width, content_height, _lane, _rows = _content_size(container, diagram, inner)
+    frame_width = max(
+        content_width + CONTAINER_PAD * 2 + 1,
+        _title_width(container, content_width),
+    )
+    return frame_width, content_height + CONTAINER_PAD * 2 + 1
+
+
+def _title_width(container: Any, inner: int) -> int:
+    """How wide the frame must be to hold its own title without cutting it.
+
+    A title longer than the contents would otherwise be truncated — which is
+    how ``your computer — minikube, docker driver`` came out as
+    ``your computer — minikube, docker``.
+    """
+    title = len(container.label) + (len(container.detail) + 3 if container.detail else 0) + 5
+    return min(max(title, inner + 2 * CONTAINER_PAD + 1), 10_000)
+
+
+def _emit(
+    container: Any,
+    diagram: Diagram,
+    placement: Placement,
+    x: int,
+    y: int,
+    band: int,
+    available: int,
+) -> PlacedContainer | None:
+    """Place a container's contents and draw its frame around them."""
+    inner_available = _inner_width(container.id, diagram, available)
+    content_width, content_height, lane, rows = _content_size(
+        container, diagram, inner_available
+    )
+    frame_width = max(
+        content_width + CONTAINER_PAD * 2 + 1,
+        _title_width(container, content_width),
+    )
+    frame = PlacedContainer(
+        id=container.id,
+        label=container.label,
+        detail=container.detail,
+        x=x,
+        y=y,
+        width=frame_width,
+        height=content_height + CONTAINER_PAD * 2 + 1,
+        band=band,
+        lane=x + CONTAINER_PAD + 1 + lane if lane >= 0 else -1,
+    )
+    placement.containers[container.id] = frame
+    # Every frame's title, not just the top-level ones', so what the picture
+    # is organised into is visible from the placement alone. The preview
+    # script reads this to say what it drew.
+    placement.headings.append((x, y, container.label))
+
+    inner_x = x + CONTAINER_PAD + 1
+    inner_y = y + CONTAINER_PAD + 1
+    row_y = inner_y
+    for row in rows:
+        column_x = inner_x
+        row_height = 0
+        for width, height, (kind, payload) in row:
+            if kind == "boxes":
+                stack_y = row_y
+                for box in payload:
+                    box.x = column_x
+                    box.y = stack_y
+                    box.band = band
+                    stack_y += box.height + NODE_GAP
+                    placement.boxes[box.id] = box
+            else:
+                child_width, _ = _measure(payload, diagram, inner_available)
+                _emit(payload, diagram, placement, column_x, row_y, band,
+                      inner_available)
+                width = child_width
+            column_x += width + GUTTER
+            row_height = max(row_height, height)
+        row_y += row_height + COMPONENT_GAP
+    return frame
+
+
 def _order(members: list[str], diagram: Diagram) -> dict[str, int]:
     """Row assignment within a container's boxes."""
     return _order_within_layers(
         members, _layer(members, diagram), diagram
     )
-
-
-def _span(columns: list[list[PlacedBox]], widest: int) -> int:
-    """How wide a component is: every column but the last is `widest` wide."""
-    if not columns:
-        return 0
-    return len(columns) * widest + (len(columns) - 1) * GUTTER
 
 
 def _columns(
@@ -322,4 +552,21 @@ def _layer(component: list[str], diagram: Diagram) -> dict[str, int]:
 
     for node in component:
         resolve(node, frozenset())
+
+    # A box with no edges at all — a workload nothing routes to and that
+    # routes nowhere — has no place in the flow, and longest-path layering
+    # gives it layer 0, which stacks every one of them into a single column.
+    # Twenty-four rows for three boxes that fit side by side in forty
+    # columns. Each gets its own column past the end of the flow instead, so
+    # they pack into a row.
+    #
+    # "No edges" means neither end of one — an Ingress is a *source*, and
+    # testing only its incoming edges classified it as loose and pushed the
+    # whole chain it starts to the right of the boxes it feeds.
+    linked = {end for edge in diagram.edges for end in edge}
+    loose = [node for node in component if node not in linked]
+    if loose:
+        after = max(depth.values(), default=0) + 1
+        for offset, node in enumerate(sorted(loose)):
+            depth[node] = after + offset
     return depth

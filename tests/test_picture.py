@@ -131,6 +131,41 @@ def _box(built: diagram.Diagram, name: str) -> diagram.Node:
     return built.nodes[next(n.id for n in built.nodes.values() if n.lines[0] == name)]
 
 
+def _contained(built: diagram.Diagram, container: diagram.Container) -> list[str]:
+    """Every box inside *container*, however deep.
+
+    Containers nest now, so a container's own ``members`` are only the boxes
+    with no frame of their own inside it — `your computer` and `minikube`
+    hold none at all. What a frame is *sized* to is everything within it.
+    """
+    out = list(container.members)
+    for child in built.children_of(container.id):
+        out.extend(_contained(built, child))
+    return out
+
+
+def _reading_order(built: diagram.Diagram) -> list[diagram.Container]:
+    """Containers in the order a reader meets them, outermost first."""
+    out: list[diagram.Container] = []
+
+    def walk(parent: str | None) -> None:
+        for container in built.children_of(parent):
+            out.append(container)
+            walk(container.id)
+
+    walk(None)
+    return out
+
+
+def _within(outer, inner) -> bool:
+    return (
+        outer.x <= inner.x
+        and outer.y <= inner.y
+        and inner.x + inner.width <= outer.x + outer.width
+        and inner.y + inner.height <= outer.y + outer.height
+    )
+
+
 class TestDiagram:
     def test_one_box_per_workload_service_and_ingress(self):
         built = diagram.build_diagram(realistic())
@@ -204,7 +239,7 @@ class TestDiagram:
 
     def test_the_node_carries_its_allocatable_share(self):
         built = diagram.build_diagram(realistic())
-        assert "2 of 16 cpu" in _box(built, "minikube").lines[-1]
+        assert "2 of 16 cpu" in "\n".join(_box(built, "minikube").lines)
 
     def test_no_edge_runs_from_the_node_to_the_control_plane(self):
         """Seven of them became a picket fence down one lane. The reading
@@ -226,14 +261,53 @@ class TestDiagram:
         assert len(containers["default"].members) == 7
 
     def test_containment_is_a_container_and_not_an_edge(self):
-        """"Your computer" contains the node minikube made on it. That is
-        containment, so it is a box around it — an arrow would claim the two
-        talk to each other, which is not what a laptop and a VM inside it
-        do."""
+        """minikube makes a machine *on* your computer and runs the cluster
+        inside it. That is containment, so it nests — a box inside a box. An
+        arrow would claim the two talk to each other, which is not what a
+        laptop and the VM inside it do."""
         built = diagram.build_diagram(realistic())
-        host = next(c for c in built.containers if c.id == "host")
-        assert host.members
-        assert not [e for e in built.edges if e[0] == "host"]
+        by_id = {c.id: c for c in built.containers}
+        assert by_id["minikube"].parent == "computer"
+        assert by_id["ns:default"].parent == "minikube"
+        # The nesting itself carries the fact, so nothing is drawn as an
+        # edge between a thing and what holds it.
+        for container in built.containers:
+            assert not [e for e in built.edges if e[0] == container.id]
+
+    def test_everything_runs_inside_minikube(self):
+        """The correction this picture exists for: not three things side by
+        side at the top level, but your computer holding minikube holding
+        everything else. A namespace beside the node, as it was, says the
+        workloads are not on it."""
+        built = diagram.build_diagram(realistic())
+        top = built.ordered_containers()
+        assert [c.id for c in top] == ["computer"]
+        assert all(
+            c.parent == "minikube"
+            for c in built.containers
+            if c.id.startswith("ns:")
+        )
+
+    def test_one_node_is_minikube_rather_than_a_peer_of_it(self):
+        """A single-node cluster's node *is* the machine minikube made, so
+        its box belongs inside the minikube frame. With several nodes they
+        need a frame of their own, or the boxes would sit beside the
+        namespaces and look like peers of them."""
+        model = realistic()
+        model["node_facts"] = model["node_facts"][:1]
+        model["nodes"] = model["nodes"][:1]
+        one = diagram.build_diagram(model)
+        minikube = next(c for c in one.containers if c.id == "minikube")
+        assert minikube.members  # the node box, loose inside the frame
+        assert not one.children_of("minikube") or all(
+            c.id.startswith("ns:") for c in one.children_of("minikube")
+        )
+
+        two = diagram.build_diagram(realistic())
+        by_id = {c.id: c for c in two.containers}
+        assert by_id["minikube"].members == []
+        assert by_id["nodes"].parent == "minikube"
+        assert len(by_id["nodes"].members) == 2
 
     def test_nothing_outside_the_cluster_is_drawn(self):
         """No browser, no "you". The picture is of the cluster, not of an
@@ -312,19 +386,23 @@ class TestPlace:
         floor = self._widest_single_group(built)
         assert widest <= max(width, floor), f"{widest} > {width} (floor {floor})"
 
-    def test_a_narrow_panel_wraps_into_bands(self):
+    def test_a_narrow_panel_wraps_rather_than_overflowing(self):
+        """Wrapping used to be between top-level containers, and there is now
+        only one of those, so it happens inside them: a namespace too wide
+        for the panel stacks its columns into rows instead. The observable
+        consequence is the same either way — the picture gets taller, not
+        wider."""
         built = diagram.build_diagram(realistic())
         narrow = place.place(built, 40)
         wide = place.place(built, 200)
-        assert len({b.band for b in narrow.boxes.values()}) > 1
-        assert len({b.band for b in wide.boxes.values()}) < len(
-            {b.band for b in narrow.boxes.values()}
-        )
+        assert narrow.height > wide.height
+        assert narrow.width <= wide.width
 
     def test_containers_are_ordered_machine_first_your_code_last(self):
         built = diagram.build_diagram(realistic())
-        order = [c.label for c in built.ordered_containers()]
+        order = [c.label for c in _reading_order(built)]
         assert order[0] == "your computer"
+        assert order[1] == "minikube"
         # the control plane before the reader's own namespaces
         assert order.index("kube-system") < order.index("default")
 
@@ -370,6 +448,30 @@ class TestPlace:
         for band in sorted(bands)[:-1]:
             assert band in placement.gaps
 
+    def test_a_frame_whose_boxes_stack_reserves_a_lane_to_join_them(self):
+        """Narrow panels stack a namespace's boxes in one column, so the edge
+        between two of them has to go down. The only column free to go down
+        is one the layout set aside — the alternative is the frame's own
+        border, and an edge across that is the inconsistent-junction problem
+        the whole renderer exists to avoid."""
+        built = diagram.build_diagram(realistic())
+        placement = place.place(built, 40)
+        stacked = {
+            frame.id
+            for frame in placement.containers.values()
+            if frame.lane >= 0
+        }
+        # Everything is in one band now, so a lane is the only routing a
+        # narrow panel has.
+        assert stacked
+        for container_id in stacked:
+            frame = placement.containers[container_id]
+            assert frame.x < frame.lane < frame.x + frame.width - 1
+            # and nothing is drawn in it
+            for box in placement.boxes.values():
+                if box.x <= frame.lane <= box.x + box.width - 1:
+                    assert not (frame.y <= box.y and box.y < frame.y + frame.height)
+
     def test_an_empty_diagram_places_to_nothing(self):
         assert place.place(diagram.Diagram(), 80).boxes == {}
 
@@ -390,30 +492,36 @@ class TestPlace:
 
     @pytest.mark.parametrize("width", [62, 90, 140, 200])
     def test_a_container_is_sized_to_its_own_contents(self, width):
-        """Not to the band. Sizing to the band padded every container out to
-        the height of the tallest one beside it."""
+        """Not to the band, and not to its parent. Sizing to the band padded
+        every container out to the height of the tallest one beside it."""
         built = diagram.build_diagram(realistic())
         placement = place.place(built, width)
         for container in built.containers:
             frame = placement.containers[container.id]
-            members = [placement.boxes[m] for m in container.members]
-            lowest = max(b.y + b.height for b in members)
+            inside = [placement.boxes[m] for m in _contained(built, container)]
+            if not inside:
+                continue
+            lowest = max(b.y + b.height for b in inside)
             assert frame.y + frame.height - lowest <= 3, container.label
 
     @pytest.mark.parametrize("width", [62, 90, 140, 200])
-    def test_containers_never_overlap(self, width):
+    def test_containers_never_overlap_unless_one_holds_the_other(self, width):
+        """Two frames either sit apart or one is inside the other. Anything
+        else means two frames are drawn across each other, which reads as a
+        box that is somehow both of them."""
         built = diagram.build_diagram(realistic())
         placement = place.place(built, width)
         frames = list(placement.containers.values())
         for index, first in enumerate(frames):
             for second in frames[index + 1:]:
-                if first.band != second.band:
-                    continue
                 apart = (
                     first.x + first.width <= second.x
                     or second.x + second.width <= first.x
+                    or first.y + first.height <= second.y
+                    or second.y + second.height <= first.y
                 )
-                assert apart, (first.label, second.label)
+                nested = _within(first, second) or _within(second, first)
+                assert apart or nested, (first.label, second.label)
 
     def test_a_container_label_is_not_truncated(self):
         """The frame is only as wide as its contents, so a long title has to

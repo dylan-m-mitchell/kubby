@@ -66,9 +66,17 @@ def render(placement: Placement) -> Text:
     # Containers first, then the boxes that go inside them, then the edges.
     # A container locks only its own border, so its contents can still be
     # drawn while an edge still cannot cross the frame.
-    for frame in placement.containers.values():
+    # Outermost frames first, so an inner frame is never clipped by the
+    # border of the one containing it.
+    for frame in sorted(
+        placement.containers.values(),
+        key=lambda f: (f.x + f.y),
+    ):
         canvas.container(
-            Rect(frame.x, frame.y, frame.width, frame.height), frame.label, "dim"
+            Rect(frame.x, frame.y, frame.width, frame.height),
+            frame.label,
+            "dim",
+            frame.detail,
         )
 
     for box in placement.boxes.values():
@@ -114,6 +122,15 @@ def _route(canvas: Canvas, placement: Placement, source: str, target: str) -> No
 
     if src.band != dst.band:
         _route_across_bands(canvas, placement, src, dst)
+        return
+
+    if dst.y >= src.y + src.height and _columns_overlap(src, dst):
+        # Stacked in one column, which is what a narrow panel forces. A
+        # vertical run, down the gap between the two and in through the
+        # target's top edge — not sideways, because sideways is where the
+        # frame's border is, and an edge that crosses a border is the one
+        # thing this whole file exists to avoid.
+        _route_down(canvas, placement, src, dst)
         return
 
     if ex > sx + 2:
@@ -220,6 +237,70 @@ def _route_across_bands(
     canvas.line([(side, lane), (side, row)], EDGE_STYLE)
     canvas.line([(side, row), (dst.x, row)], EDGE_STYLE)
     canvas.arrow_head(dst.x, row, "right", EDGE_STYLE, force=True)
+
+
+def _columns_overlap(src: PlacedBox, dst: PlacedBox) -> bool:
+    """Whether two boxes share any column, and so read as one stack."""
+    return src.x < dst.x + dst.width and dst.x < src.x + src.width
+
+
+def _route_down(
+    canvas: Canvas, placement: Placement, src: PlacedBox, dst: PlacedBox
+) -> None:
+    """Join two boxes stacked in one column.
+
+    Straight down through the gap when there is one, which is the common case
+    and needs nothing reserved. Otherwise out to the frame's own lane, down
+    it, and back in — the lane exists because the frame that holds both boxes
+    is the innermost one with a spare column, and it is inside the frame, so
+    no run crosses a border.
+    """
+    top = src.y + src.height
+    for column in range(src.x + 1, src.x + src.width - 1):
+        if not any(canvas.locked(column, row) for row in range(top, dst.y)):
+            canvas.line([(column, top - 1), (column, dst.y)], EDGE_STYLE)
+            canvas.arrow_head(column, dst.y, "down", EDGE_STYLE, force=True)
+            return
+
+    channel = _lane_around(placement, src, dst)
+    if channel is None:
+        return
+    out_y = src.y + src.height // 2
+    in_y = dst.y + dst.height // 2
+    canvas.line([(src.x + src.width, out_y), (channel, out_y)], EDGE_STYLE)
+    canvas.line([(channel, out_y), (channel, in_y)], EDGE_STYLE)
+    canvas.line([(channel, in_y), (dst.x + dst.width, in_y)], EDGE_STYLE)
+    canvas.arrow_head(dst.x + dst.width, in_y, "left", EDGE_STYLE, force=True)
+
+
+def _lane_around(
+    placement: Placement, src: PlacedBox, dst: PlacedBox
+) -> int | None:
+    """The innermost reserved column inside a frame that holds both boxes.
+
+    Innermost, because the outermost frame that holds both is usually
+    ``your computer`` and a lane out there would run the length of the
+    picture to join two boxes in one namespace.
+    """
+
+    def holds(frame) -> bool:
+        return (
+            src.x >= frame.x
+            and src.y >= frame.y
+            and src.x + src.width <= frame.x + frame.width
+            and dst.x >= frame.x
+            and dst.y >= frame.y
+            and dst.x + dst.width <= frame.x + frame.width
+        )
+
+    candidates = [
+        frame
+        for frame in placement.containers.values()
+        if frame.lane >= 0 and holds(frame)
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda f: f.width * f.height).lane
 
 
 def _clear_row(canvas: Canvas, near: int, after: int, before: int) -> int:

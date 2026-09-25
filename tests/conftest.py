@@ -149,7 +149,23 @@ class FakeService:
             "error": None,
             "context": info.get("context"),
             "version": info.get("version"),
+            "driver": "docker",
             "nodes": [dict(n) for n in self.cluster["nodes"]],
+            # The picture nests everything inside minikube, so a fake cluster
+            # with no node facts drew a `your computer` frame around nothing.
+            "node_facts": [
+                {
+                    "name": "minikube",
+                    "internal_ip": "192.168.49.2",
+                    "pod_cidr": "10.244.0.0/16",
+                    "os_image": "Debian GNU/Linux 12 (bookworm)",
+                    "runtime": "docker 27.1.1",
+                    "cpu_capacity": "8",
+                    "cpu_allocatable": "8",
+                    "memory_capacity": "3900m",
+                    "memory_allocatable": "3900m",
+                }
+            ],
             "namespaces": [
                 {**ns, "pods": [{"namespace": ns.get("name") or "default", **pod}
                                 for pod in ns.get("pods", [])]}

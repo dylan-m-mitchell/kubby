@@ -263,18 +263,28 @@ class Canvas:
 
     # ----- containers --------------------------------------------------
 
-    def container(self, rect: Rect, title: str, style: str | None = None) -> None:
+    def container(
+        self, rect: Rect, title: str, style: str | None = None, detail: str = ""
+    ) -> None:
         """A frame around a group, with the group's name in its top edge.
 
         Distinct from a box on purpose: a container is something that
         *contains*, a box is a thing. Double lines for containment, so the
         nesting reads without having to work out which is which.
+
+        *detail* is a second run of text in the same edge, after the name.
+        A frame is only as wide as what is inside it, so anything that does
+        not fit in a box has to go here or be cut.
         """
         self.box(rect, "double", style, lock_inside=False)
+        room = max(0, rect.width - 4)
         if not title:
             return
-        text = f" {title} "
-        room = max(0, rect.width - 4)
+        text = f" {title}"
+        if detail:
+            text += f" · {detail} "
+        else:
+            text += " "
         for offset, char in enumerate(text[:room]):
             self._force(rect.x + 2 + offset, rect.y, char, style)
             self._locked[rect.y][rect.x + 2 + offset] = True

@@ -57,6 +57,14 @@ INFRA_NAMESPACES = frozenset(
     {"kube-system", "kube-public", "kube-node-lease", "ingress-nginx"}
 )
 
+#: Where the control plane actually lives. The apiserver, etcd, scheduler
+#: and controller-manager run as *static pods* on the node, managed by the
+#: kubelet rather than by a Deployment or a ReplicaSet — which is why they
+#: have no replicas to count and why grouping them with ordinary workloads
+#: would be misleading. Their mirror pods appear in kube-system, so kubby
+#: finds them there, but they are not part of what that namespace is for.
+CONTROL_PLANE_NAMESPACE = frozenset({"kube-system"})
+
 #: Namespaces left out of the picture entirely. Only the ingress controller's:
 #: see the note where the namespaces are filtered.
 OMITTED_NAMESPACES = frozenset({"ingress-nginx"})
@@ -82,7 +90,7 @@ class Node:
 
 @dataclass
 class Container:
-    """Something that *contains* other boxes, drawn as a box around them.
+    """Something that *contains* other things, drawn as a box around them.
 
     The distinction from an edge is the whole point. A namespace contains its
     workloads, so it is a box they sit inside; a Service points at the
@@ -90,14 +98,24 @@ class Container:
     adjacency — a heading above a scatter of boxes — makes the two look like
     the same kind of fact, and makes the picture sprawl: a reader has to
     infer the grouping from proximity.
+
+    Containers nest, and the nesting is the point. From the minikube
+    documentation: minikube creates a VM or container *on your machine*, and
+    that VM *is* the node; everything else runs inside it. So the shape is
+    your computer → minikube → control plane and namespaces, and not three
+    things side by side at the top level.
     """
 
     id: str
     label: str
     members: list[str] = field(default_factory=list)
-    #: Reading order, lowest first: the machine, then the control plane, then
-    #: the reader's own namespaces.
+    #: The container this one sits inside, or None for a top-level one.
+    parent: str | None = None
+    #: Reading order among siblings, lowest first.
     rank: int = 0
+    #: A second line under the label in the frame's top edge — the sort of
+    #: thing a box is too narrow to hold without truncating it.
+    detail: str = ""
 
 
 @dataclass
@@ -140,14 +158,21 @@ class Diagram:
         """Boxes by the container they are inside, in reading order."""
         return [(c.label, list(c.members)) for c in self.ordered_containers()]
 
+    def children_of(self, container_id: str | None) -> list[Container]:
+        return sorted(
+            (c for c in self.containers if c.parent == container_id),
+            key=lambda c: (c.rank, c.label),
+        )
+
     def ordered_containers(self) -> list[Container]:
-        """Containers in reading order: the machine, then what runs on it.
+        """Top-level containers, in reading order: the machine, then what
+        runs on it.
 
         Ties break on the label so the order is stable across refreshes — a
         picture that reshuffles every `R` is impossible to build a mental
         model of.
         """
-        return sorted(self.containers, key=lambda c: (c.rank, c.label))
+        return self.children_of(None)
 
     def components(self) -> list[list[str]]:
         """Weakly-connected sets, used for ordering boxes within a
@@ -208,34 +233,78 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
     if not namespaces and not pods and not cluster.get("services") and not cluster.get("ingresses"):
         return diagram
 
-    # --- the host and the node ------------------------------------------
-    # "your computer" *contains* the node minikube made on it. That is
-    # containment, not a relationship, so it becomes a box around the node
-    # boxes with no arrow between them — an arrow says "these talk to each
-    # other", which is not what a laptop and a VM inside it do.
+    # --- the host, then minikube, then the node ---------------------------
+    # From the minikube documentation: `minikube start` creates a VM or a
+    # container *on your machine*, and that VM *is* the cluster's node.
+    # Everything else — the control plane, DNS, your own workloads — runs
+    # inside it. So the nesting is
+    #
+    #     your computer  ->  minikube  ->  control plane, namespaces
+    #
+    # and not three things side by side. minikube and the node are one box
+    # because they are one machine; the node is simply the Kubernetes name
+    # for the thing minikube made.
     facts = cluster.get("node_facts") or []
     driver = str(cluster.get("driver") or "").strip()
-    host_members: list[str] = []
-    for fact in facts:
-        lines = [str(fact.get("name") or "?")]
-        for extra in (
-            f"minikube, {driver} driver" if driver else "minikube, auto driver",
-            fact.get("os_image"),
-            fact.get("runtime"),
-            _capacity_text(fact, human_memory),
-        ):
-            if extra:
-                lines.append(str(extra))
-        node_id = _node_id(str(fact.get("name") or "?"))
-        diagram.add(Node(node_id, lines, "node", "host"))
-        host_members.append(node_id)
-    if host_members:
-        # The driver goes on the node box rather than in the container's title,
-        # which is only as wide as the widest thing inside it and would
-        # truncate the name that matters.
-        diagram.contain(
-            Container(id="host", label="your computer", members=host_members, rank=0)
+    driver_text = f"{driver} driver" if driver else "auto driver"
+
+    diagram.contain(
+        Container(
+            id="computer",
+            label="your computer",
+            detail=driver_text,
+            rank=0,
         )
+    )
+
+    if facts:
+        detail = str(cluster.get("version") or "")
+        if facts[0].get("internal_ip"):
+            detail = f"{detail} · {facts[0]['internal_ip']}".strip(" ·")
+
+        # The machine's own details go in a box inside the frame, not in the
+        # frame's title. A frame is only as wide as what it contains, and a
+        # 68-character title forced minikube out to 104 columns — wider than
+        # the panel it was supposed to fit in.
+        machine: list[str] = []
+        for fact in facts:
+            lines = [str(fact.get("name") or "the machine")]
+            for extra in (
+                fact.get("os_image"),
+                fact.get("runtime"),
+                _capacity_text(fact, human_memory),
+                f"pod addresses from {fact['pod_cidr']}" if fact.get("pod_cidr") else "",
+            ):
+                if extra:
+                    lines.append(str(extra))
+            node_id = _node_id(str(fact.get("name") or "?"))
+            diagram.add(Node(node_id, lines, "node", "minikube"))
+            machine.append(node_id)
+
+        # One node *is* minikube, so its box is a loose box of the minikube
+        # frame. With several it needs a frame of its own — otherwise the
+        # boxes would sit alongside the namespaces and look like peers of
+        # them, which they are not.
+        diagram.contain(
+            Container(
+                id="minikube",
+                label="minikube",
+                parent="computer",
+                detail=detail,
+                rank=0,
+                members=machine if len(machine) == 1 else [],
+            )
+        )
+        if len(machine) > 1:
+            diagram.contain(
+                Container(
+                    id="nodes",
+                    label="the nodes",
+                    members=machine,
+                    parent="minikube",
+                    rank=0,
+                )
+            )
 
     # --- workloads, grouped into namespaces -----------------------------
     workloads: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -368,23 +437,30 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
                 ),
             )
 
-    # --- namespaces, as boxes the objects sit inside --------------------
-    # Rank 1 for the control plane and 2 for the reader's own namespaces, so
-    # the picture reads: the machine, then what runs on it, then their code.
+    # --- namespaces, as boxes inside minikube ----------------------------
+    # Rank 1 for the control plane, then 2 for the cluster's own machinery,
+    # then 3 for the reader's namespaces, so the picture reads top-down:
+    # what makes the decisions, then what runs the cluster, then their code.
     for name in sorted(kept):
         members = sorted(
             node_id
             for node_id, node in diagram.nodes.items()
-            if node.group == name and node_id not in host_members
+            if node.group == name
         )
         if not members:
             continue
+        if name in CONTROL_PLANE_NAMESPACE:
+            rank, parent = 1, "minikube"
+        else:
+            rank, parent = (2 if name in INFRA_NAMESPACES else 3), "minikube"
         diagram.contain(
             Container(
                 id=f"ns:{name}",
                 label=name,
                 members=members,
-                rank=1 if name in INFRA_NAMESPACES else 2,
+                parent=parent,
+                rank=rank,
+                detail="static pods" if name in CONTROL_PLANE_NAMESPACE else "",
             )
         )
 
