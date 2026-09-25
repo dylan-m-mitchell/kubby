@@ -546,7 +546,7 @@ class TestVimNavigation:
             await wait_until(lambda: app.images)
             tree = app.query_one(ClusterPanel)
             tree.focus()
-            # Start on the second namespace so a parent genuinely exists.
+            # A namespace's only parent is the hidden synthetic root.
             tree.cursor_line = 2  # kube-system
             await pilot.pause()
             namespace = tree._tree_lines[2].path[-1]
@@ -556,6 +556,12 @@ class TestVimNavigation:
             await pilot.press("h")
             await pilot.pause()
             assert not namespace.is_expanded
+            assert tree.cursor_line == 2
+
+            # A collapsed top-level namespace has no visible parent to climb
+            # to, so h must leave its cursor in place.
+            await pilot.press("h")
+            await pilot.pause()
             assert tree.cursor_line == 2
 
             # On a pod, h climbs instead of collapsing. Expand it again

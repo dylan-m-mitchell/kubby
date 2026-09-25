@@ -389,7 +389,7 @@ class ClusterPanel(PanelBase, Tree):
         node = line.path[-1]
         if node.allow_expand and node.is_expanded:
             node.collapse()
-        else:
+        elif node.parent is not self.root:
             self.action_cursor_parent()
 
     def action_vim_expand(self) -> None:
@@ -408,7 +408,7 @@ class ClusterPanel(PanelBase, Tree):
         if not node.is_expanded:
             node.expand()
         elif node.children:
-            self.cursor_line += 1
+            self.move_cursor(node.children[0])
 
     def set_cluster(self, info: dict[str, Any]) -> None:
         self.clear()
