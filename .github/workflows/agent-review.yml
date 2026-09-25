@@ -3,7 +3,7 @@ name: Agent review loop
 # Opens the agentic loop when a PR is opened: the ci-reviewer agent reviews
 # the diff, writes a fix plan into a sticky PR comment, applies the fixes it
 # considers safe, and the loop repeats until the agent reports CLEAN, reports
-# something only a human can decide, or the 3-round cap is reached.
+# something only a human can decide, or the 2-round cap is reached.
 #
 # Why the loop lives in one job rather than re-triggering itself:
 # pushes made with GITHUB_TOKEN do not start new workflow runs, so the agent's
@@ -59,7 +59,10 @@ jobs:
       github.actor != 'github-actions[bot]' &&
       !contains(github.event.pull_request.labels.*.name, 'skip-agent-review')
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Generous headroom over the loop's own ceiling (preflight + 2 x 180s
+    # rounds + gates), but far below the old 60: a run that is going to
+    # overrun is a run burning minutes nobody reads.
+    timeout-minutes: 25
     env:
       REPO: ${{ github.repository }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -69,12 +72,14 @@ jobs:
       # is missing the base commit (the git diff fallback needs it).
       PR_BASE_REF: ${{ github.base_ref }}
       PR_HEAD_REF: ${{ github.head_ref }}
-      MAX_ITERATIONS: '3'
+      # Most PRs need 0-1 rounds; a third rarely produces anything a second
+      # one did not, and it is a third full agent budget plus a third gate run.
+      MAX_ITERATIONS: '2'
       # Per-round wall-clock budget. A round is "review the diff, write the
-      # plan, apply fixes, run the gates" — a slow model gets cut off at the
-      # end of it rather than eating the whole job, and a round that wrote
-      # its plan before the cut-off still counts.
-      AGENT_ROUND_TIMEOUT: '600'
+      # plan, apply fixes" — the script runs the gates afterwards, so a slow
+      # model gets cut off at the end of the round rather than eating the
+      # whole job, and a round that wrote its plan before the cut-off counts.
+      AGENT_ROUND_TIMEOUT: '180'
       # Same-repo PRs can be pushed to; forks cannot (and must not be).
       PUSH_FIXES: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
       REVIEW_MODEL: ${{ vars.REVIEW_MODEL }}
@@ -103,6 +108,20 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --locked
+
+      # The gates run inside the loop's per-round budget, so a cold uv cache
+      # is charged to the agent's wall clock: the first `uvx ruff@0.16.8`
+      # downloads and unpacks ruff, and the first `uv run pytest` builds the
+      # venv. Both are one-off costs that belong here, before the clock that
+      # matters starts, and both are then cached for every round. Collection
+      # only — this warms imports and the venv without running the suite.
+      - name: Warm the gates
+        run: |
+          time uvx ruff@0.16.8 --version
+          # A collection error is a real gate failure, not a warm-up problem:
+          # report it here but let the loop's own gates be the verdict.
+          time uv run pytest --collect-only -q ||
+            echo "collection failed; the loop's gates will report it"
 
       # @opencode/cli is the V2 line (the older `opencode-ai` package is V1).
       # Pinned exactly: a review bot must not silently change behaviour on

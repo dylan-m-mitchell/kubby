@@ -109,14 +109,15 @@ tagging `vX.Y.Z` builds, smoke-tests and publishes a release
 Opening a PR also starts the **agent review loop**
 (`.github/workflows/agent-review.yml`). The `ci-reviewer` OpenCode agent
 reviews the diff, posts a fix plan as a sticky PR comment, applies the fixes
-it considers safe, and the loop goes around again — up to 3 rounds — until
-the agent reports `CLEAN`, or a finding needs a human. Nothing is pushed
-until the round passes the same `ruff` + `pytest` checks CI runs, a failing
-round hands its error output straight back to the agent, and a round whose
-agent crashes is retried by the next round instead of aborting the run. A
-model that does not answer at all fails the run immediately, with a comment
-saying no review happened, instead of spending every round's budget on a
-dead connection.
+it considers safe, and the loop goes around again — up to 2 rounds of 3
+minutes each — until the agent reports `CLEAN`, or a finding needs a human.
+Nothing is pushed until the round passes the same `ruff` + `pytest` checks CI
+runs (the script runs them, not the agent), a failing round hands its error
+output straight back to the agent, and a round whose agent crashes is retried
+by the next round instead of aborting the run. A preflight probe runs the real
+agent on a throwaway `git status` first, so a dead model endpoint or a
+misconfigured permission file fails the job in about a minute instead of
+spending every round's budget discovering it.
 
 - **Opt out:** open the PR as a draft, add the `skip-agent-review` label,
   then mark it ready for review. Labels are only read when the workflow
@@ -128,8 +129,10 @@ dead connection.
   back to a free model so it still runs.
 - **Guardrails:** the agent never commits or pushes — the script owns every
   GitHub action — and it cannot write `.github/` or its own permission file,
-  cannot `curl`/`wget`/fetch/search, and stays inside the worktree. Fork PRs
-  are reviewed but never edited (their token is read-only).
+  cannot `curl`/`wget`/fetch/search, and stays inside the worktree. Denials
+  are final: the agent is told not to retry or route around them, because a
+  round spent investigating its own permissions is a round the PR waits for.
+  Fork PRs are reviewed but never edited (their token is read-only).
 
 ## Requirements
 
@@ -144,7 +147,7 @@ dead connection.
 .opencode/agents/
   ci-reviewer.md        # the PR review agent (permissions + system prompt)
 scripts/
-  agent-review-loop.sh  # review → plan → fix → gate → push, ≤ 3 rounds
+  agent-review-loop.sh  # review → plan → fix → gate → push, ≤ 2 rounds
 kubby/
   __init__.py
   __main__.py             # python -m kubby

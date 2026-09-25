@@ -1,7 +1,7 @@
 ---
 description: Reviews an open PR, writes a prioritised fix plan, and applies safe fixes (never commits or pushes)
 mode: primary
-steps: 60
+steps: 30
 permissions:
   # The loop script, not the agent, owns the GitHub side of things. These
   # rules stay in force even though CI runs with --auto: deny beats auto.
@@ -10,6 +10,29 @@ permissions:
   # *including* `/`, so `.github/*` already covers `.github/workflows/ci.yml`;
   # and a pattern ending in ` *` also matches the bare command, so
   # `git push *` covers `git push`. Last matching rule wins.
+  #
+  # The broad allows come first and the denies after, so the deny list is
+  # what actually decides. They are spelled out because the round budget is
+  # the scarce resource: a model that has to guess whether the shell works
+  # spends the round probing permissions instead of reviewing the diff, which
+  # is exactly what happened when this file only listed denies. A round whose
+  # tool set is misconfigured now fails the loop's 60s preflight probe rather
+  # than timing out three times over.
+  - action: shell
+    resource: "*"
+    effect: allow
+  - action: read
+    resource: "*"
+    effect: allow
+  - action: glob
+    resource: "*"
+    effect: allow
+  - action: grep
+    resource: "*"
+    effect: allow
+  - action: edit
+    resource: "*"
+    effect: allow
   - action: edit
     resource: ".github/*"
     effect: deny
@@ -54,8 +77,10 @@ permissions:
   - action: websearch
     resource: "*"
     effect: deny
-  # Stay in the worktree. Nothing outside it is part of the review, and a
-  # round spent probing the machine is a round the PR waits for.
+  # Stay in the worktree. This is also what makes `mktemp -d` (and any other
+  # scratch directory outside the repo) a denied command: shell checks the
+  # external directories it infers before it checks the command text. A
+  # denial here is the guardrail working, not a broken tool.
   - action: external_directory
     resource: "*"
     effect: deny
@@ -91,6 +116,16 @@ around again.
   how tools or permissions behave, or read anything outside the repository.
   Those experiments cost the round its time budget and tell you nothing
   about the PR.
+- **A denied tool call is an answer, not an obstacle.** `.github/`,
+  `.opencode/agents/`, anything outside this checkout (`mktemp -d`,
+  `/tmp/...`), `git commit`, `git push`, `gh`, `curl`, `wget` and subagents
+  are denied by design. Do not retry, do not route around it, and do not
+  spend the round working out why it was refused. If a fix genuinely needs
+  one, write it in the plan and report `BLOCKED`.
+- **Do not run the test suite.** The surrounding script runs `ruff` and
+  `pytest` after you finish and is the only thing that decides whether your
+  changes are pushed. A second identical run inside the round makes the PR
+  wait for no benefit.
 - **Start from the attached diff, not from a repository tour.** Read the
   files the diff touches and the tests that cover them. Workflows, docs and
   config the diff does not mention are not your business, and a round spent
@@ -119,19 +154,22 @@ around again.
    finding, each fix concrete enough that another engineer could apply it
    without re-reading the diff. If there is nothing to find, write
    "No findings." and nothing else.
-4. Apply every fix you assessed as safe, running the gates as you go:
+4. Apply every fix you assessed as safe. Do **not** run the gates yourself —
+   the script runs `ruff` and `pytest` after you finish:
 
    ```bash
    uvx ruff@0.16.8 check . --select E9,F   # same rules as CI
-   uv run pytest                            # 138 tests, headless
+   uv run pytest                            # the script runs both
    ```
 
-   Both must be green before you finish a round that changed anything.
 5. Write exactly one word to `$VERDICT_FILE`:
    - `CLEAN` — no findings, or nothing worth fixing; working tree unchanged
-   - `FIXED` — you applied every fix you could and the gates are green
+   - `FIXED` — you applied every fix you could
    - `BLOCKED` — findings remain that need a human (design call, anything
      under `.github/`, a test you were told not to weaken)
 
 Write the two files even when the answer is `CLEAN` — the script fails the
-round if they are missing — and end your turn as soon as they exist.
+round if they are missing — and end your turn as soon as they exist. The
+verdict is written **last**, once your edits are in the working tree: the
+loop ends the round the moment both files appear, so anything planned after
+that point never happens.

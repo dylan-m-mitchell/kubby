@@ -25,7 +25,9 @@
 #   GH_TOKEN_FILE     repo token, written by the workflow — read into a shell
 #   OPENCODE_API_KEY  OpenCode Console key (absent -> free-model fallback)
 #   REVIEW_MODEL      overrides the model that would otherwise be picked
-#   MAX_ITERATIONS    default 3
+#   MAX_ITERATIONS    default 2
+#   PROBE_TIMEOUT     preflight budget, default 120
+#   AGENT_ROUND_TIMEOUT  per-round wall clock, default 180
 #   PUSH_FIXES        "false" for fork PRs: review-only, no edits, no pushes
 #   DRY_RUN           "1": stub the agent, skip gh calls and pushes (testing)
 #   FAKE_VERDICT      dry-run verdict (default: round 1 FIXED, later CLEAN)
@@ -87,8 +89,8 @@ PR_NUMBER=${PR_NUMBER:?PR_NUMBER is required}
 PR_TITLE=${PR_TITLE:-"(untitled)"}
 PR_BASE_SHA=${PR_BASE_SHA:?PR_BASE_SHA is required}
 PR_HEAD_REF=${PR_HEAD_REF:-}
-MAX_ITERATIONS=${MAX_ITERATIONS:-3}
-AGENT_ROUND_TIMEOUT=${AGENT_ROUND_TIMEOUT:-600}
+MAX_ITERATIONS=${MAX_ITERATIONS:-2}
+AGENT_ROUND_TIMEOUT=${AGENT_ROUND_TIMEOUT:-180}
 PUSH_FIXES=${PUSH_FIXES:-true}
 DRY_RUN=${DRY_RUN:-0}
 REVIEW_ONLY=false
@@ -128,6 +130,23 @@ COMMENT_FILE="$ART/comment.md"
 banner() { printf '\n\033[1;35m── %s \033[0m\n' "$*"; }
 warn() { printf '\033[1;33m! %s\033[0m\n' "$*" >&2; }
 
+# Phase timing. Uses bash's EPOCHREALTIME (bash 5, always present on the
+# runner) rather than `bc`, which is not guaranteed to be installed, and
+# prints to the job log as well as timing.log so a slow phase is visible
+# without opening an artifact.
+timer_start() { printf '%s' "$EPOCHREALTIME" >"$ART/timer-$1.start"; }
+timer_stop() {
+  local start now us elapsed
+  start=$(<"$ART/timer-$1.start") || start=$EPOCHREALTIME
+  now=$EPOCHREALTIME
+  # EPOCHREALTIME is seconds with microsecond fraction; awk gives us whole
+  # microseconds, which is then rendered as seconds with one decimal.
+  us=$(awk -v a="$start" -v b="$now" 'BEGIN{printf "%d", (b-a)*1000000}')
+  elapsed=$((us / 1000000)).$(( (us % 1000000 + 500000) / 1000000 ))
+  printf '%-18s %8ss\n' "$1" "$elapsed" | tee -a "$ART/timing.log" >&2
+  rm -f "$ART/timer-$1.start"
+}
+
 # The token travels into each gh child and no further: nothing that lives as
 # long as this script (or as an agent round) carries it in its environment.
 run_gh() {
@@ -143,6 +162,10 @@ run_gh() {
 # ---------------------------------------------------------------------------
 
 DIFF_EMPTY=false
+# The round loop recomputes the diff because HEAD moves when a round pushes
+# fixes — but when HEAD is unchanged the `gh pr diff` round trip is pure
+# latency, so the result is cached per HEAD.
+DIFF_CACHED_HEAD=""
 
 # What changed, as GitHub itself computes it. `gh pr diff` comes first
 # because the git fallbacks below silently produce an *empty* diff whenever
@@ -152,10 +175,16 @@ DIFF_EMPTY=false
 # one, right down to a possible `CLEAN` verdict.
 write_diff() {
   local out=$1
+  local head
   DIFF_EMPTY=false
+  head=$(git rev-parse HEAD 2>/dev/null || printf 'unknown')
+  if [[ -n "$DIFF_CACHED_HEAD" && "$DIFF_CACHED_HEAD" == "$head" && -s "$out" ]]; then
+    return 0
+  fi
   if [[ "$DRY_RUN" != 1 ]] &&
     run_gh pr diff "$PR_NUMBER" --repo "$REPO" >"$out" 2>/dev/null &&
     [[ -s "$out" ]]; then
+    DIFF_CACHED_HEAD=$head
     return 0
   fi
   # Fallback: dry runs, or no usable token. merge-base is what the PR tab
@@ -170,6 +199,9 @@ write_diff() {
   fi
   if [[ "$DRY_RUN" != 1 && ! -s "$out" ]]; then
     DIFF_EMPTY=true
+    DIFF_CACHED_HEAD=""
+  else
+    DIFF_CACHED_HEAD=$head
   fi
 }
 
@@ -282,6 +314,7 @@ run_gates() {
   local round=$1
   local out="$ART/gates-$round.txt"
   local status=0
+  timer_start "gates-round-$round"
   {
     echo '$ uvx ruff@0.16.8 check . --select E9,F'
     uvx ruff@0.16.8 check . --select E9,F || status=1
@@ -289,7 +322,9 @@ run_gates() {
     echo '$ uv run pytest'
     uv run pytest || status=1
   } >"$out" 2>&1
-  return $status
+  local rc=$status
+  timer_stop "gates-round-$round"
+  return $rc
 }
 
 # ---------------------------------------------------------------------------
@@ -336,27 +371,82 @@ run_agent() {
   fi
 
   # GH_TOKEN and GITHUB_TOKEN are stripped: the agent needs the provider
-  # credential and nothing else from the outside world. The wall-clock limit
-  # is what keeps a wandering model from spending the whole job elsewhere —
-  # a round that wrote its verdict before the limit still counts.
+  # credential and nothing else from the outside world.
+  #
+  # The round ends the moment the work is done, and the deadline is enforced
+  # here rather than by `timeout`, because ending it early needs the agent's
+  # own pid. The agent is told to write the verdict last and stop, but a
+  # model that keeps summarising, re-reading or "one more check"ing is
+  # charged for every one of those seconds; once both output files exist
+  # there is nothing left to review. The process gets a short grace period to
+  # end on its own, then is killed — reaching in seconds what the wall-clock
+  # path reaches at AGENT_ROUND_TIMEOUT.
+  #
+  # No pipe to tee: `$!` on a pipeline is the *last* stage's pid, not the
+  # agent's, and killing the wrong one leaves opencode running. Output goes
+  # to a log file that is dumped to the job log when the round ends.
   local rc=0
-  timeout --kill-after=30 "$AGENT_ROUND_TIMEOUT" \
-    env -u GH_TOKEN -u GITHUB_TOKEN -u GH_TOKEN_FILE \
+  env -u GH_TOKEN -u GITHUB_TOKEN -u GH_TOKEN_FILE \
     opencode run --standalone --auto \
       --agent ci-reviewer \
       --model "$REVIEW_MODEL" \
       --title "PR #$PR_NUMBER review (round $round)" \
       "${attach[@]}" \
-      "$prompt" 2>&1 | tee "$ART/agent-$round.log" || rc=$?
+      "$prompt" >"$ART/agent-$round.log" 2>&1 &
+  local agent_pid=$!
 
-  if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+  local deadline=$((SECONDS + AGENT_ROUND_TIMEOUT))
+  local finished_early=false timed_out=false
+  while kill -0 "$agent_pid" 2>/dev/null; do
+    if [[ -s "$PLAN_FILE" && -s "$VERDICT_FILE" ]]; then
+      finished_early=true
+      break
+    fi
+    if ((SECONDS >= deadline)); then
+      timed_out=true
+      break
+    fi
+    sleep 2
+  done
+
+  if [[ "$finished_early" == true || "$timed_out" == true ]]; then
+    local grace=$((SECONDS + ${AGENT_FINISH_GRACE:-20}))
+    while kill -0 "$agent_pid" 2>/dev/null && ((SECONDS < grace)); do sleep 1; done
+    if kill -0 "$agent_pid" 2>/dev/null; then
+      if [[ "$finished_early" == true ]]; then
+        AGENT_NOTE="⏱ Stopped ${AGENT_FINISH_GRACE:-20}s after the plan and verdict were written — the model was still going."
+        warn "round $round wrote both output files; stopping the agent after the grace period"
+      else
+        warn "round $round hit the ${AGENT_ROUND_TIMEOUT}s limit; stopping the agent"
+      fi
+      kill -TERM "$agent_pid" 2>/dev/null || true
+      sleep 2
+      kill -KILL "$agent_pid" 2>/dev/null || true
+    fi
+  fi
+  wait "$agent_pid" 2>/dev/null || rc=$?
+  cat "$ART/agent-$round.log" >&2 || true
+
+  if [[ "$finished_early" == true ]]; then
+    return 0
+  fi
+  if [[ "$timed_out" == true || $rc -eq 124 || $rc -eq 137 ]]; then
     if [[ -s "$VERDICT_FILE" ]]; then
-      AGENT_NOTE="⏱ Ran into the ${AGENT_ROUND_TIMEOUT}s round limit — the plan above is what the agent had written by then."
+      [[ -n "$AGENT_NOTE" ]] ||
+        AGENT_NOTE="⏱ Ran into the ${AGENT_ROUND_TIMEOUT}s round limit — the plan above is what the agent had written by then."
       warn "round $round hit the ${AGENT_ROUND_TIMEOUT}s limit; using the verdict already written"
       return 0
     fi
     warn "round $round hit the ${AGENT_ROUND_TIMEOUT}s limit with no verdict"
     return 1
+  fi
+  # A non-zero exit *after* both files were written is the free model's
+  # favourite way to end a round — a dropped socket while composing the
+  # summary. The work is done and the gates are the arbiter of whether it is
+  # any good, so the round counts instead of being retried from scratch.
+  if [[ $rc -ne 0 && -s "$PLAN_FILE" && -s "$VERDICT_FILE" ]]; then
+    warn "round $round exited $rc after writing both output files; counting the round"
+    return 0
   fi
   return $rc
 }
@@ -393,12 +483,31 @@ $pr_body
   explore the repository structure — the diff is the assignment.
 ${feedback:-}
 
+## Do not run the test suite
+The script runs \`ruff\` and \`pytest\` itself after you finish, and it is the
+only thing that decides whether your changes are pushed. Spending this
+round's budget on a second, identical suite run only makes the PR wait.
+
+## Permission denials are final
+Some commands are denied by design: anything touching \`.github/\` or
+\`.opencode/agents/\`, anything outside this checkout (\`mktemp -d\`,
+\`/tmp/...\`), \`git commit\`, \`git push\`, \`gh\`, \`curl\`, \`wget\`, and
+subagents. A denial is the guardrail working — do not retry it, do not try
+to route around it, and do not spend the round investigating *why* it was
+denied. If a fix genuinely requires one of those, write it in the plan and
+return BLOCKED.
+
 ## Output
 Write the fix plan to $PLAN_FILE and the verdict to $VERDICT_FILE
 (exactly one word: CLEAN, FIXED, or BLOCKED). Both files are required, and
 the moment they exist you must summarise and end your turn — this round has
 a hard ${AGENT_ROUND_TIMEOUT}s wall-clock limit, and anything still in flight
 when it expires is lost.
+
+The verdict is written **last**, after your edits are already in the working
+tree: the loop stops the round the moment both files exist, so anything you
+intended to do after writing them will not happen. Order: review, write the
+plan, apply the fixes, write the verdict, stop.
 EOF
 }
 
@@ -425,34 +534,58 @@ append_round() {
 }
 
 # ---------------------------------------------------------------------------
-# Reachability probe
+# Preflight probe
 # ---------------------------------------------------------------------------
 
-# Fail fast when the model endpoint is unresponsive. A dead connection
-# otherwise burns AGENT_ROUND_TIMEOUT on *every* round: the run I reproduced
-# this on sat silent for 30 minutes, three timeouts in a row, before it could
-# say anything at all. A healthy model answers in seconds, so two failed
-# attempts are strong evidence of an outage rather than a bad moment — and
-# one dropped connection is not yet an outage. Dry runs have no model to
-# reach, so this is skipped there.
-probe_model() {
-  local attempt=0 rc
-  : >>"$ART/model-probe.log"
+# Fail fast when the model endpoint is unresponsive, or when the review agent
+# cannot actually use its tools. A dead connection otherwise burns
+# AGENT_ROUND_TIMEOUT on *every* round: the run I reproduced this on sat
+# silent for 30 minutes, three timeouts in a row, before it could say
+# anything at all. A misconfigured permission file is the same shape of
+# failure — every shell call comes back "Permission denied: shell", the model
+# spends the round probing why, and the round ends in a timeout having
+# reviewed nothing. A healthy agent runs `git status` in seconds.
+#
+# The probe therefore uses the *real* agent and asks for the one thing a
+# round cannot start without: a read-only shell command. Probing the bare
+# model (no --agent) would only prove the endpoint answers; it would happily
+# pass with an agent that cannot touch the worktree at all.
+probe_agent() {
+  local rc=0 attempt=0
+  : >"$ART/model-probe.log"
+  # Two attempts, because the free fallback model drops sockets in ordinary
+  # use — one flaky completion should not fail a review that would have
+  # succeeded. Two failures in a row is the outage signal, and even then the
+  # loop gives up in ~4 minutes instead of spending two 180s rounds to learn
+  # the same thing.
+  #
+  # 120s per attempt, not 20s: the probe pays for a cold CLI start, one tool
+  # call and one completion. A probe tight enough to trip on a healthy but
+  # slow free model fails reviews that would have worked.
   while [[ $attempt -lt 2 ]]; do
     attempt=$((attempt + 1))
     rc=0
-    timeout --kill-after=15 60 \
+    timeout --kill-after=10 "${PROBE_TIMEOUT:-120}" \
       env -u GH_TOKEN -u GITHUB_TOKEN -u GH_TOKEN_FILE \
       opencode run --standalone --auto \
+        --agent ci-reviewer \
         --model "$REVIEW_MODEL" \
-        --title "PR #$PR_NUMBER reachability probe" \
-        "Reply with the single word OK." >>"$ART/model-probe.log" 2>&1 || rc=$?
+        --title "PR #$PR_NUMBER preflight probe" \
+        'Run `git status --porcelain` with the shell tool, then reply with the single word OK.' \
+        >>"$ART/model-probe.log" 2>&1 || rc=$?
     if [[ $rc -eq 0 ]]; then
       return 0
     fi
-    warn "model probe $attempt/2 failed (exit $rc)"
-    sleep 15
+    warn "preflight probe $attempt/2 failed (exit $rc)"
+    [[ $attempt -lt 2 ]] && sleep 8
   done
+  # A denial in the log means the agent's permission file is the problem;
+  # anything else is the endpoint. Say which, because the fixes differ.
+  if grep -q 'Permission denied' "$ART/model-probe.log" 2>/dev/null; then
+    PROBE_CAUSE="the \`ci-reviewer\` agent's permissions are misconfigured — its tools are being denied"
+  else
+    PROBE_CAUSE="\`$REVIEW_MODEL\` did not complete a single tool call and a reply in ${PROBE_TIMEOUT:-120}s, twice"
+  fi
   warn "--- tail of .agent-review/model-probe.log ---"
   tail -n 25 "$ART/model-probe.log" >&2 || true
   return 1
@@ -464,7 +597,9 @@ probe_model() {
 
 # Compute the diff once, before anything is built from it: the comment's
 # guardrail warning and every round's prompt are derived from this file.
+timer_start "diff"
 write_diff "$ART/pr.diff"
+timer_stop "diff"
 
 {
   printf '%s\n' "$MARKER"
@@ -512,18 +647,29 @@ write_diff "$ART/pr.diff"
   fi
 } >"$COMMENT_FILE"
 
-if [[ "$DRY_RUN" != 1 ]] && ! probe_model; then
-  {
-    echo "### Outcome"
-    echo
-    echo "❌ no review ran: \`$REVIEW_MODEL\` did not answer the reachability probe (two attempts)."
-    echo
-    echo "The model endpoint was unreachable from this runner — see \`model-probe.log\` in the job log. Nothing was reviewed and nothing was pushed, and the round budgets were deliberately not spent waiting on a dead connection. Re-run once the endpoint answers, or set \`REVIEW_MODEL\` / \`OPENCODE_API_KEY\` to a model that does."
-    echo
-    echo "<sub>Runs when the PR is opened · capped at $MAX_ITERATIONS rounds · open as a draft or add the \`skip-agent-review\` label to opt out.</sub>"
-  } >>"$COMMENT_FILE"
-  post_comment "$COMMENT_FILE" || warn "could not post the PR comment (read-only token?)"
-  exit 1
+# `total` covers the preflight too: it is the number that answers "why did
+# this PR wait so long", and a preflight that quietly sits outside it hides
+# exactly the minutes people are asking about.
+timer_start "total"
+
+if [[ "$DRY_RUN" != 1 ]]; then
+  timer_start "preflight"
+  if ! probe_agent; then
+    timer_stop "preflight"
+    timer_stop "total"
+    {
+      echo "### Outcome"
+      echo
+      echo "❌ no review ran: the \`ci-reviewer\` preflight probe failed."
+      echo
+      echo "The probe runs the real review agent and asks for one read-only shell call in this worktree. It failed because $PROBE_CAUSE. Either way nothing was reviewed and nothing was pushed, and the round budgets were not spent rediscovering it. See \`model-probe.log\` in the job log."
+      echo
+      echo "<sub>Runs when the PR is opened · capped at $MAX_ITERATIONS rounds · open as a draft or add the \`skip-agent-review\` label to opt out.</sub>"
+    } >>"$COMMENT_FILE"
+    post_comment "$COMMENT_FILE" || warn "could not post the PR comment (read-only token?)"
+    exit 1
+  fi
+  timer_stop "preflight"
 fi
 
 feedback=""
@@ -531,6 +677,7 @@ agent_error=""
 rounds_completed=0
 push_failed=false
 outcome=""
+PROBE_CAUSE="the model endpoint or the agent's tool permissions are not working"
 
 for ((round = 1; round <= MAX_ITERATIONS; round++)); do
   banner "round $round/$MAX_ITERATIONS"
@@ -540,7 +687,9 @@ for ((round = 1; round <= MAX_ITERATIONS; round++)); do
 
   prompt=$(build_prompt "$round")
 
+  timer_start "agent-round-$round"
   if ! run_agent "$prompt" "$round"; then
+    timer_stop "agent-round-$round"
     # A crashed round is not the end of the loop — the next round retries the
     # whole review from scratch, and only a failure on the final round is fatal.
     printf 'No plan: the agent did not finish this round.\n' >"$PLAN_FILE"
@@ -554,6 +703,7 @@ for ((round = 1; round <= MAX_ITERATIONS; round++)); do
   # Nor may an earlier round's failure message outlive this one: if the gates
   # now pass, the outcome reported at the end must describe the latest round.
   outcome=""
+  timer_stop "agent-round-$round"
 
   verdict=$(read_verdict)
   if [[ "$verdict" != ERROR ]]; then
@@ -616,7 +766,16 @@ $(tail -n 40 "$ART/gates-$round.txt" 2>/dev/null || printf '(gate log missing)')
 
   [[ -n "${AGENT_NOTE:-}" ]] && action+=" $AGENT_NOTE"
   append_round "$round" "$verdict" "$action" "$PLAN_FILE"
-  post_comment "$COMMENT_FILE" || warn "could not post the PR comment (read-only token?)"
+
+  # Only post comment on: round 1, last round, errors, or when we break early
+  is_last_round=$(( round == MAX_ITERATIONS ))
+  is_error_round=false
+  case $verdict in
+    ERROR) is_error_round=true ;;
+  esac
+  if [[ $round -eq 1 || $is_last_round == 1 || $is_error_round == true ]]; then
+    post_comment "$COMMENT_FILE" || warn "could not post the PR comment (read-only token?)"
+  fi
 
   # A protected path must never survive to the push, and it is worth
   # retrying rather than treating the round as reviewed.
@@ -673,6 +832,8 @@ elif [[ -z "$outcome" ]]; then
   outcome="🛑 iteration cap reached — findings above may remain"
 fi
 
+timer_stop "total"
+
 {
   echo "### Outcome"
   echo
@@ -688,6 +849,18 @@ fi
 post_comment "$COMMENT_FILE" || warn "final comment could not be posted"
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
   cat "$COMMENT_FILE" >>"$GITHUB_STEP_SUMMARY"
+  if [[ -s "$ART/timing.log" ]]; then
+    {
+      echo
+      echo '<details><summary>Phase timings</summary>'
+      echo
+      echo '```'
+      cat "$ART/timing.log"
+      echo '```'
+      echo
+      echo '</details>'
+    } >>"$GITHUB_STEP_SUMMARY"
+  fi
 fi
 
 banner "result: $outcome (exit $status_overall)"
