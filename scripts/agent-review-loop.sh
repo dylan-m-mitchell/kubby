@@ -238,7 +238,14 @@ write_diff() {
     fi
   fi
   if ! git diff --merge-base "$PR_BASE_SHA" HEAD >"$out" 2>/dev/null; then
-    git diff "$PR_BASE_SHA" HEAD >"$out" 2>/dev/null || git diff HEAD >"$out"
+    git diff "$PR_BASE_SHA" HEAD >"$out" 2>/dev/null ||
+      # Last resort: leave the file empty rather than fall back to
+      # `git diff HEAD`, which shows worktree changes against HEAD, not the
+      # PR. On a dirty tree that is a non-empty file full of the *previous
+      # round's* leftovers, and the agent would review it as if it were the
+      # PR's diff. An empty file trips DIFF_EMPTY, which makes the agent say
+      # so and report BLOCKED — the safe way to be wrong.
+      : >"$out"
   fi
   if [[ "$DRY_RUN" != 1 && ! -s "$out" ]]; then
     DIFF_EMPTY=true
@@ -575,7 +582,10 @@ agent_logged_transport_error() {
 build_prompt() {
   local round=$1 dirty_count extra="" diff_lines=""
   dirty_count=$(git status --porcelain | wc -l)
-  diff_lines=$(wc -l <"$ART/pr.diff" 2>/dev/null | tr -d '[:space:]')
+  # `|| true` is load-bearing: without it a missing pr.diff fails the
+  # redirection, the assignment returns non-zero, and `set -e` kills the round
+  # before the fallback below can run. The redirect error still prints.
+  diff_lines=$(wc -l <"$ART/pr.diff" 2>/dev/null | tr -d '[:space:]' || true)
   [[ -n "$diff_lines" ]] || diff_lines=0
   [[ $dirty_count -gt 0 ]] && extra=" — leftovers from an earlier round, yours to finish or discard"
   [[ "$REVIEW_ONLY" == true ]] && extra+=$'\n- Review only: this PR is from a fork, so you may not change files. Plan, then verdict CLEAN or BLOCKED.'

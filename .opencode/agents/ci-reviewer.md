@@ -39,10 +39,17 @@ permissions:
   - action: edit
     resource: "*/.github/*"
     effect: deny
-  # The edit rules are not the whole story: `edit`/`write`/`patch` are
-  # denied, but a shell redirect would slip past them, so shell text naming
-  # a workflow path is denied too. Workflows still arrive in the PR diff, so
-  # they can be reviewed — just not read around, and never written.
+  # The single `edit` deny above already covers all three mutation tools.
+  # OpenCode's V2 permissions define `edit` as the action for the edit,
+  # write and patch tools, so there is no separate `write` or `patch` action
+  # to deny and adding rules for them would be dead config. This has been
+  # raised as a missing-deny bug in review more than once; it is not one, and
+  # the V2 permissions reference is the authority.
+  #
+  # The edit rules are not the whole story, though: a shell redirect slips
+  # past them, so shell text naming a workflow path is denied too. Workflows
+  # still arrive in the PR diff, so they can be reviewed — just not read
+  # around, and never written.
   - action: shell
     resource: "*.github/*"
     effect: deny
