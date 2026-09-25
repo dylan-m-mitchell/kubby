@@ -390,7 +390,7 @@ class TestImageFilter:
 
 
 class TestNumberKeyTabs:
-    """1-4 jump straight to a panel; tab still cycles as before."""
+    """1-4 jump straight to a panel; tab is inert."""
 
     async def test_each_number_jumps_to_its_panel(self, fake_service):
         app = KubbyApp(service=fake_service)
