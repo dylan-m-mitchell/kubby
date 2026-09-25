@@ -285,13 +285,12 @@ class KubbyService:
             match = self._EXIT_RE.search(line)
             if match:
                 reason = f"{match.group(1)}: {match.group(2)}"
-            elif self._DELETE_ADVICE in line:
+            if self._DELETE_ADVICE in line:
                 advice = "minikube delete, then start again"
         if reason:
             self._emit(f"  failed at: {reason}")
         if advice:
             self._emit(f"  try: {advice}")
-
 
     def start_minikube(self) -> dict[str, Any]:
         """Kick off ``minikube start`` using the persisted settings."""
