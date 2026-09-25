@@ -151,7 +151,8 @@ class FakeService:
             "version": info.get("version"),
             "nodes": [dict(n) for n in self.cluster["nodes"]],
             "namespaces": [
-                {**ns, "pods": [dict(p) for p in ns.get("pods", [])]}
+                {**ns, "pods": [{"namespace": ns.get("name") or "default", **pod}
+                                for pod in ns.get("pods", [])]}
                 for ns in self.cluster["namespaces"]
             ],
             "services": [dict(s) for s in self.services],
