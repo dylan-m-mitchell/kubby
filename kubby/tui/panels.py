@@ -64,6 +64,10 @@ class PanelBase:
     DEFAULT_CLASSES = "panel"
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Set the border title, prefixing its jump key when assigned.
+
+        Pass positional and keyword arguments to the widget constructor.
+        """
         super().__init__(*args, **kwargs)
         # A Text, not a markup string: Textual renders a border title
         # literally, so "[bold]1[/]" would show up as those characters.

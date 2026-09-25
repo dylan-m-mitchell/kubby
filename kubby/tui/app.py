@@ -224,6 +224,7 @@ class KubbyApp(App[None]):
     # ----- compose / lifecycle -----------------------------------------
 
     def get_default_screen(self) -> PanelScreen:
+        """Create the main screen without Tab or Shift+Tab focus cycling."""
         return PanelScreen(id="_default")
 
     @property
@@ -542,7 +543,11 @@ class KubbyApp(App[None]):
         self.screen.set_focus(self.query_one(selector))
 
     def action_focus_panel(self, selector: str) -> None:
-        """Bound from ``APP_KEYS`` as ``focus_panel('#id')``."""
+        """Focus the panel selected by a number-key binding.
+
+        ``selector`` is a Textual CSS selector such as ``#images``.
+        ``NoMatches`` propagates if it matches no widget.
+        """
         self._focus_panel(selector)
 
     def action_recheck(self) -> None:
