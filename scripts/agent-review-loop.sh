@@ -546,13 +546,17 @@ run_agent() {
 # failure. Scoped to the current attempt so a retried round does not report
 # the first attempt's error as its own.
 #
-# Anchored to the start of a line, after ANSI colour codes are stripped. That
-# matters twice over: opencode writes the error as `Error:` + escape +
-# `Transport:`, so the escape has to go before the two halves can be matched
-# as one; and a review that merely *quotes* a transport failure — this file's
-# own comments do — must not be mistaken for one, or a perfectly good round
-# gets needlessly retried. The raw socket messages are unambiguous enough to
-# match on their own.
+# The first alternative is anchored to the start of a line, after ANSI colour
+# codes are stripped, because opencode writes its error as `Error:` + escape +
+# `Transport:` — the escape has to go before the two halves match as one, and
+# anchoring is what stops a review that merely *quotes* a transport failure
+# from triggering a pointless retry.
+#
+# The two raw socket messages are deliberately NOT anchored. They are
+# distinctive enough that a false positive is unlikely, and a real error is
+# more likely to be reported mid-line ("...: socket connection was closed")
+# than at the start. The asymmetry is intentional: a false positive costs one
+# retry, a false negative costs the round.
 agent_logged_transport_error() {
   local log=$1 mark=$2
   tail -c "+$((mark + 1))" "$log" 2>/dev/null |
