@@ -375,8 +375,14 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
     for ing in cluster.get("ingresses") or []:
         if not isinstance(ing, dict):
             continue
-        hosts = ", ".join(sorted({str(r.get("host") or "*") for r in ing.get("rules") or [] if isinstance(r, dict)})) or "*"
         namespace = str(ing.get("namespace") or "default")
+        if namespace not in kept:
+            # Same rule as services: an Ingress in an omitted namespace
+            # would leave a box with no frame to sit in, since no container
+            # is built for omitted namespaces below. Drawing it would orphan
+            # it — never placed, its edge silently dropped.
+            continue
+        hosts = ", ".join(sorted({str(r.get("host") or "*") for r in ing.get("rules") or [] if isinstance(r, dict)})) or "*"
         ing_id = _ingress_id(namespace, str(ing.get("name") or "?"))
         diagram.add(
             Node(

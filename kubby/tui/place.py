@@ -145,11 +145,17 @@ def place(diagram: Diagram, width: int) -> Placement:
             x = 0
 
         offset = x + (GUTTER if x else 0)
-        frame = _emit(top, diagram, placement, offset, band_top, band, width)
+        # Emit into the width that is actually left on this band, not the
+        # full panel width: the contents wrap to *available*, so measuring
+        # wide and placing narrow would lay the frame out wider than the
+        # room it has and push the picture past the width asked for.
+        remaining = max(12, width - offset)
+        frame = _emit(top, diagram, placement, offset, band_top, band, remaining)
         if frame is None:
             continue
+        title = f" {top.label}" + (f" · {top.detail} " if top.detail else " ")
         placement.heading_right[band] = max(
-            placement.heading_right.get(band, 0), offset + len(top.label)
+            placement.heading_right.get(band, 0), offset + 2 + len(title)
         )
         band_bottom = max(band_bottom, frame.y + frame.height - 1)
         x = offset + frame.width
