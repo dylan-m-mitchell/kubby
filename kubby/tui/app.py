@@ -167,18 +167,46 @@ def render_status(
     return out
 
 
-def render_keybar(app: "KubbyApp") -> Text:
-    """Quoted keys + labels for every *shown* binding in play right now.
+def _is_global(binding: Any) -> bool:
+    """True for this app's own bindings, false for the focused panel's.
 
-    Derived from ``active_bindings`` rather than a hand-kept table, so the
-    bar always matches what a keypress would actually do — including
-    grayed-out (``enabled=False``) entries while a job is running.
+    Marked with an ``id`` when ``BINDINGS`` is built rather than inferred
+    from the key: a panel that later binds ``q`` would otherwise be
+    misfiled into the globals half of the keybar.
+    """
+    return str(getattr(binding, "id", "") or "").startswith("global:")
+
+
+def render_keybar(app: "KubbyApp") -> Text:
+    """Keys for the *focused panel* — the left-hand half of the keybar."""
+    out = Text()
+    first = True
+    for active in app.active_bindings.values():
+        binding = active.binding
+        if not binding.show or _is_global(binding):
+            continue
+        if not first:
+            out.append("   ")
+        first = False
+        key = app.get_key_display(binding)
+        out.append(f'"{key}"', style="bold cyan" if active.enabled else "dim")
+        if binding.description:
+            out.append(f" {binding.description}", style="dim")
+    return out
+
+
+def render_globals(app: "KubbyApp") -> Text:
+    """App-wide keys — pinned to the right so they never shift.
+
+    `?` and `q` used to slide left and right as the focused panel's own
+    keys came and went. Keeping them in their own region, right-aligned,
+    means they sit in the same place on every panel.
     """
     out = Text()
     first = True
     for active in app.active_bindings.values():
         binding = active.binding
-        if not binding.show:
+        if not binding.show or not _is_global(binding):
             continue
         if not first:
             out.append("   ")
@@ -196,7 +224,9 @@ class KubbyApp(App[None]):
     CSS_PATH = "styles.tcss"
     TITLE = "kubby"
     BINDINGS = [
-        Binding(key, action, description, show=show)
+        # The `global:` id is what tells the keybar renderer which half of
+        # the bar this binding belongs to — see `_is_global`.
+        Binding(key, action, description, show=show, id=f"global:{key}")
         for key, action, description, show in APP_KEYS
     ]
 
@@ -245,7 +275,13 @@ class KubbyApp(App[None]):
             placeholder="filter images — enter applies, esc clears",
             id="filter-bar",
         )
-        yield Static("", id="keybar")
+        # Two regions in one row: the focused panel's keys on the left, the
+        # app-wide keys pinned to the right edge. One bar rendered both in a
+        # single line made `?` and `q` slide left and right every time the
+        # panel's own key count changed.
+        with Horizontal(id="keybar-row"):
+            yield Static("", id="keybar")
+            yield Static("", id="keybar-globals")
 
     def on_mount(self) -> None:
         # `Widget.focus()` only schedules the change (call_later), which
@@ -343,12 +379,14 @@ class KubbyApp(App[None]):
 
     def _update_keybar(self) -> None:
         try:
-            bar = self.query_one("#keybar", Static)
+            panel_bar = self.query_one("#keybar", Static)
+            globals_bar = self.query_one("#keybar-globals", Static)
         except NoMatches:
             # Focus can land while compose is still mounting widgets;
             # `on_mount` runs this again once everything is in place.
             return
-        bar.update(render_keybar(self))
+        panel_bar.update(render_keybar(self))
+        globals_bar.update(render_globals(self))
 
     # ----- job lifecycle -------------------------------------------------
 

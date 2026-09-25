@@ -16,7 +16,13 @@ from kubby.tui.popups import ConfirmModal, HelpScreen, PrereqModal
 
 
 def keybar(app: KubbyApp) -> str:
+    """The left half: the focused panel's own keys."""
     return str(app.query_one("#keybar", Static).content)
+
+
+def globals_bar(app: KubbyApp) -> str:
+    """The right half: app-wide keys, pinned to the screen edge."""
+    return str(app.query_one("#keybar-globals", Static).content)
 
 
 def status(app: KubbyApp) -> str:
@@ -111,7 +117,7 @@ class TestMinikubeActions:
             # Output streams from a service thread while the job runs.
             fake_service.on_log("$ minikube start --driver=podman")
             assert await wait_until(lambda: log.history[-1:] == ["$ minikube start --driver=podman"])
-            assert '"x" hide log' in keybar(app)
+            assert '"x" hide log' in globals_bar(app)
 
             fake_service.finish_job(ok=True)
             assert await wait_until(lambda: not app.busy)
@@ -346,7 +352,7 @@ class TestImageFilter:
             # has focus, so it can't re-trigger itself mid-query — and the
             # keybar switches to the key that actually closes the bar.
             assert '"/" filter' not in keybar(app)
-            assert '"esc" close filter' in keybar(app)
+            assert '"esc" close filter' in globals_bar(app)
 
             # q / x / R are ordinary characters while typing — none of them
             # may quit, dismiss the log or re-check the host.
@@ -788,18 +794,23 @@ class TestKeybarAndHelp:
         async with app.run_test(size=(100, 40)) as pilot:
             await wait_until(lambda: app.system)
 
+            # Panel keys live on the left; the app-wide ones on the right.
             text = keybar(app)
+            glob = globals_bar(app)
             for expected in ('"s" start', '"R" re-check', '"?" help', '"q" quit'):
-                assert expected in text, expected
+                haystack = text if expected.startswith('"s"') else glob
+                assert expected in haystack, expected
             assert '"i" install' not in text
             assert '"S" stop' not in text  # cluster is down: nothing to stop
-            assert '"x" hide log' not in text  # idle: nothing to dismiss
+            assert '"x" hide log' not in glob  # idle: nothing to dismiss
 
             app.query_one(ToolsPanel).focus()
             await pilot.pause()
             text = keybar(app)
             assert '"i" install' in text and '"I" install all' in text
             assert '"s" start' not in text
+            # The globals are unchanged by the panel switch.
+            assert '"?" help' in globals_bar(app) and '"q" quit' in globals_bar(app)
 
             # Keys that are greyed out stay listed but visibly disabled.
             app.query_one(MinikubePanel).focus()
@@ -808,6 +819,34 @@ class TestKeybarAndHelp:
             assert await wait_until(lambda: app.busy)
             assert app.active_bindings["s"].enabled is False
             assert '"s" start' in keybar(app)
+
+    async def test_globals_hold_still_while_panels_change(self, fake_service):
+        # The reason the keybar is split: `?` and `q` used to slide left and
+        # right as the focused panel's key count changed, because they shared
+        # one line with those keys. They are pinned to the right edge now, so
+        # their screen position must be identical on every panel.
+        fake_service.cluster["running"] = False
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.system)
+            bar = app.query_one("#keybar-globals", Static)
+
+            seen = set()
+            panel_keys = set()
+            for panel_cls in (MinikubePanel, ToolsPanel, ImagesPanel, ClusterPanel):
+                app.query_one(panel_cls).focus()
+                await pilot.pause()
+                await pilot.pause()
+                region = bar.region
+                seen.add((region.x, region.width, region.x + region.width))
+                # ...while the left half genuinely does change.
+                panel_keys.add(str(app.query_one("#keybar", Static).content))
+
+            assert len(seen) == 1, f"globals moved between panels: {seen}"
+            _, _, right_edge = seen.pop()
+            assert right_edge == app.screen.size.width, right_edge
+            # Panels do differ, so this is not passing vacuously.
+            assert len(panel_keys) > 1, panel_keys
 
     async def test_help_lists_every_panel(self, fake_service):
         app = KubbyApp(service=fake_service)

@@ -60,9 +60,19 @@ Screen {
 }
 
 /* keybar ------------------------------------------------------------ */
-#keybar {
+#keybar-row {
     height: 1;
     background: $strip-bg;
+}
+/* 1fr on the left pushes the globals to the far right, so `?` and `q` hold
+   the same position on every panel instead of sliding as the panel's own
+   keys come and go. */
+#keybar {
+    width: 1fr;
+    padding: 0 1;
+}
+#keybar-globals {
+    width: auto;
     padding: 0 1;
 }
 
