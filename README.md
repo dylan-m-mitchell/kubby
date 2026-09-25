@@ -117,16 +117,32 @@ output straight back to the agent, and a round whose agent crashes is retried
 by the next round instead of aborting the run. A preflight probe runs the real
 agent on a throwaway `git status` first, so a dead model endpoint or a
 misconfigured permission file fails the job in about a minute instead of
-spending every round's budget discovering it.
+spending every round's budget discovering it. A round also *ends* as soon as
+its plan and verdict files exist, so a model that keeps summarising after
+finishing is not billed for it.
 
+- **Cost: nothing.** With no secret and no repository variable the loop reviews
+  on `opencode/muse-spark-1.3-contributor-free` — a free model, and the
+  supported configuration rather than a fallback. That default was chosen by
+  running all six free OpenCode models through this loop on the same review
+  task: two of them (`mimo-v2.6-flash-free`, the previous default, and
+  `nemotron-3.5-lightning-free`) drop the connection and return no verdict at
+  all, and a third (`ling-3.0-flash-fin-free`) edits files it was told to
+  leave alone. Set `REVIEW_MODEL` to pin a different free model, or add the
+  `OPENCODE_API_KEY` secret (an OpenCode Console service-account key) to use a
+  paid one. Fork PRs never see a secret either way.
+- **Free models drop connections.** That is routine, not a finding about your
+  PR, and the loop treats it that way: a round that lost its socket is retried
+  once, and if it happens again the round is reported as an infrastructure
+  failure — "nothing was reviewed, nothing was changed" — rather than as a
+  crashed agent. Only a verdict stops the round early; a transport blip never
+  turns into a finding.
 - **Opt out:** open the PR as a draft, add the `skip-agent-review` label,
   then mark it ready for review. Labels are only read when the workflow
   starts — on open/reopen/ready-for-review — so the label must already be
-  on the PR at that moment; adding it later never takes effect.
-- **Model:** set the `REVIEW_MODEL` repository variable to choose one.
-  Without it, adding the `OPENCODE_API_KEY` secret (an OpenCode Console
-  service-account key) selects a paid model; with neither, the loop falls
-  back to a free model so it still runs.
+  on the PR at that moment; adding it later never takes effect. The same
+  applies to the loop as a whole: it does not re-run on a plain push, so a
+  hand-pushed fix is not re-reviewed until the PR is closed and reopened.
 - **Guardrails:** the agent never commits or pushes — the script owns every
   GitHub action — and it cannot write `.github/` or its own permission file,
   cannot `curl`/`wget`/fetch/search, and stays inside the worktree. Denials

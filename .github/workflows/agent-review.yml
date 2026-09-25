@@ -12,17 +12,23 @@ name: Agent review loop
 # itself before every push: the gates it enforces are the gates the PR would
 # have gotten from CI on a human push.
 #
-# Setup: add the OPENCODE_API_KEY repository secret (OpenCode Console
-# service-account key) to enable paid models. Without it the loop still runs
-# on a free model. Set the REVIEW_MODEL repository variable to pick a model
-# explicitly. Draft PRs and PRs labelled skip-agent-review are not reviewed;
-# fork PRs are reviewed but never edited or pushed to (read-only token).
+# Setup: none. With no secret and no variable the loop reviews on a free
+# OpenCode model, which is the supported configuration — it costs nothing and
+# needs no account. Set the REVIEW_MODEL repository variable to pin a
+# different free model, or add the OPENCODE_API_KEY repository secret (an
+# OpenCode Console service-account key) to use a paid one. Draft PRs and PRs
+# labelled skip-agent-review are not reviewed; fork PRs are reviewed but never
+# edited or pushed to (read-only token), and never see a secret.
 #
-# Two details worth knowing when reading the logs: the script re-executes a
-# copy of itself outside the worktree (bash parses a script as it runs, so an
-# agent edit landing mid-run would otherwise corrupt the parse), and a round
-# whose agent crashes or times out is retried by the next round rather than
-# aborting the job.
+# Free models drop connections as a matter of course, so a round that lost its
+# socket is retried once and, if it happens again, reported as an
+# infrastructure failure rather than a finding about the PR. Three details
+# worth knowing when reading the logs: the script re-executes a copy of itself
+# outside the worktree (bash parses a script as it runs, so an agent edit
+# landing mid-run would otherwise corrupt the parse), a round ends as soon as
+# its plan and verdict files exist rather than at the wall clock, and a round
+# that fails outright is retried by the next round rather than aborting the
+# job.
 #
 # Threat model, stated plainly: this runs on `pull_request`, so the workflow,
 # the loop script and the agent's permission file come from the branch under

@@ -27,6 +27,8 @@
 #   REVIEW_MODEL      overrides the model that would otherwise be picked
 #   MAX_ITERATIONS    default 2
 #   PROBE_TIMEOUT     preflight budget, default 120
+#   TRANSPORT_RETRIES retries per round after a dropped model connection,
+#                     default 1, clamped to 3
 #   AGENT_ROUND_TIMEOUT  per-round wall clock, default 180
 #   PUSH_FIXES        "false" for fork PRs: review-only, no edits, no pushes
 #   DRY_RUN           "1": stub the agent, skip gh calls and pushes (testing)
@@ -96,15 +98,52 @@ DRY_RUN=${DRY_RUN:-0}
 REVIEW_ONLY=false
 [[ "$PUSH_FIXES" == "false" ]] && REVIEW_ONLY=true
 
-# No Console key yet -> fall back to a free model so the loop still runs.
-# A REVIEW_MODEL from repo variables always wins.
+# Model choice. A REVIEW_MODEL from repo variables always wins, then a Console
+# key, and otherwise a free model — no key and no spend is the supported
+# configuration, not a degraded one.
+#
+# The free default was picked by measurement, not by taste. All six free
+# OpenCode models were run through this loop on the same review task (a real
+# one-line regression in kubby/images.py, gates green, three runs each for the
+# finalists):
+#
+#   muse-spark-1.3-contributor-free  rounds 28/27/28s  3/3 correct  <- this
+#   space-bunny-free                rounds 26/23/26s  3/3 correct
+#   big-pickle                      rounds 66s         correct, slow
+#   ling-3.0-flash-fin-free         rounds 17s         EDITED FILES while
+#                                                          told review-only
+#   mimo-v2.6-flash-free            no verdict        transport error
+#   nemotron-3.5-lightning-free     no verdict        transport error
+#
+# The old default, mimo-v2.6-flash-free, is one of the two that simply does
+# not work: it drops the connection mid-review and returns nothing. That is
+# what made this loop look broken, and it cost 26 minutes to find out.
+# ling was the fastest but edited files it was told not to touch, so it was
+# disqualified — the script had to revert it. The two finalists were within
+# noise on round time; muse-spark won on end-to-end consistency (120s total
+# across three runs against 184s, and a 3s preflight against 45-52s).
+#
+# Re-measure with scripts/… if the free lineup changes: the point is that this
+# line is evidence, not a preference.
 if [[ -n "${REVIEW_MODEL:-}" ]]; then
   :
 elif [[ -n "${OPENCODE_API_KEY:-}" ]]; then
   REVIEW_MODEL=opencode/claude-sonnet-4-6
 else
-  REVIEW_MODEL=opencode/mimo-v2.6-flash-free
+  REVIEW_MODEL=opencode/muse-spark-1.3-contributor-free
 fi
+
+# A dropped connection is retried this many times per round. Defaulted first,
+# then validated, because it lands in arithmetic under `set -u`/`set -e`: an
+# unset, non-numeric or absurd value would abort the script or turn one round
+# into a retry storm.
+TRANSPORT_RETRIES=${TRANSPORT_RETRIES:-1}
+case "$TRANSPORT_RETRIES" in
+  *[!0-9]*) TRANSPORT_RETRIES=1 ;;
+esac
+# `if` rather than `((...)) && ...`: the arithmetic form exits non-zero when
+# the test is false, which is a fatal command under `set -e`.
+if ((TRANSPORT_RETRIES > 3)); then TRANSPORT_RETRIES=3; fi
 
 # Scratch space lives inside the worktree (and is gitignored) so that the
 # agent's permission set can close the filesystem around the repository
@@ -129,6 +168,10 @@ COMMENT_FILE="$ART/comment.md"
 
 banner() { printf '\n\033[1;35m── %s \033[0m\n' "$*"; }
 warn() { printf '\033[1;33m! %s\033[0m\n' "$*" >&2; }
+
+# SGR colour/escape sequences as a sed pattern. opencode's output is
+# colourised, so anything matching its text has to see through the escapes.
+ANSI_RE=$'\033\\[[0-9;]*m'
 
 # Phase timing. Uses bash's EPOCHREALTIME (bash 5, always present on the
 # runner) rather than `bc`, which is not guaranteed to be installed, and
@@ -343,6 +386,7 @@ read_verdict() {
 run_agent() {
   local prompt=$1 round=$2
   AGENT_NOTE=""
+  AGENT_ROUND_CAUSE=""
 
   if [[ "$DRY_RUN" == 1 ]]; then
     # Local stand-in for the agent: round 1 changes something and later
@@ -385,75 +429,142 @@ run_agent() {
   # No pipe to tee: `$!` on a pipeline is the *last* stage's pid, not the
   # agent's, and killing the wrong one leaves opencode running. Output goes
   # to a log file that is dumped to the job log when the round ends.
+  #
+  # A dropped connection gets one retry, and only a dropped connection. On a
+  # free model this is routine rather than exceptional — the socket has been
+  # observed closing mid-review — and re-sending the identical prompt is far
+  # cheaper than failing the PR. A model that answers and then gets the
+  # review wrong is not retried; that is a verdict, not an outage.
+  local attempt=0 max_attempts
+  max_attempts=$((1 + TRANSPORT_RETRIES))
   local rc=0
-  env -u GH_TOKEN -u GITHUB_TOKEN -u GH_TOKEN_FILE \
-    opencode run --standalone --auto \
-      --agent ci-reviewer \
-      --model "$REVIEW_MODEL" \
-      --title "PR #$PR_NUMBER review (round $round)" \
-      "${attach[@]}" \
-      "$prompt" >"$ART/agent-$round.log" 2>&1 &
-  local agent_pid=$!
-
-  local deadline=$((SECONDS + AGENT_ROUND_TIMEOUT))
-  local finished_early=false timed_out=false
-  while kill -0 "$agent_pid" 2>/dev/null; do
-    if [[ -s "$PLAN_FILE" && -s "$VERDICT_FILE" ]]; then
-      finished_early=true
-      break
+  while ((attempt < max_attempts)); do
+    attempt=$((attempt + 1))
+    # Per attempt, not per round: `wait ... || rc=$?` only assigns on failure,
+    # so without this a retry that succeeds inherits the previous attempt's
+    # non-zero code and `return $rc` fails a round that actually worked.
+    rc=0
+    local log="$ART/agent-$round.log"
+    # Attempts append to one log; `mark` is where this attempt starts so a
+    # transport error from a previous attempt is not mistaken for this one.
+    local mark
+    mark=$(wc -c <"$log" 2>/dev/null || echo 0)
+    if ((attempt > 1)); then
+      printf '\n--- transport retry %s/%s ---\n' "$attempt" "$max_attempts" >>"$log"
+      # A half-written plan or verdict from the dropped attempt must not be
+      # mistaken for this attempt's output — the watch loop below treats both
+      # files existing as "the round is done".
+      rm -f "$PLAN_FILE" "$VERDICT_FILE"
     fi
-    if ((SECONDS >= deadline)); then
-      timed_out=true
-      break
-    fi
-    sleep 2
-  done
 
-  if [[ "$finished_early" == true || "$timed_out" == true ]]; then
-    local grace=$((SECONDS + ${AGENT_FINISH_GRACE:-20}))
-    while kill -0 "$agent_pid" 2>/dev/null && ((SECONDS < grace)); do sleep 1; done
-    if kill -0 "$agent_pid" 2>/dev/null; then
-      if [[ "$finished_early" == true ]]; then
-        AGENT_NOTE="⏱ Stopped ${AGENT_FINISH_GRACE:-20}s after the plan and verdict were written — the model was still going."
-        warn "round $round wrote both output files; stopping the agent after the grace period"
-      else
-        warn "round $round hit the ${AGENT_ROUND_TIMEOUT}s limit; stopping the agent"
+    env -u GH_TOKEN -u GITHUB_TOKEN -u GH_TOKEN_FILE \
+      opencode run --standalone --auto \
+        --agent ci-reviewer \
+        --model "$REVIEW_MODEL" \
+        --title "PR #$PR_NUMBER review (round $round)" \
+        "${attach[@]}" \
+        "$prompt" >>"$log" 2>&1 &
+    local agent_pid=$!
+
+    local deadline=$((SECONDS + AGENT_ROUND_TIMEOUT))
+    local finished_early=false timed_out=false
+    while kill -0 "$agent_pid" 2>/dev/null; do
+      if [[ -s "$PLAN_FILE" && -s "$VERDICT_FILE" ]]; then
+        finished_early=true
+        break
       fi
-      kill -TERM "$agent_pid" 2>/dev/null || true
+      if ((SECONDS >= deadline)); then
+        timed_out=true
+        break
+      fi
       sleep 2
-      kill -KILL "$agent_pid" 2>/dev/null || true
-    fi
-  fi
-  wait "$agent_pid" 2>/dev/null || rc=$?
-  cat "$ART/agent-$round.log" >&2 || true
+    done
 
-  if [[ "$finished_early" == true ]]; then
-    return 0
-  fi
-  if [[ "$timed_out" == true || $rc -eq 124 || $rc -eq 137 ]]; then
-    if [[ -s "$VERDICT_FILE" ]]; then
-      [[ -n "$AGENT_NOTE" ]] ||
-        AGENT_NOTE="⏱ Ran into the ${AGENT_ROUND_TIMEOUT}s round limit — the plan above is what the agent had written by then."
-      warn "round $round hit the ${AGENT_ROUND_TIMEOUT}s limit; using the verdict already written"
+    if [[ "$finished_early" == true || "$timed_out" == true ]]; then
+      local grace=$((SECONDS + ${AGENT_FINISH_GRACE:-20}))
+      while kill -0 "$agent_pid" 2>/dev/null && ((SECONDS < grace)); do sleep 1; done
+      if kill -0 "$agent_pid" 2>/dev/null; then
+        if [[ "$finished_early" == true ]]; then
+          AGENT_NOTE="⏱ Stopped ${AGENT_FINISH_GRACE:-20}s after the plan and verdict were written — the model was still going."
+          warn "round $round wrote both output files; stopping the agent after the grace period"
+        else
+          warn "round $round hit the ${AGENT_ROUND_TIMEOUT}s limit; stopping the agent"
+        fi
+        kill -TERM "$agent_pid" 2>/dev/null || true
+        sleep 2
+        kill -KILL "$agent_pid" 2>/dev/null || true
+      fi
+    fi
+    wait "$agent_pid" 2>/dev/null || rc=$?
+    # This attempt's slice only, so a retried round does not dump the failed
+    # attempt twice. `>&2` puts it in the job log; stderr stays live so a
+    # missing file is still visible.
+    tail -c "+$((mark + 1))" "$log" >&2 || true
+
+    if [[ "$finished_early" == true ]]; then
       return 0
     fi
-    warn "round $round hit the ${AGENT_ROUND_TIMEOUT}s limit with no verdict"
-    return 1
-  fi
-  # A non-zero exit *after* both files were written is the free model's
-  # favourite way to end a round — a dropped socket while composing the
-  # summary. The work is done and the gates are the arbiter of whether it is
-  # any good, so the round counts instead of being retried from scratch.
-  if [[ $rc -ne 0 && -s "$PLAN_FILE" && -s "$VERDICT_FILE" ]]; then
-    warn "round $round exited $rc after writing both output files; counting the round"
-    return 0
-  fi
-  return $rc
+    if [[ "$timed_out" == true || $rc -eq 124 || $rc -eq 137 ]]; then
+      if [[ -s "$VERDICT_FILE" ]]; then
+        [[ -n "$AGENT_NOTE" ]] ||
+          AGENT_NOTE="⏱ Ran into the ${AGENT_ROUND_TIMEOUT}s round limit — the plan above is what the agent had written by then."
+        warn "round $round hit the ${AGENT_ROUND_TIMEOUT}s limit; using the verdict already written"
+        return 0
+      fi
+      warn "round $round hit the ${AGENT_ROUND_TIMEOUT}s limit with no verdict"
+      return 1
+    fi
+    # A non-zero exit *after* both files were written is the free model's
+    # favourite way to end a round — a dropped socket while composing the
+    # summary. The work is done and the gates are the arbiter of whether it is
+    # any good, so the round counts instead of being retried from scratch.
+    if [[ $rc -ne 0 && -s "$PLAN_FILE" && -s "$VERDICT_FILE" ]]; then
+      warn "round $round exited $rc after writing both output files; counting the round"
+      return 0
+    fi
+
+    # Nothing was written and the log names a transport failure: this is the
+    # endpoint, not the review. Retry once, and if it happens again let the
+    # round fail as an *infrastructure* failure so the PR comment says so.
+    if [[ ! -s "$VERDICT_FILE" ]] && agent_logged_transport_error "$log" "$mark"; then
+      AGENT_ROUND_CAUSE="transport"
+      if ((attempt < max_attempts)); then
+        warn "round $round: the model connection dropped; retrying ($attempt/$max_attempts)"
+        sleep 5
+        continue
+      fi
+      warn "round $round: the model connection dropped again; giving up on this round"
+      return 1
+    fi
+    AGENT_ROUND_CAUSE="agent"
+    return $rc
+  done
+  return 1
+}
+
+# True when the slice of *log* after byte offset *mark* mentions a transport
+# failure. Scoped to the current attempt so a retried round does not report
+# the first attempt's error as its own.
+#
+# Anchored to the start of a line, after ANSI colour codes are stripped. That
+# matters twice over: opencode writes the error as `Error:` + escape +
+# `Transport:`, so the escape has to go before the two halves can be matched
+# as one; and a review that merely *quotes* a transport failure — this file's
+# own comments do — must not be mistaken for one, or a perfectly good round
+# gets needlessly retried. The raw socket messages are unambiguous enough to
+# match on their own.
+agent_logged_transport_error() {
+  local log=$1 mark=$2
+  tail -c "+$((mark + 1))" "$log" 2>/dev/null |
+    sed "s/$ANSI_RE//g" |
+    grep -qiE '^[[:space:]]*(Error:[[:space:]]*)?(Transport:|fetch failed|stream closed)|socket connection was closed|ECONNRESET'
 }
 
 build_prompt() {
-  local round=$1 dirty_count extra=""
+  local round=$1 dirty_count extra="" diff_lines=""
   dirty_count=$(git status --porcelain | wc -l)
+  diff_lines=$(wc -l <"$ART/pr.diff" 2>/dev/null | tr -d '[:space:]')
+  [[ -n "$diff_lines" ]] || diff_lines=0
   [[ $dirty_count -gt 0 ]] && extra=" — leftovers from an earlier round, yours to finish or discard"
   [[ "$REVIEW_ONLY" == true ]] && extra+=$'\n- Review only: this PR is from a fork, so you may not change files. Plan, then verdict CLEAN or BLOCKED.'
   if [[ "$DIFF_EMPTY" == true ]]; then
@@ -476,11 +587,19 @@ $pr_body
 ## Where things stand
 - Base: $PR_BASE_SHA   Head: $(git rev-parse HEAD)
 - The PR diff is at $ART/pr.diff (also attached to this message unless it
-  is too large to attach)
+  is too large to attach) — $diff_lines lines
 - Working tree: $dirty_count path(s) already modified$extra
 - Scope: review the diff and the files it touches (plus their tests). Do
   not read workflows, docs or config the diff does not mention, and do not
   explore the repository structure — the diff is the assignment.
+
+## Spend the round on the diff, not on context
+Judge the changed lines against the code immediately around them. You do not
+need to understand the whole repository, and reading broadly is the most
+likely way to run out of round before writing anything down. If the diff is
+too large to review properly in one round, say so in the plan, review the
+highest-risk files first, and return BLOCKED — a partial honest review beats
+a complete-looking one you did not finish.
 ${feedback:-}
 
 ## Do not run the test suite
@@ -692,11 +811,30 @@ for ((round = 1; round <= MAX_ITERATIONS; round++)); do
     timer_stop "agent-round-$round"
     # A crashed round is not the end of the loop — the next round retries the
     # whole review from scratch, and only a failure on the final round is fatal.
+    #
+    # A dropped model connection is reported as what it is. Folding it into
+    # "the agent crashed, stalled, or hit its limit" made an infrastructure
+    # outage read like a problem with the PR, which is exactly backwards: the
+    # free models drop sockets routinely and the code under review is fine.
+    # Not `local`: this is the top-level loop body, not a function.
+    failure_note=""
+    failure_error=""
+    if [[ "${AGENT_ROUND_CAUSE:-}" == transport ]]; then
+      failure_note="**This round did not finish** — the model endpoint dropped the connection (twice). That is an infrastructure failure, not a finding about this PR: nothing was reviewed and nothing was changed. See \`agent-$round.log\`."
+      failure_error="the model endpoint dropped the connection during round $round/$MAX_ITERATIONS — nothing was reviewed (see agent-$round.log)"
+    else
+      failure_note="**This round did not finish** — the agent crashed or hit its ${AGENT_ROUND_TIMEOUT}s limit without writing a verdict."
+      failure_error="the agent did not finish round $round/$MAX_ITERATIONS — see the job log"
+    fi
     printf 'No plan: the agent did not finish this round.\n' >"$PLAN_FILE"
-    agent_error="the agent did not finish round $round/$MAX_ITERATIONS — see the job log"
-    append_round "$round" ERROR "**This round did not finish** — the agent crashed, stalled on the model connection, or hit its ${AGENT_ROUND_TIMEOUT}s limit." "$PLAN_FILE"
+    agent_error="$failure_error"
+    append_round "$round" ERROR "$failure_note" "$PLAN_FILE"
     post_comment "$COMMENT_FILE" || warn "could not post the PR comment (read-only token?)"
-    feedback="Round $round did not finish. Write the plan and verdict files first thing, then stop — no reading around before they exist."
+    if [[ "${AGENT_ROUND_CAUSE:-}" == transport ]]; then
+      feedback="The last attempt lost its model connection before writing anything. Write the plan and verdict files first thing, then stop — no reading around before they exist."
+    else
+      feedback="Round $round did not finish. Write the plan and verdict files first thing, then stop — no reading around before they exist."
+    fi
     continue
   fi
   agent_error="" # this round completed; an earlier failure no longer counts
