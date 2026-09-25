@@ -256,58 +256,50 @@ class TestDiagram:
         its name once per disconnected piece."""
         built = diagram.build_diagram(realistic())
         containers = {c.label: c for c in built.containers}
-        assert "default" in containers and "your computer" in containers
+        assert "default" in containers
         # six objects in the namespace, plus its Ingress
         assert len(containers["default"].members) == 7
 
+    def test_no_frame_wraps_the_whole_picture(self):
+        """`your computer` and `minikube` are gone.
+
+        The machine minikube made is not a box: the cluster panel's own
+        border is where the cluster starts, and the sidebar describes the
+        machine in words. A frame around everything said it twice and cost
+        the picture a row and six columns.
+        """
+        built = diagram.build_diagram(realistic())
+        labels = {c.label for c in built.containers}
+        assert "your computer" not in labels
+        assert "minikube" not in labels
+
     def test_containment_is_a_container_and_not_an_edge(self):
-        """minikube makes a machine *on* your computer and runs the cluster
-        inside it. That is containment, so it nests — a box inside a box. An
-        arrow would claim the two talk to each other, which is not what a
-        laptop and the VM inside it do."""
+        """A namespace contains its workloads, so it is a box they sit
+        inside; a Service points at the workload it backs, so it is a line
+        between them. Containment as adjacency would make the two look like
+        the same kind of fact."""
         built = diagram.build_diagram(realistic())
         by_id = {c.id: c for c in built.containers}
-        assert by_id["minikube"].parent == "computer"
-        assert by_id["ns:default"].parent == "minikube"
-        # The nesting itself carries the fact, so nothing is drawn as an
-        # edge between a thing and what holds it.
+        assert by_id["ns:default"].members
         for container in built.containers:
             assert not [e for e in built.edges if e[0] == container.id]
 
-    def test_everything_runs_inside_minikube(self):
-        """The correction this picture exists for: not three things side by
-        side at the top level, but your computer holding minikube holding
-        everything else. A namespace beside the node, as it was, says the
-        workloads are not on it."""
-        built = diagram.build_diagram(realistic())
-        top = built.ordered_containers()
-        assert [c.id for c in top] == ["computer"]
-        assert all(
-            c.parent == "minikube"
-            for c in built.containers
-            if c.id.startswith("ns:")
-        )
-
-    def test_one_node_is_minikube_rather_than_a_peer_of_it(self):
-        """A single-node cluster's node *is* the machine minikube made, so
-        its box belongs inside the minikube frame. With several nodes they
-        need a frame of their own, or the boxes would sit beside the
-        namespaces and look like peers of them."""
+    def test_one_node_is_described_in_words_not_drawn_as_a_box(self):
+        """A single node's box said what the sidebar's machine panel says,
+        twice over. With several nodes the boxes are needed — and so is the
+        frame, or node boxes beside the namespace frames would read as peers
+        of them rather than as the machines they run on."""
         model = realistic()
         model["node_facts"] = model["node_facts"][:1]
         model["nodes"] = model["nodes"][:1]
         one = diagram.build_diagram(model)
-        minikube = next(c for c in one.containers if c.id == "minikube")
-        assert minikube.members  # the node box, loose inside the frame
-        assert not one.children_of("minikube") or all(
-            c.id.startswith("ns:") for c in one.children_of("minikube")
-        )
+        assert "the nodes" not in {c.label for c in one.containers}
+        assert not [n for n in one.nodes.values() if n.role == "node"]
 
         two = diagram.build_diagram(realistic())
         by_id = {c.id: c for c in two.containers}
-        assert by_id["minikube"].members == []
-        assert by_id["nodes"].parent == "minikube"
-        assert len(by_id["nodes"].members) == 2
+        assert by_id["nodes"].members
+        assert len([n for n in two.nodes.values() if n.role == "node"]) == 2
 
     def test_nothing_outside_the_cluster_is_drawn(self):
         """No browser, no "you". The picture is of the cluster, not of an
@@ -398,11 +390,10 @@ class TestPlace:
         assert narrow.height > wide.height
         assert narrow.width <= wide.width
 
-    def test_containers_are_ordered_machine_first_your_code_last(self):
+    def test_containers_are_ordered_control_plane_first_your_code_last(self):
         built = diagram.build_diagram(realistic())
         order = [c.label for c in _reading_order(built)]
-        assert order[0] == "your computer"
-        assert order[1] == "minikube"
+        assert order[0] == "the nodes"
         # the control plane before the reader's own namespaces
         assert order.index("kube-system") < order.index("default")
 

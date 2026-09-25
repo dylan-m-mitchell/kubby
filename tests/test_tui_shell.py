@@ -18,14 +18,14 @@ from kubby.tui.panels import (
     ImagesPanel,
     LogPanel,
     MinikubePanel,
-    ToolsPanel,
+    MachinePanel,
     format_size,
 )
 from kubby.tui.popups import HelpScreen
 from helpers import wait_until
 from conftest import FakeService
 
-PANEL_IDS = ("minikube", "tools", "images", "cluster")
+PANEL_IDS = ("minikube", "machine", "images", "cluster")
 
 
 class TestShell:
@@ -35,7 +35,7 @@ class TestShell:
             await wait_until(lambda: fake_service.calls.count("get_cluster_info") > 0)
             await wait_until(lambda: app.system)
 
-            for widget_id in ("status", "keybar", "minikube", "tools", "images", "cluster"):
+            for widget_id in ("status", "keybar", "minikube", "machine", "images", "cluster"):
                 assert app.query_one(f"#{widget_id}") is not None
             assert isinstance(app.query_one("#log"), LogPanel)
 
@@ -115,7 +115,7 @@ class TestShell:
         # one test above only reaches it by way of the help overlay: a panel
         # that swallowed the key (an OptionList or Tree claiming printable
         # characters) would leave that test green and the app unquittable.
-        for panel_cls in (MinikubePanel, ToolsPanel, ImagesPanel, ClusterPanel):
+        for panel_cls in (MinikubePanel, MachinePanel, ImagesPanel, ClusterPanel):
             app = KubbyApp(service=FakeService())
             async with app.run_test(size=(100, 40)) as pilot:
                 await wait_until(lambda: app.system)
@@ -157,12 +157,10 @@ class TestShell:
     async def test_panels_render_service_data(self, fake_service):
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)):
-            await wait_until(lambda: app.images and app.tools)
+            await wait_until(lambda: app.images and app.cluster)
 
-            tools = app.query_one(ToolsPanel)
-            prompts = [str(option.prompt) for option in tools.options]
-            assert any("✓" in p and "minikube" in p for p in prompts)
-            assert any("✗" in p and "helm" in p for p in prompts)
+            machine = str(app.query_one(MachinePanel).query_one("#machine-body").content)
+            assert "minikube" in machine and "docker 27.1.1" in machine
 
             cluster = app.query_one(ClusterTree)
             labels = [str(node.label) for node in cluster.root.children]
@@ -210,8 +208,10 @@ class TestShell:
             assert "no cluster" in str(status.content)
             labels = [str(node.label) for node in app.query_one(ClusterTree).root.children]
             assert labels == ["no cluster"]
-            assert "no tools" in str(
-                next(iter(app.query_one(ToolsPanel).options)).prompt
+            # The reason, not just "nothing": a panel that shows an empty
+            # box looks like a machine with no specifications.
+            assert "kubectl not found on PATH" in str(
+                app.query_one(MachinePanel).query_one("#machine-body").content
             )
             assert "no local images" in str(
                 next(iter(app.query_one(ImagesPanel).options)).prompt

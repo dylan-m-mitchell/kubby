@@ -99,11 +99,14 @@ class Container:
     the same kind of fact, and makes the picture sprawl: a reader has to
     infer the grouping from proximity.
 
-    Containers nest, and the nesting is the point. From the minikube
-    documentation: minikube creates a VM or container *on your machine*, and
-    that VM *is* the node; everything else runs inside it. So the shape is
-    your computer → minikube → control plane and namespaces, and not three
-    things side by side at the top level.
+    Containers nest — *parent* is set and the layout places a child frame
+    inside its parent's — but nothing in the picture is nested just now. The
+    machine minikube made used to be two frames around everything, and both
+    are gone: the cluster panel's own border is where the cluster starts, and
+    the sidebar describes the machine in words. The support stays because
+    "the nodes" frame around several nodes is the same idea one level down,
+    and because a picture that cannot nest cannot show that a namespace is
+    inside something.
     """
 
     id: str
@@ -209,11 +212,15 @@ def _infra_name(name: str) -> str | None:
 def build_diagram(cluster: dict[str, Any]) -> Diagram:
     """Turn a cluster model into the boxes and edges to draw.
 
-    Order of business, and it is the order the picture reads in: the machine
-    you are on, the machine minikube made on it, what runs on that, and then
-    your own workloads and the services in front of them.
+    Order of business, and it is the order the picture reads in: the control
+    plane that makes the decisions, the cluster's own machinery, and then the
+    reader's own workloads and the services in front of them.
+
+    The machine minikube made is not one of the boxes. It is what the cluster
+    panel's own border is, and the sidebar describes it in words; drawing it
+    as well said the same thing three times over.
     """
-    from kubby.cluster import human_memory
+    from kubby.cluster import describe_node
 
     diagram = Diagram()
     if not cluster.get("available", True):
@@ -233,78 +240,25 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
     if not namespaces and not pods and not cluster.get("services") and not cluster.get("ingresses"):
         return diagram
 
-    # --- the host, then minikube, then the node ---------------------------
-    # From the minikube documentation: `minikube start` creates a VM or a
-    # container *on your machine*, and that VM *is* the cluster's node.
-    # Everything else — the control plane, DNS, your own workloads — runs
-    # inside it. So the nesting is
+    # --- the nodes, only when there is more than one --------------------
+    # A single-node cluster's node *is* the machine minikube made, and the
+    # sidebar's machine panel already describes it — its OS, its runtime, the
+    # share of CPU and memory a Pod can ask for. Drawing it as a box as well
+    # said the same thing twice and cost a frame.
     #
-    #     your computer  ->  minikube  ->  control plane, namespaces
-    #
-    # and not three things side by side. minikube and the node are one box
-    # because they are one machine; the node is simply the Kubernetes name
-    # for the thing minikube made.
+    # With several nodes the boxes are needed and the frame is needed to hold
+    # them: node boxes beside the namespace frames would read as peers of
+    # them, which they are not. They are the machines the namespaces run on.
     facts = cluster.get("node_facts") or []
-    driver = str(cluster.get("driver") or "").strip()
-    driver_text = f"{driver} driver" if driver else "auto driver"
-
-    diagram.contain(
-        Container(
-            id="computer",
-            label="your computer",
-            detail=driver_text,
-            rank=0,
-        )
-    )
-
-    if facts:
-        detail = str(cluster.get("version") or "")
-        if facts[0].get("internal_ip"):
-            detail = f"{detail} · {facts[0]['internal_ip']}".strip(" ·")
-
-        # The machine's own details go in a box inside the frame, not in the
-        # frame's title. A frame is only as wide as what it contains, and a
-        # 68-character title forced minikube out to 104 columns — wider than
-        # the panel it was supposed to fit in.
+    if len(facts) > 1:
         machine: list[str] = []
         for fact in facts:
-            lines = [str(fact.get("name") or "the machine")]
-            for extra in (
-                fact.get("os_image"),
-                fact.get("runtime"),
-                _capacity_text(fact, human_memory),
-                f"pod addresses from {fact['pod_cidr']}" if fact.get("pod_cidr") else "",
-            ):
-                if extra:
-                    lines.append(str(extra))
             node_id = _node_id(str(fact.get("name") or "?"))
-            diagram.add(Node(node_id, lines, "node", "minikube"))
+            diagram.add(Node(node_id, describe_node(fact), "node", "nodes"))
             machine.append(node_id)
-
-        # One node *is* minikube, so its box is a loose box of the minikube
-        # frame. With several it needs a frame of its own — otherwise the
-        # boxes would sit alongside the namespaces and look like peers of
-        # them, which they are not.
         diagram.contain(
-            Container(
-                id="minikube",
-                label="minikube",
-                parent="computer",
-                detail=detail,
-                rank=0,
-                members=machine if len(machine) == 1 else [],
-            )
+            Container(id="nodes", label="the nodes", members=machine, rank=0)
         )
-        if len(machine) > 1:
-            diagram.contain(
-                Container(
-                    id="nodes",
-                    label="the nodes",
-                    members=machine,
-                    parent="minikube",
-                    rank=0,
-                )
-            )
 
     # --- workloads, grouped into namespaces -----------------------------
     workloads: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -449,17 +403,15 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
         )
         if not members:
             continue
-        if name in CONTROL_PLANE_NAMESPACE:
-            rank, parent = 1, "minikube"
-        else:
-            rank, parent = (2 if name in INFRA_NAMESPACES else 3), "minikube"
         diagram.contain(
             Container(
                 id=f"ns:{name}",
                 label=name,
                 members=members,
-                parent=parent,
-                rank=rank,
+                # The control plane first, then the cluster's own machinery,
+                # then the reader's own namespaces.
+                rank=1 if name in CONTROL_PLANE_NAMESPACE
+                else (2 if name in INFRA_NAMESPACES else 3),
                 detail="static pods" if name in CONTROL_PLANE_NAMESPACE else "",
             )
         )
@@ -471,35 +423,6 @@ def _ready(pod: dict[str, Any]) -> bool:
     if "ready" in pod:
         return bool(pod["ready"])
     return pod.get("phase") in ("Running", "Succeeded")
-
-
-def _capacity_text(fact: dict[str, Any], human_memory: Any) -> str:
-    """``2 of 16 cpu, 2Gi of 15.6Gi`` — the share, and the whole.
-
-    Only the share is what a Pod may ask for, and on a 2-CPU minikube on a
-    16-CPU laptop the two differ sharply. Showing the host's figure alone is
-    how someone concludes the cluster is starved when it is not. Equal
-    values collapse rather than repeat.
-    """
-    def pair(allocatable: str, capacity: str, suffix: str = "") -> str:
-        if not allocatable and not capacity:
-            return ""
-        if allocatable == capacity:
-            return f"{allocatable}{suffix}"
-        return f"{allocatable or '?'} of {capacity or '?'}{suffix}"
-
-    parts = [
-        text
-        for text in (
-            pair(str(fact.get("allocatable_cpu") or ""), str(fact.get("capacity_cpu") or ""), " cpu"),
-            pair(
-                human_memory(fact.get("allocatable_memory") or ""),
-                human_memory(fact.get("capacity_memory") or ""),
-            ),
-        )
-        if text
-    ]
-    return ", ".join(parts)
 
 
 def _safe(text: str) -> str:

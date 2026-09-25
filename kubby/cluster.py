@@ -154,6 +154,66 @@ def parse_node_facts(payload: Any) -> list[dict[str, Any]]:
     return facts
 
 
+def node_share(fact: dict[str, Any]) -> str:
+    """``2 of 16 cpu, 2Gi of 15.6Gi`` — the share, and the whole.
+
+    Only the share is what a Pod may ask for, and on a 2-CPU minikube on a
+    16-CPU laptop the two differ sharply. Showing the host's figure alone is
+    how someone concludes the cluster is starved when it is not. Equal
+    values collapse rather than repeat.
+
+    Lives here, beside the parser that produces the fields, because two
+    places now describe a node — the graph's box and the sidebar readout —
+    and two copies of "the share and the whole" is two chances to report
+    only the whole.
+    """
+    def pair(allocatable: str, capacity: str, suffix: str = "") -> str:
+        if not allocatable and not capacity:
+            return ""
+        if allocatable == capacity:
+            return f"{allocatable}{suffix}"
+        return f"{allocatable or '?'} of {capacity or '?'}{suffix}"
+
+    parts = [
+        text
+        for text in (
+            pair(
+                str(fact.get("allocatable_cpu") or ""),
+                str(fact.get("capacity_cpu") or ""),
+                " cpu",
+            ),
+            pair(
+                human_memory(fact.get("allocatable_memory") or ""),
+                human_memory(fact.get("capacity_memory") or ""),
+            ),
+        )
+        if text
+    ]
+    return ", ".join(parts)
+
+
+def describe_node(fact: dict[str, Any]) -> list[str]:
+    """The lines that say what a node *is*, rather than what runs on it.
+
+    Its own operating system, its own container runtime, the address the
+    host reaches it on, the range pod addresses come from, and the share of
+    CPU and memory a Pod can actually ask for. That is the explanation for a
+    Pod stuck ``Pending`` with "insufficient cpu", and it is invisible in a
+    list of pods.
+    """
+    lines = [str(fact.get("name") or "the machine")]
+    for extra in (
+        fact.get("os_image"),
+        fact.get("runtime"),
+        node_share(fact),
+        f"pods from {fact['pod_cidr']}" if fact.get("pod_cidr") else "",
+        f"at {fact['internal_ip']}" if fact.get("internal_ip") else "",
+    ):
+        if extra:
+            lines.append(str(extra))
+    return lines
+
+
 def parse_pods(payload: Any) -> list[dict[str, Any]]:
     """Extract the pod fields the graph needs, including node and owner.
 

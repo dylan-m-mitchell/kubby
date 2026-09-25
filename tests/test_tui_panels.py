@@ -18,7 +18,7 @@ from kubby.tui.panels import (
     ImagesPanel,
     LogPanel,
     MinikubePanel,
-    ToolsPanel,
+    MachinePanel,
 )
 from kubby.tui.popups import ConfirmModal, HelpScreen, PrereqModal
 
@@ -202,46 +202,82 @@ class TestMinikubeActions:
             assert await wait_until(lambda: "delete_minikube" in fake_service.calls)
 
 
-class TestToolsPanelIsReadOnly:
-    """kubby no longer installs tools; the panel reports and points, nothing more."""
+class TestMachinePanel:
+    """The machine the cluster runs on, in words.
+
+    It took the tools panel's place. What it has to carry is the node's own
+    figures — the share of CPU and memory a Pod may ask for above all,
+    because that is the explanation for a Pod stuck Pending that a list of
+    pods cannot give.
+    """
 
     @staticmethod
-    def _rows(panel):
-        return [str(panel.get_option_at_index(i).prompt) for i in range(panel.option_count)]
+    def _text(app) -> str:
+        return str(app.query_one(MachinePanel).query_one("#machine-body").content)
 
-    async def test_missing_tool_names_where_to_get_it(self, fake_service):
+    async def test_it_names_the_machine_and_what_it_is(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)):
+            await wait_until(lambda: app.cluster)
+            text = self._text(app)
+            assert "minikube" in text
+            assert "Debian GNU/Linux 12 (bookworm)" in text
+            assert "docker 27.1.1" in text
+
+    async def test_it_carries_the_share_not_only_the_whole(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)):
+            await wait_until(lambda: app.cluster)
+            assert any(
+                "cpu" in line and "memory" not in line
+                for line in self._text(app).splitlines()
+            )
+
+    async def test_it_names_where_pod_addresses_come_from(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)):
+            await wait_until(lambda: app.cluster)
+            assert "10.244.0.0/16" in self._text(app)
+
+    async def test_a_node_that_is_not_ready_says_so(self, fake_service):
+        """The dot is the only difference between a cluster you can use and
+        one you cannot, and a panel that said nothing would look identical
+        either way."""
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)):
+            await wait_until(lambda: app.cluster)
+            assert "●" in self._text(app)
+            panel = app.query_one(MachinePanel)
+            panel.set_cluster(
+                {**app.cluster, "graph": {**(app.cluster.get("graph") or {}),
+                                          "node_facts": [
+                                              {**fact, "status": "NotReady"}
+                                              for fact in (app.cluster["graph"]
+                                                           or {}).get(
+                                                               "node_facts", [])
+                                          ]}}
+            )
+            assert "○" in self._text(app)
+
+    async def test_no_cluster_says_why_rather_than_nothing(self, fake_service):
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)):
             await wait_until(lambda: app.system)
-            rows = self._rows(app.query_one(ToolsPanel))
-            # helm is the missing one in FakeService.
-            assert "not installed" in rows[1]
-            assert "https://helm.sh/" in rows[1]
+            app.query_one(MachinePanel).set_cluster(
+                {"running": False, "error": "nope"}
+            )
+            assert "nope" in self._text(app)
 
-    async def test_installed_rows_carry_no_link(self, fake_service):
-        app = KubbyApp(service=fake_service)
-        async with app.run_test(size=(100, 40)):
-            await wait_until(lambda: app.system)
-            rows = self._rows(app.query_one(ToolsPanel))
-            assert "1.38.1" in rows[0] and "https://" not in rows[0]
-
-    async def test_navigates_but_i_and_I_do_nothing(self, fake_service):
+    async def test_it_does_nothing_to_the_cluster(self, fake_service):
+        """A readout. Nothing it does may reach the service."""
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)) as pilot:
-            await wait_until(lambda: app.system)
-            panel = app.query_one(ToolsPanel)
-            panel.focus()
+            await wait_until(lambda: app.cluster)
+            app.query_one(MachinePanel).focus()
             await pilot.pause()
-
-            await pilot.press("j", "j")
-            await pilot.pause()
-            assert panel.highlighted == 2
-            await pilot.press("k")
-            await pilot.pause()
-            assert panel.highlighted == 1
-
             before = list(fake_service.calls)
-            await pilot.press("i", "I")
+            for key in ("j", "k", "i", "I", "enter", "space", "x"):
+                await pilot.press(key)
             await pilot.pause()
             assert fake_service.calls == before
 
@@ -373,7 +409,7 @@ class TestNumberKeyTabs:
             await wait_until(lambda: app.system)
             panels = {
                 "1": MinikubePanel,
-                "2": ToolsPanel,
+                "2": MachinePanel,
                 "3": ImagesPanel,
                 "4": ClusterPanel,
             }
@@ -429,7 +465,7 @@ class TestNumberKeyTabs:
             text = str(app.screen.query_one("#help-body", Static).content)
             for key, label in (
                 ('"1"', "minikube panel"),
-                ('"2"', "tools panel"),
+                ('"2"', "machine panel"),
                 ('"3"', "images panel"),
                 ('"4"', "namespaces panel"),
             ):
@@ -440,12 +476,11 @@ class TestNumberKeyTabs:
 class TestVimNavigation:
     """j/k everywhere; h/l on the tree only, where a tree has sides."""
 
-    async def test_jk_moves_in_both_list_panels(self, fake_service):
+    async def test_jk_moves_in_the_list_panel(self, fake_service):
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)) as pilot:
             await wait_until(lambda: app.system)
             for panel_cls, first, second in (
-                (ToolsPanel, "minikube", "helm"),
                 (ImagesPanel, "nginx:alpine", "busybox:latest"),
             ):
                 panel = app.query_one(panel_cls)
@@ -471,7 +506,7 @@ class TestVimNavigation:
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)) as pilot:
             await wait_until(lambda: app.system)
-            tools = app.query_one(ToolsPanel)
+            tools = app.query_one(ImagesPanel)
             tools.focus()
             await pilot.pause()
             last = len(tools.options) - 1
@@ -587,7 +622,7 @@ class TestVimNavigation:
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)) as pilot:
             await wait_until(lambda: app.system)
-            for panel_cls in (ToolsPanel, ImagesPanel):
+            for panel_cls in (ImagesPanel,):
                 panel = app.query_one(panel_cls)
                 panel.focus()
                 panel.highlighted = 1
@@ -626,8 +661,8 @@ class TestVimNavigation:
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)) as pilot:
             await wait_until(lambda: app.system)
-            app.query_one(ToolsPanel).focus()
-            tools = app.query_one(ToolsPanel)
+            app.query_one(ImagesPanel).focus()
+            tools = app.query_one(ImagesPanel)
             tools.highlighted = 0
             await pilot.press("?")
             await pilot.pause()
@@ -685,7 +720,7 @@ class TestVimNavigation:
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)) as pilot:
             await wait_until(lambda: app.system)
-            tools = app.query_one(ToolsPanel)
+            tools = app.query_one(ImagesPanel)
             tools.focus()
             tools.highlighted = 0
             await pilot.pause()
@@ -883,7 +918,7 @@ class TestPanelTitles:
             bound = {b.key for b in app.BINDINGS}
             for panel_cls, expected in (
                 (MinikubePanel, "(1) minikube"),
-                (ToolsPanel, "(2) tools"),
+                (MachinePanel, "(2) machine"),
                 (ImagesPanel, "(3) images"),
                 (ClusterPanel, "(4) cluster"),
             ):
@@ -899,7 +934,7 @@ class TestPanelTitles:
                 assert panel.JUMP_KEY in bound, panel_cls.__name__
 
     async def test_titles_survive_a_data_refresh(self, fake_service):
-        # set_cluster/set_tools rebuild panel content; a title clobbered by a
+        # set_cluster rebuilds panel content; a title clobbered by a
         # refresh is how the number silently disappears.
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)) as pilot:
@@ -952,12 +987,11 @@ class TestKeybarAndHelp:
             # R is an action, not chrome: it belongs with the panel keys.
             assert '"R" re-check' not in glob
 
-            app.query_one(ToolsPanel).focus()
+            app.query_one(MachinePanel).focus()
             await pilot.pause()
             text = keybar(app)
             # Read-only panel: no action keys of its own (j/k are hidden
             # navigation), so the bar carries only the app-wide re-check.
-            assert "install" not in text
             assert '"s" start' not in text
             # The pinned pair is unchanged by the panel switch.
             assert '"?" help' in globals_bar(app) and '"q" quit' in globals_bar(app)
@@ -983,7 +1017,7 @@ class TestKeybarAndHelp:
 
             seen = set()
             panel_keys = set()
-            for panel_cls in (MinikubePanel, ToolsPanel, ImagesPanel, ClusterPanel):
+            for panel_cls in (MinikubePanel, MachinePanel, ImagesPanel, ClusterPanel):
                 app.query_one(panel_cls).focus()
                 await pilot.pause()
                 await pilot.pause()
@@ -1040,7 +1074,7 @@ class TestKeybarAndHelp:
                 ('"x"', "hide log"),
                 ('"esc"', "close filter"),
                 # Numbers jump between panels; tab is deliberately unmapped.
-                ('"1"', "minikube panel"), ('"2"', "tools panel"),
+                ('"1"', "minikube panel"), ('"2"', "machine panel"),
                 ('"3"', "images panel"), ('"4"', "namespaces panel"),
             ):
                 assert key in text, key

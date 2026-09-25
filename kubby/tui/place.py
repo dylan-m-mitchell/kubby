@@ -118,11 +118,10 @@ class Placement:
 def place(diagram: Diagram, width: int) -> Placement:
     """Lay *diagram* out to fit *width* columns, wrapping where it must.
 
-    Containers nest, and the nesting is the shape of the thing being drawn:
-    your computer contains minikube, minikube contains the control plane and
-    the namespaces, a namespace contains its Services and workloads. A
-    container is placed whole, so wrapping can never split one across two
-    bands and a frame is always exactly as big as what is inside it.
+    A container is placed whole, so wrapping can never split one across two
+    bands and a frame is always exactly as big as what is inside it. A
+    container may hold other containers as well as boxes, and those are
+    placed inside it rather than beside it.
     """
     placement = Placement()
     if not diagram.nodes and not diagram.containers:
@@ -258,9 +257,9 @@ def _box_columns(container: Any, diagram: Diagram) -> list[tuple[int, int, list]
 def _flow(items: list[tuple[int, int, Any]], available: int) -> list[list[tuple[int, int, Any]]]:
     """Pack items into rows no wider than *available*.
 
-    Without this a container lays all of its children out in one row, so four
-    namespaces inside minikube came out 254 columns wide — the nesting
-    compounded the width instead of containing it.
+    Without this a container lays all of its contents out in one row, so four
+    namespaces came out 254 columns wide — the nesting compounded the width
+    instead of containing it.
     """
     rows: list[list[tuple[int, int, Any]]] = []
     row: list[tuple[int, int, Any]] = []
@@ -358,9 +357,9 @@ def _measure(container: Any, diagram: Diagram, available: int) -> tuple[int, int
 def _title_width(container: Any, inner: int) -> int:
     """How wide the frame must be to hold its own title without cutting it.
 
-    A title longer than the contents would otherwise be truncated — which is
-    how ``your computer — minikube, docker driver`` came out as
-    ``your computer — minikube, docker``.
+    A title longer than the contents would otherwise be truncated, which is
+    how ``minikube · v1.35.1 · 192.168.49.2 · 16 cpu, 15.6Gi`` came out as
+    ``minikube · v1.35.1 · 192.16``.
     """
     title = len(container.label) + (len(container.detail) + 3 if container.detail else 0) + 5
     return min(max(title, inner + 2 * CONTAINER_PAD + 1), 10_000)

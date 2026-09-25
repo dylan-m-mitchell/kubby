@@ -156,14 +156,16 @@ class FakeService:
             "node_facts": [
                 {
                     "name": "minikube",
+                    "status": "Ready",
+                    "roles": ["control-plane"],
                     "internal_ip": "192.168.49.2",
                     "pod_cidr": "10.244.0.0/16",
                     "os_image": "Debian GNU/Linux 12 (bookworm)",
                     "runtime": "docker 27.1.1",
-                    "cpu_capacity": "8",
-                    "cpu_allocatable": "8",
-                    "memory_capacity": "3900m",
-                    "memory_allocatable": "3900m",
+                    "capacity_cpu": "8",
+                    "allocatable_cpu": "8",
+                    "capacity_memory": "16313348Ki",
+                    "allocatable_memory": "3900m",
                 }
             ],
             "namespaces": [
