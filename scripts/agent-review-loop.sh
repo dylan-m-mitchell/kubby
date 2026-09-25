@@ -373,6 +373,29 @@ append_round() {
   echo
   echo "Agent \`ci-reviewer\` on \`$REVIEW_MODEL\`, up to $MAX_ITERATIONS rounds, gated by the same ruff + pytest checks as CI."
   echo
+  # The loop and its permission file come from this PR's checkout, so a
+  # branch that edits them is running its own guardrails. The deny list and
+  # the script below are what stop an honest agent from being misled by the
+  # diff; they are not a defence against a branch owner (GitHub bounds those
+  # with no secrets and a read-only token on fork PRs). Say so out loud
+  # rather than let the claim outrun what is enforced.
+  guardrail_files=$(git diff --name-only "$PR_BASE_SHA" HEAD -- \
+    scripts/agent-review-loop.sh .opencode/agents/ 2>/dev/null || true)
+  if [[ -n "$guardrail_files" ]]; then
+    warn "this PR edits the review's own guardrail files:"
+    printf '  %s\n' "$guardrail_files" >&2
+    echo "> ⚠️ **This PR changes the review's own guardrails.** This run"
+    echo "> therefore executes the branch's version of them, so those diffs"
+    echo "> need a human look. The rules below stop an agent misled by the"
+    echo "> diff; they are not a defence against a hostile branch owner —"
+    echo "> that is bounded by GitHub (fork PRs get no secrets and a"
+    echo "> read-only token)."
+    echo ">"
+    while IFS= read -r guardrail_file; do
+      printf "> - \`%s\`\n" "$guardrail_file"
+    done <<<"$guardrail_files"
+    echo
+  fi
 } >"$COMMENT_FILE"
 
 feedback=""
@@ -384,6 +407,7 @@ outcome=""
 for ((round = 1; round <= MAX_ITERATIONS; round++)); do
   banner "round $round/$MAX_ITERATIONS"
   rm -f "$PLAN_FILE" "$VERDICT_FILE"
+  AGENT_NOTE="" # per-round note, e.g. from a round that hit its time limit
   write_diff "$ART/pr.diff"
 
   prompt=$(build_prompt "$round")

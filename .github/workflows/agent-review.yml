@@ -23,6 +23,18 @@ name: Agent review loop
 # agent edit landing mid-run would otherwise corrupt the parse), and a round
 # whose agent crashes or times out is retried by the next round rather than
 # aborting the job.
+#
+# Threat model, stated plainly: this runs on `pull_request`, so the workflow,
+# the loop script and the agent's permission file come from the branch under
+# review. That is inherent to running PR code, and it bounds what the guardrails
+# below can claim — they are what stops an *honest agent misled by the diff*
+# (prompt injection in added text) from touching `.github/`, exfiltrating a
+# credential or pushing half-tested changes. A *hostile branch owner* is
+# bounded by GitHub instead: fork PRs get no secrets and a read-only token,
+# and anyone who can push a branch to this repo already holds equivalent power.
+# Never change the event to `pull_request_target` — that would hand secrets to
+# untrusted code. When a PR edits the guardrail files themselves the loop says
+# so in its sticky comment rather than staying quiet about it.
 on:
   pull_request:
     types: [opened, reopened, ready_for_review]
