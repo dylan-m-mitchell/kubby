@@ -7,6 +7,13 @@ focused one gets a brighter border/title.  Each panel carries its jump key
 in its own title ("(1) minikube", "(2) tools", …), in brackets so the digit
 cannot be misread for part of the name.
 
+Navigable panels also move with vim's ``j``/``k`` for down/up.  The
+namespaces tree additionally takes ``h``/``l`` to collapse/expand, the
+convention every vim file-tree plugin uses.  The two list panels leave
+``h``/``l`` unbound on purpose — a single column has no horizontal
+dimension, so there is nothing honest for them to do.  Arrow keys keep
+working everywhere; ``hjkl`` is an addition, not a replacement.
+
 Panels are dumb about *doing*: a key press becomes a `PanelAction`
 message, `kubby.tui.app` performs it (in a worker, against the service)
 and pushes fresh state back through the `set_*` methods below.
@@ -87,6 +94,29 @@ class PanelBase:
 
     def _request(self, action: str, payload: Any = None) -> None:
         self.post_message(PanelAction(action, payload))
+
+
+#: Vim-style vertical movement, shared by the navigable panels (both
+#: single-column list panels and the namespaces tree) so ``j``/``k`` is
+#: written once.
+#:
+#: A constant rather than a mixin on purpose: Textual *replaces* BINDINGS
+#: along the MRO instead of merging them, so a mixin's bindings are silently
+#: dropped the moment a panel declares its own. A panel therefore has to
+#: concatenate this explicitly — see ``ToolsPanel`` and ``ImagesPanel``.
+#:
+#: ``h``/``l`` are deliberately absent: a one-column list has no horizontal
+#: dimension, so there is nothing for them to do, and inventing a meaning
+#: would be worse than leaving them inert. The help overlay says so, so it
+#: does not read as an oversight.
+#:
+#: ``show=False`` because the keybar has only ~27 characters of headroom at
+#: 100 columns, and four nav keys per panel would overflow it. The keys are
+#: documented in the help overlay instead, like the panel jump numbers.
+LIST_NAV_BINDINGS: list[Binding] = [
+    Binding("j", "cursor_down", "down", show=False),
+    Binding("k", "cursor_up", "up", show=False),
+]
 
 
 def format_size(size: Any) -> str:
@@ -189,7 +219,7 @@ class ToolsPanel(PanelBase, OptionList):
     JUMP_KEY = "2"
     EMPTY_TEXT = "no tools"
 
-    BINDINGS = [
+    BINDINGS = LIST_NAV_BINDINGS + [
         Binding("i", "request('install')", "install"),
         Binding("I", "request('install_all')", "install all"),
     ]
@@ -256,7 +286,7 @@ class ImagesPanel(PanelBase, OptionList):
     JUMP_KEY = "3"
     EMPTY_TEXT = "no local images"
 
-    BINDINGS = [
+    BINDINGS = LIST_NAV_BINDINGS + [
         Binding("slash", "request('filter')", "filter"),
     ]
 
@@ -309,17 +339,76 @@ class ImagesPanel(PanelBase, OptionList):
 
 
 class ClusterPanel(PanelBase, Tree):
-    """Namespaces with their pods, expandable (arrows / enter / left-right)."""
+    """Namespaces with their pods.
+
+    Navigable with ``j``/``k`` and collapsible with ``h``/``l``, vim-style;
+    the arrow keys, enter and space continue to work as before.
+    """
 
     BORDER_TITLE = "namespaces"
     JUMP_KEY = "4"
     EMPTY_TEXT = "no cluster"
+
+    BINDINGS = LIST_NAV_BINDINGS + [
+        Binding("h", "vim_collapse", "collapse", show=False),
+        Binding("l", "vim_expand", "expand", show=False),
+    ]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__("", **kwargs)
         # Hide the synthetic root so namespaces sit at the top edge of the
         # panel; `Tree.__init__` doesn't take the flag, so set it here.
         self.show_root = False
+
+    # ----- vim h / l ---------------------------------------------------
+
+    def _current_node(self) -> Any | None:
+        """The node under the cursor, or None on an empty/short tree.
+
+        Guarded like Textual's own `action_toggle_node`, which catches
+        IndexError from the same lookup: a collapsed or empty tree must be a
+        no-op here rather than a crash on a keypress.
+        """
+        if self.cursor_line < 0:
+            return None
+        try:
+            return self._tree_lines[self.cursor_line]
+        except IndexError:
+            return None
+
+    def action_vim_collapse(self) -> None:
+        """`h` — collapse the current namespace, or step out to its parent.
+
+        One key does both, which is what makes `h` useful rather than a
+        toggle you have to keep pressing: collapse once to fold the pods
+        away, press again to climb to the namespace above.
+        """
+        line = self._current_node()
+        if line is None:
+            return
+        node = line.path[-1]
+        if node.allow_expand and node.is_expanded:
+            node.collapse()
+        elif node.parent is not self.root:
+            self.action_cursor_parent()
+
+    def action_vim_expand(self) -> None:
+        """`l` — expand the current namespace, or step into its first pod.
+
+        `Tree` has no combined expand-or-descend action, so this is the one
+        piece of new behaviour here; everything else maps onto an action the
+        widget already provides.
+        """
+        line = self._current_node()
+        if line is None:
+            return
+        node = line.path[-1]
+        if not node.allow_expand:
+            return  # a pod, not a namespace
+        if not node.is_expanded:
+            node.expand()
+        elif node.children:
+            self.move_cursor(node.children[0])
 
     def set_cluster(self, info: dict[str, Any]) -> None:
         self.clear()

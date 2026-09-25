@@ -167,18 +167,61 @@ def render_status(
     return out
 
 
-def render_keybar(app: "KubbyApp") -> Text:
-    """Quoted keys + labels for every *shown* binding in play right now.
+#: The two keys pinned to the right edge of the keybar.
+#:
+#: These are the always-available, most-reached-for keys, and they must not
+#: move when the focused panel's own key count changes. Everything else —
+#: the panel's keys *and* the app-wide actions like ``R`` re-check and ``x``
+#: hide log — stays on the left, because that is where the things you press
+#: to *do* something live.
+#:
+#: The trade-off is deliberate: ``R`` and ``x`` therefore slide left and
+#: right with the panel keys. An earlier version pinned every app-wide key,
+#: which stopped ``R`` moving but left it sitting among the chrome, reading
+#: like one of the two quit keys. Only these two are worth a fixed position.
+PINNED_KEYS: frozenset[str] = frozenset({"question_mark", "q"})
 
-    Derived from ``active_bindings`` rather than a hand-kept table, so the
-    bar always matches what a keypress would actually do — including
-    grayed-out (``enabled=False``) entries while a job is running.
+
+def _is_pinned(binding: Any) -> bool:
+    """True for the bindings that belong in the pinned right-hand half.
+
+    Marked with an ``id`` when ``BINDINGS`` is built rather than inferred
+    from the key: a panel that later binds ``q`` would otherwise be
+    misfiled into the pinned half and jump around with it.
+    """
+    return str(getattr(binding, "id", "") or "").startswith("pinned:")
+
+
+def render_keybar(app: "KubbyApp") -> Text:
+    """Left half: the focused panel's keys, then the app-wide actions."""
+    out = Text()
+    first = True
+    for active in app.active_bindings.values():
+        binding = active.binding
+        if not binding.show or _is_pinned(binding):
+            continue
+        if not first:
+            out.append("   ")
+        first = False
+        key = app.get_key_display(binding)
+        out.append(f'"{key}"', style="bold cyan" if active.enabled else "dim")
+        if binding.description:
+            out.append(f" {binding.description}", style="dim")
+    return out
+
+
+def render_globals(app: "KubbyApp") -> Text:
+    """Right half: the pinned `?` help and `q` quit keys.
+
+    These two used to slide left and right as the focused panel's own keys
+    came and went, because they shared a line with them. Their own
+    right-aligned region means they sit in the same place on every panel.
     """
     out = Text()
     first = True
     for active in app.active_bindings.values():
         binding = active.binding
-        if not binding.show:
+        if not binding.show or not _is_pinned(binding):
             continue
         if not first:
             out.append("   ")
@@ -196,7 +239,15 @@ class KubbyApp(App[None]):
     CSS_PATH = "styles.tcss"
     TITLE = "kubby"
     BINDINGS = [
-        Binding(key, action, description, show=show)
+        # The `pinned:` id is what tells the keybar renderer which half of
+        # the bar this binding belongs to — see `_is_pinned`.
+        Binding(
+            key,
+            action,
+            description,
+            show=show,
+            id=f"pinned:{key}" if key in PINNED_KEYS else None,
+        )
         for key, action, description, show in APP_KEYS
     ]
 
@@ -245,7 +296,13 @@ class KubbyApp(App[None]):
             placeholder="filter images — enter applies, esc clears",
             id="filter-bar",
         )
-        yield Static("", id="keybar")
+        # Two regions in one row: the focused panel's keys and the app-wide
+        # actions on the left, `?` and `q` pinned to the right edge. One bar
+        # rendered both in a single line made those two slide left and right
+        # every time the panel's own key count changed.
+        with Horizontal(id="keybar-row"):
+            yield Static("", id="keybar")
+            yield Static("", id="keybar-globals")
 
     def on_mount(self) -> None:
         # `Widget.focus()` only schedules the change (call_later), which
@@ -343,12 +400,14 @@ class KubbyApp(App[None]):
 
     def _update_keybar(self) -> None:
         try:
-            bar = self.query_one("#keybar", Static)
+            panel_bar = self.query_one("#keybar", Static)
+            globals_bar = self.query_one("#keybar-globals", Static)
         except NoMatches:
             # Focus can land while compose is still mounting widgets;
             # `on_mount` runs this again once everything is in place.
             return
-        bar.update(render_keybar(self))
+        panel_bar.update(render_keybar(self))
+        globals_bar.update(render_globals(self))
 
     # ----- job lifecycle -------------------------------------------------
 
@@ -575,10 +634,27 @@ class KubbyApp(App[None]):
 
     def help_sections(self) -> list[tuple[str, list[tuple[str, str]]]]:
         """Sections for the overlay: globals, then each panel's own keys."""
+        # Nav keys are `show=False` (the keybar has ~27 characters of
+        # headroom, and four nav keys per panel would overflow it), so they
+        # are written out here instead — the overlay is the documented place
+        # to look up keys.
+        #
+        # j/k are listed one per row and first, because they are the movement
+        # keys of record; the arrows follow as a fallback note. Presenting
+        # them as one combined "j/k or up/down" row would make them look like
+        # equals, which is not how they are meant to be read.
+        move_rows = [
+            ("j", "down"),
+            ("k", "up"),
+            ("up/down", "also move"),
+        ]
+        list_nav = move_rows + [
+            ("h/l", "not applicable — one column"),
+        ]
         images_rows = self._panel_rows(ImagesPanel) + [
             ("enter", "apply filter and close"),
             ("esc", "clear filter"),
-        ]
+        ] + list_nav
         return [
             (
                 "global",
@@ -588,12 +664,14 @@ class KubbyApp(App[None]):
                 ],
             ),
             ("minikube panel", self._panel_rows(MinikubePanel)),
-            ("tools panel", self._panel_rows(ToolsPanel)),
+            ("tools panel", self._panel_rows(ToolsPanel) + list_nav),
             ("images panel", images_rows),
             (
                 "namespaces panel",
-                [
-                    ("up/down", "move"),
+                move_rows
+                + [
+                    ("h", "collapse, or out to the parent"),
+                    ("l", "expand, or in to the first pod"),
                     ("enter/space", "expand / collapse"),
                 ],
             ),

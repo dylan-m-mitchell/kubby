@@ -16,7 +16,13 @@ from kubby.tui.popups import ConfirmModal, HelpScreen, PrereqModal
 
 
 def keybar(app: KubbyApp) -> str:
+    """The left half: the focused panel's own keys."""
     return str(app.query_one("#keybar", Static).content)
+
+
+def globals_bar(app: KubbyApp) -> str:
+    """The right half: app-wide keys, pinned to the screen edge."""
+    return str(app.query_one("#keybar-globals", Static).content)
 
 
 def status(app: KubbyApp) -> str:
@@ -462,6 +468,272 @@ class TestNumberKeyTabs:
                 assert label in text, label
 
 
+class TestVimNavigation:
+    """j/k everywhere; h/l on the tree only, where a tree has sides."""
+
+    async def test_jk_moves_in_both_list_panels(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.system)
+            for panel_cls, first, second in (
+                (ToolsPanel, "minikube", "helm"),
+                (ImagesPanel, "nginx:alpine", "busybox:latest"),
+            ):
+                panel = app.query_one(panel_cls)
+                panel.focus()
+                panel.highlighted = 0
+                await pilot.pause()
+
+                await pilot.press("j")
+                await pilot.pause()
+                assert panel.highlighted == 1, panel_cls.__name__
+                assert second in str(panel.get_option_at_index(1).prompt)
+
+                await pilot.press("k")
+                await pilot.pause()
+                assert panel.highlighted == 0, panel_cls.__name__
+                assert first in str(panel.get_option_at_index(0).prompt)
+
+    async def test_jk_behave_exactly_like_the_arrows_at_the_ends(self, fake_service):
+        # j/k are aliases, not a second dialect: the arrows already wrap at
+        # the ends (OptionList.cursor_up uses find_next_enabled, not the
+        # no-wrap variant its scrolling uses), so making j/k clamp would make
+        # the two keys disagree about the same list.
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.system)
+            tools = app.query_one(ToolsPanel)
+            tools.focus()
+            await pilot.pause()
+            last = len(tools.options) - 1
+
+            # Start each key on the edge it moves away from.
+            for vim_key, arrow_key, start in (("k", "up", 0), ("j", "down", last)):
+                results = {}
+                for key in (arrow_key, vim_key):
+                    tools.highlighted = start
+                    await pilot.pause()
+                    await pilot.press(key)
+                    await pilot.pause()
+                    results[key] = tools.highlighted
+                # Identical, including the wrap to the far end.
+                assert results[vim_key] == results[arrow_key], (vim_key, results)
+                assert results[vim_key] == (last if start == 0 else 0), (
+                    vim_key,
+                    results,
+                )
+
+    async def test_jk_moves_in_the_namespace_tree(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.images)
+            tree = app.query_one(ClusterPanel)
+            tree.focus()
+            tree.cursor_line = 0
+            await pilot.pause()
+
+            await pilot.press("j")
+            await pilot.pause()
+            assert tree.cursor_line == 1
+
+            await pilot.press("k")
+            await pilot.pause()
+            assert tree.cursor_line == 0
+
+    async def test_h_collapses_then_climbs_to_the_parent(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.images)
+            tree = app.query_one(ClusterPanel)
+            tree.focus()
+            # A namespace's only parent is the hidden synthetic root.
+            tree.cursor_line = 2  # kube-system
+            await pilot.pause()
+            namespace = tree._tree_lines[2].path[-1]
+            assert namespace.is_expanded
+
+            # h folds the pods away.
+            await pilot.press("h")
+            await pilot.pause()
+            assert not namespace.is_expanded
+            assert tree.cursor_line == 2
+
+            # A collapsed top-level namespace has no visible parent to climb
+            # to, so h must leave its cursor in place.
+            await pilot.press("h")
+            await pilot.pause()
+            assert tree.cursor_line == 2
+
+            # On a pod, h climbs instead of collapsing. Expand it again
+            # first — while collapsed the pod is not a visible row.
+            await pilot.press("l")
+            await pilot.pause()
+            assert namespace.is_expanded
+            await pilot.press("j")
+            await pilot.pause()
+            assert tree.cursor_line == 3
+            await pilot.press("h")
+            await pilot.pause()
+            assert tree.cursor_line == 2
+
+    async def test_l_expands_then_enters_the_first_pod(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.images)
+            tree = app.query_one(ClusterPanel)
+            tree.focus()
+            tree.cursor_line = 0
+            await pilot.pause()
+            namespace = tree._tree_lines[0].path[-1]
+            namespace.collapse()
+            await pilot.pause()
+
+            await pilot.press("l")
+            await pilot.pause()
+            assert namespace.is_expanded
+            assert tree.cursor_line == 0  # expanding does not move
+
+            # Already expanded: l steps in to the first pod.
+            await pilot.press("l")
+            await pilot.pause()
+            assert tree.cursor_line == 1
+
+    async def test_hl_on_a_pod_are_safe_no_ops(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.images)
+            tree = app.query_one(ClusterPanel)
+            tree.focus()
+            tree.cursor_line = 1  # a pod
+            await pilot.pause()
+            pod = tree._tree_lines[1].path[-1]
+            assert not pod.allow_expand
+
+            # l on a leaf: nothing to expand, and it must not crash.
+            await pilot.press("l")
+            await pilot.pause()
+            assert tree.cursor_line == 1
+
+    async def test_hl_do_nothing_in_the_single_column_panels(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.system)
+            for panel_cls in (ToolsPanel, ImagesPanel):
+                panel = app.query_one(panel_cls)
+                panel.focus()
+                panel.highlighted = 1
+                await pilot.pause()
+                before = panel.highlighted
+
+                # Deliberate: a one-column list has no horizontal dimension,
+                # so there is nothing honest for h/l to do. Asserted so the
+                # inert behaviour is intentional rather than a gap.
+                for key in ("h", "l"):
+                    await pilot.press(key)
+                    await pilot.pause()
+                assert panel.highlighted == before, panel_cls.__name__
+                assert app.screen.focused is panel, panel_cls.__name__
+
+    async def test_nav_keys_are_typed_not_bound_in_the_filter(self, fake_service):
+        # The leak guard. hjkl are plain letters; if they reached the app
+        # bindings while the filter had focus, every query containing them
+        # would become unusable. q already failed this way once.
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.images)
+            app.query_one(ImagesPanel).focus()
+            await pilot.press("/")
+            await pilot.pause()
+            bar = app.query_one("#filter-bar", Input)
+
+            await pilot.press("h", "j", "k", "l")
+            await pilot.pause()
+            assert bar.value == "hjkl"
+            assert app.image_filter == "hjkl"
+            assert app.screen.focused is bar
+            assert app.is_running
+
+    async def test_nav_keys_do_not_fire_through_the_help_overlay(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.system)
+            app.query_one(ToolsPanel).focus()
+            tools = app.query_one(ToolsPanel)
+            tools.highlighted = 0
+            await pilot.press("?")
+            await pilot.pause()
+
+            await pilot.press("j", "h", "l")
+            await pilot.pause()
+            assert tools.highlighted == 0
+
+    async def test_nav_keys_stay_out_of_the_keybar(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)):
+            await wait_until(lambda: app.system)
+            bar = keybar(app)
+            # ~27 characters of headroom at 100 columns; four nav keys per
+            # panel would overflow it, so they live in the help overlay only.
+            assert '"j"' not in bar and '"h"' not in bar and '"l"' not in bar
+            assert len(bar) < 100
+
+    async def test_help_documents_the_vim_keys(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.system)
+            await pilot.press("?")
+            await pilot.pause()
+            text = str(app.screen.query_one("#help-body", Static).content)
+
+            for label in (
+                "down",                              # j
+                "up",                                # k
+                "also move",                         # arrows, demoted to a note
+                "collapse, or out to the parent",    # h on the tree
+                "expand, or in to the first pod",    # l on the tree
+                "not applicable — one column",       # why h/l is absent on lists
+            ):
+                assert label in text, label
+
+    async def test_jk_are_listed_before_the_arrows(self, fake_service):
+        # j/k are the movement keys of record. A combined "j/k or up/down"
+        # row would read as equals; they are deliberately separate rows, and
+        # j comes before k comes before the arrow note.
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.system)
+            await pilot.press("?")
+            await pilot.pause()
+            text = str(app.screen.query_one("#help-body", Static).content)
+
+            assert text.index('"j"') < text.index('"k"') < text.index('"up/down"')
+            # ...and each is a row of its own rather than a combined one.
+            assert '"j/k' not in text
+
+    async def test_arrows_still_move(self, fake_service):
+        # hjkl is an addition, not a replacement: the arrows were working
+        # before and must keep working.
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.system)
+            tools = app.query_one(ToolsPanel)
+            tools.focus()
+            tools.highlighted = 0
+            await pilot.pause()
+
+            await pilot.press("down")
+            await pilot.pause()
+            assert tools.highlighted == 1
+
+            await pilot.press("up")
+            await pilot.pause()
+            assert tools.highlighted == 0
+
+            await pilot.press("end")
+            await pilot.pause()
+            assert tools.highlighted == len(tools.options) - 1
+
+
 class TestPanelTitles:
     """Each panel shows its own jump key, and that key is the one bound."""
 
@@ -528,18 +800,27 @@ class TestKeybarAndHelp:
         async with app.run_test(size=(100, 40)) as pilot:
             await wait_until(lambda: app.system)
 
+            # Left: the panel's keys plus the app-wide actions. Right: only
+            # the two pinned keys.
             text = keybar(app)
-            for expected in ('"s" start', '"R" re-check', '"?" help', '"q" quit'):
+            glob = globals_bar(app)
+            for expected in ('"s" start', '"R" re-check'):
                 assert expected in text, expected
+            for expected in ('"?" help', '"q" quit'):
+                assert expected in glob, expected
             assert '"i" install' not in text
             assert '"S" stop' not in text  # cluster is down: nothing to stop
             assert '"x" hide log' not in text  # idle: nothing to dismiss
+            # R is an action, not chrome: it belongs with the panel keys.
+            assert '"R" re-check' not in glob
 
             app.query_one(ToolsPanel).focus()
             await pilot.pause()
             text = keybar(app)
             assert '"i" install' in text and '"I" install all' in text
             assert '"s" start' not in text
+            # The pinned pair is unchanged by the panel switch.
+            assert '"?" help' in globals_bar(app) and '"q" quit' in globals_bar(app)
 
             # Keys that are greyed out stay listed but visibly disabled.
             app.query_one(MinikubePanel).focus()
@@ -548,6 +829,49 @@ class TestKeybarAndHelp:
             assert await wait_until(lambda: app.busy)
             assert app.active_bindings["s"].enabled is False
             assert '"s" start' in keybar(app)
+
+    async def test_globals_hold_still_while_panels_change(self, fake_service):
+        # The reason the keybar is split: `?` and `q` used to slide left and
+        # right as the focused panel's key count changed, because they shared
+        # one line with those keys. They are pinned to the right edge now, so
+        # their screen position must be identical on every panel.
+        fake_service.cluster["running"] = False
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.system)
+            bar = app.query_one("#keybar-globals", Static)
+
+            seen = set()
+            panel_keys = set()
+            for panel_cls in (MinikubePanel, ToolsPanel, ImagesPanel, ClusterPanel):
+                app.query_one(panel_cls).focus()
+                await pilot.pause()
+                await pilot.pause()
+                region = bar.region
+                seen.add((region.x, region.width, region.x + region.width))
+                # ...while the left half genuinely does change.
+                panel_keys.add(str(app.query_one("#keybar", Static).content))
+
+            assert len(seen) == 1, f"pinned keys moved between panels: {seen}"
+            _, _, right_edge = seen.pop()
+            assert right_edge == app.screen.size.width, right_edge
+            # Panels do differ, so this is not passing vacuously.
+            assert len(panel_keys) > 1, panel_keys
+
+    async def test_only_help_and_quit_are_pinned(self, fake_service):
+        # Guards the grouping, not just the position. An earlier version
+        # pinned every app-wide key, which put `R` re-check up there looking
+        # like one of the two chrome keys; it is an action and belongs on the
+        # left with the rest.
+        fake_service.cluster["running"] = False
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)):
+            await wait_until(lambda: app.system)
+
+            assert '"?" help' in globals_bar(app)
+            assert '"q" quit' in globals_bar(app)
+            assert '"R" re-check' in keybar(app)
+            assert '"R" re-check' not in globals_bar(app)
 
     async def test_help_lists_every_panel(self, fake_service):
         app = KubbyApp(service=fake_service)
@@ -566,6 +890,13 @@ class TestKeybarAndHelp:
                 ('"i"', "install"), ('"I"', "install all"),             # tools
                 ('"/"', "filter"),                                      # images
                 ('"enter/space"', "expand / collapse"),                 # namespaces
+                # Vim movement: j/k are the movement keys of record, listed
+                # one per row; the arrows are a fallback note beneath them.
+                ('"j"', "down"),
+                ('"k"', "up"),
+                ('"up/down"', "also move"),
+                ('"h"', "collapse, or out to the parent"),
+                ('"l"', "expand, or in to the first pod"),
                 ('"q"', "quit"), ('"?"', "help"), ('"R"', "re-check"),
                 ('"x"', "hide log"),
                 ('"esc"', "close filter"),

@@ -56,9 +56,13 @@ stays visible with diagnostics so you can read what went wrong.
 Inside the app: `1`–`4` jump straight to a panel, `?` opens the key
 reference, `q` quits. Each panel shows its number in brackets in its own
 title — `(1) minikube` — so the key to press is visible where you press it.
-`tab` is deliberately unmapped and free for whatever needs it next. Each panel lists its own keys in the
-keybar at the bottom of the screen — greyed keys are unavailable in the
-current state.
+`tab` is deliberately unmapped and free for whatever needs it next.
+
+Inside a panel, `j`/`k` move down and up; in the namespaces tree `h`
+collapses (or steps out to the parent) and `l` expands (or steps in to the
+first pod). The arrow keys keep working everywhere, and `enter`/`space` still
+toggle a namespace. Each panel lists its own keys in the keybar at the
+bottom of the screen — greyed keys are unavailable in the current state.
 
 ## Managed CLIs
 
