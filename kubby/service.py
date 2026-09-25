@@ -195,11 +195,13 @@ class KubbyService:
         # tool's own documentation instead of at an install action.
         if not shutil.which("minikube"):
             issues.append(
-                "minikube is not installed — get it from minikube.sigs.k8s.io"
+                "minikube is not installed — get it from "
+                "https://minikube.sigs.k8s.io/"
             )
         if not shutil.which("kubectl"):
             issues.append(
-                "kubectl is not installed — get it from kubernetes.io/docs"
+                "kubectl is not installed — get it from "
+                "https://kubernetes.io/docs/reference/kubectl/"
             )
 
         driver = (settings.get("driver") or "").strip()
@@ -211,7 +213,7 @@ class KubbyService:
                 issues.append(
                     "Neither docker nor podman is installed — minikube "
                     "needs at least one as a container driver. See "
-                    "minikube.sigs.k8s.io/docs/drivers/."
+                    "https://minikube.sigs.k8s.io/docs/drivers/."
                 )
 
         return {
@@ -234,7 +236,7 @@ class KubbyService:
         if not shutil.which(binary):
             issues.append(
                 f"Driver '{driver}' needs '{binary}' on PATH so minikube "
-                f"can use it — see minikube.sigs.k8s.io/docs/drivers/."
+                f"can use it — see https://minikube.sigs.k8s.io/docs/drivers/."
             )
 
     # ------------------------------------------------------------------
