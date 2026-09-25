@@ -143,12 +143,20 @@ class Canvas:
         for offset in range(length):
             self.put(x, y + offset, char, style, lock)
 
-    def box(self, rect: Rect, shape: str = "round", style: str | None = None) -> None:
-        """Draw a border and lock every cell it occupies.
+    def box(
+        self, rect: Rect, shape: str = "round", style: str | None = None,
+        lock_inside: bool = True,
+    ) -> None:
+        """Draw a border and lock the cells it should not be crossed by.
 
-        Locking the whole rectangle, not just the border, is what reserves
-        the interior: an edge routed across a box's middle is refused rather
-        than drawn through the label.
+        Locking the whole rectangle is what reserves a box's interior: an
+        edge routed across its middle is refused rather than drawn through
+        the label.
+
+        A container passes ``lock_inside=False`` because the boxes it
+        contains have not been drawn yet, and locking its whole area would
+        refuse every one of them. Its *border* is still locked, which is
+        what stops an edge crossing into or out of it.
         """
         top_left, top_right, bottom_left, bottom_right, horizontal, vertical = (
             SHAPES[shape]
@@ -160,7 +168,11 @@ class Canvas:
             for x in range(rect.x, rect.right + 1):
                 if not self.inside(x, y):
                     continue
-                self._force(x, y, horizontal if y in (rect.y, rect.bottom) else " ", style)
+                self._force(
+                    x, y,
+                    horizontal if y in (rect.y, rect.bottom) else " ",
+                    style,
+                )
         for offset in range(rect.height):
             self._force(rect.x, rect.y + offset, vertical, style)
             self._force(rect.right, rect.y + offset, vertical, style)
@@ -173,7 +185,12 @@ class Canvas:
             self._force(x, y, char, style)
         for y in range(rect.y, rect.bottom + 1):
             for x in range(rect.x, rect.right + 1):
-                if self.inside(x, y):
+                if not self.inside(x, y):
+                    continue
+                on_border = (
+                    y in (rect.y, rect.bottom) or x in (rect.x, rect.right)
+                )
+                if on_border or lock_inside:
                     self._locked[y][x] = True
 
     def label(self, rect: Rect, lines: list[str], style: str | None = None) -> None:
@@ -247,17 +264,20 @@ class Canvas:
     # ----- containers --------------------------------------------------
 
     def container(self, rect: Rect, title: str, style: str | None = None) -> None:
-        """A lighter border than a node's, with the title in its top edge.
+        """A frame around a group, with the group's name in its top edge.
 
-        Drawn with the same lock as a box so an edge cannot cross it either,
-        but visually distinct: a container is a grouping, a box is a thing.
+        Distinct from a box on purpose: a container is something that
+        *contains*, a box is a thing. Double lines for containment, so the
+        nesting reads without having to work out which is which.
         """
-        self.box(rect, "double", style)
-        if title:
-            text = f" {title} "
-            x = rect.x + 2
-            for offset, char in enumerate(text[: max(0, rect.width - 4)]):
-                self._force(x + offset, rect.y, char, style)
+        self.box(rect, "double", style, lock_inside=False)
+        if not title:
+            return
+        text = f" {title} "
+        room = max(0, rect.width - 4)
+        for offset, char in enumerate(text[:room]):
+            self._force(rect.x + 2 + offset, rect.y, char, style)
+            self._locked[rect.y][rect.x + 2 + offset] = True
 
     def max_width(self) -> int:
         return max((len(line.rstrip()) for line in self.plain_lines()), default=0)

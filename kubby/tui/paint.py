@@ -51,18 +51,25 @@ def shape_for(box: PlacedBox) -> str:
 
 
 def render(placement: Placement) -> Text:
-    """Draw *placement*."""
+    """Draw *placement*.
+
+    Order matters and is the reason the arrows are consistent: containers go
+    down first, then boxes, then edges. Each locks the cells it must not be
+    crossed by, so an edge is routed into whatever space is left — which is
+    to say the gutters between columns — and can never be merged into a
+    border.
+    """
     # One column wider than the content: cross-band edges route down that
     # margin, and it is the only column guaranteed to be free of boxes.
     canvas = Canvas(placement.width + 1, placement.height)
 
-    for x, y, text in placement.headings:
-        # Locked as it is written, so an edge routed later cannot overwrite
-        # the heading text: `_clear_row` only avoids locked cells, and an
-        # unlocked heading would read as free space to route through.
-        clipped = text[: max(0, placement.width - x)]
-        for offset, char in enumerate(clipped):
-            canvas.put(x + offset, y, char, HEADING_STYLE, lock=True)
+    # Containers first, then the boxes that go inside them, then the edges.
+    # A container locks only its own border, so its contents can still be
+    # drawn while an edge still cannot cross the frame.
+    for frame in placement.containers.values():
+        canvas.container(
+            Rect(frame.x, frame.y, frame.width, frame.height), frame.label, "dim"
+        )
 
     for box in placement.boxes.values():
         rect = Rect(box.x, box.y, box.width, box.height)

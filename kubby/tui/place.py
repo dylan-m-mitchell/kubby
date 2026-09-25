@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from kubby.tui.diagram import ROLES, Diagram, Node
+from kubby.tui.diagram import Diagram, Node
 
 #: Blank columns between two layers. An edge is routed in here, so it has to
 #: be wide enough for a lane *and* an arrowhead: four, because with three a
@@ -36,7 +36,7 @@ GUTTER = 4
 #: Blank rows between two boxes stacked in the same column.
 NODE_GAP = 1
 
-#: Blank rows between two components.
+#: Blank rows between two containers.
 COMPONENT_GAP = 2
 
 #: How far a box's text sits from its border. Symmetric — the previous
@@ -44,8 +44,8 @@ COMPONENT_GAP = 2
 #: to one side rather than closing it.
 BOX_PAD = 1
 
-#: Rows a component's heading occupies above its boxes.
-HEADING_ROWS = 1
+#: Blank space between a container's border and the boxes inside it.
+CONTAINER_PAD = 1
 
 
 @dataclass
@@ -63,10 +63,29 @@ class PlacedBox:
 
 
 @dataclass
+class PlacedContainer:
+    """A box drawn *around* its members.
+
+    Containment, not adjacency. A namespace is a frame its workloads sit
+    inside, and a reader should not have to infer the grouping from which
+    boxes happen to be near each other.
+    """
+
+    id: str
+    label: str
+    x: int = 0
+    y: int = 0
+    width: int = 0
+    height: int = 0
+    band: int = 0
+
+
+@dataclass
 class Placement:
     """A laid-out picture, in cells, ready to draw."""
 
     boxes: dict[str, PlacedBox] = field(default_factory=dict)
+    containers: dict[str, PlacedContainer] = field(default_factory=dict)
     edges: list[tuple[str, str]] = field(default_factory=list)
     #: (x, y, text) headings drawn above their component.
     headings: list[tuple[int, int, str]] = field(default_factory=list)
@@ -92,61 +111,90 @@ def place(diagram: Diagram, width: int) -> Placement:
     if not diagram.nodes:
         return placement
 
-    components = _ordered_components(diagram)
+    # Containers are the unit of placement, not loose boxes. A namespace is
+    # placed whole — its objects inside a frame around them — so wrapping
+    # can never split one across two bands, and so the frame is always
+    # exactly as big as its contents.
     band_top = 0
     band_bottom = 0
     band = 0
     x = 0
 
-    for heading, component in components:
-        layers = _layer(component, diagram)
-        order = _order_within_layers(component, layers, diagram)
-        columns = _columns(component, layers, order, diagram.nodes)
+    for container in diagram.ordered_containers():
+        members = [m for m in container.members if m in diagram.nodes]
+        if not members:
+            continue
+        columns = _columns(
+            members, _layer(members, diagram), _order(members, diagram), diagram.nodes
+        )
         widest = max((b.width for column in columns for b in column), default=0)
-        # A single group wider than the panel cannot be wrapped (wrapping is
-        # per group, and this is the smallest unit placed), so it overflows:
-        # see the width-guarantee note in the review plan.
-        component_width = _span(columns, widest)
+        # A container wider than the panel cannot be wrapped — it is the
+        # smallest unit placed — so it overflows and the panel scrolls.
+        outer_width = _span(columns, widest)
+        inner = CONTAINER_PAD * 2 + 1  # left, right, and the title row
+        total_width = outer_width + inner
 
-        needed = x + (GUTTER if x else 0) + component_width
+        needed = x + (GUTTER if x else 0) + total_width
         if x and needed > width:
-            # This component cannot start on the current band. Wrap, leaving
-            # a clear row between the two so a cross-band edge has somewhere
-            # to run.
             placement.gaps[band] = band_bottom + 1
             band += 1
             band_top = band_bottom + COMPONENT_GAP
             x = 0
 
-        top = band_top + HEADING_ROWS
         offset = x + (GUTTER if x else 0)
+        top = band_top
+        content_bottom = top
         for index, column in enumerate(columns):
-            column_x = offset + index * (widest + GUTTER)
-            y = top
+            column_x = offset + CONTAINER_PAD + index * (widest + GUTTER)
+            y = top + CONTAINER_PAD + 1
             for box in column:
                 box.x = column_x
                 box.y = y
                 box.band = band
                 y += box.height + NODE_GAP
+                content_bottom = max(content_bottom, y - NODE_GAP)
                 placement.boxes[box.id] = box
-            band_bottom = max(band_bottom, y - NODE_GAP)
-        placement.headings.append((offset, band_top, heading))
-        placement.heading_right[band] = max(
-            placement.heading_right.get(band, 0), offset + len(heading)
+
+        frame = PlacedContainer(
+            id=container.id,
+            label=container.label,
+            x=offset,
+            y=top,
+            width=total_width,
+            # +1 for the bottom border below the last box. Sized to *its own*
+            # contents: sizing to the band left every container padded out to
+            # the height of the tallest one beside it.
+            height=(content_bottom - top) + CONTAINER_PAD + 1,
+            band=band,
         )
-        x = offset + component_width
+        placement.containers[container.id] = frame
+        placement.headings.append((offset, top, container.label))
+        placement.heading_right[band] = max(
+            placement.heading_right.get(band, 0), offset + len(container.label)
+        )
+        band_bottom = max(band_bottom, frame.y + frame.height - 1)
+        x = offset + total_width
 
     placement.width = max(
-        (b.x + b.width for b in placement.boxes.values()), default=1
+        max((b.x + b.width for b in placement.boxes.values()), default=1),
+        max((c.x + c.width for c in placement.containers.values()), default=1),
     )
     placement.height = max(
-        (b.y + b.height for b in placement.boxes.values()),
-        default=band_bottom + 1,
+        max((b.y + b.height for b in placement.boxes.values()), default=1),
+        max((c.y + c.height for c in placement.containers.values()), default=1),
+        band_bottom + 1,
     )
     for source, target in diagram.edges:
         if source in placement.boxes and target in placement.boxes:
             placement.edges.append((source, target))
     return placement
+
+
+def _order(members: list[str], diagram: Diagram) -> dict[str, int]:
+    """Row assignment within a container's boxes."""
+    return _order_within_layers(
+        members, _layer(members, diagram), diagram
+    )
 
 
 def _span(columns: list[list[PlacedBox]], widest: int) -> int:
@@ -183,24 +231,6 @@ def _columns(
     for column in by_layer.values():
         column.sort(key=lambda b: order.get(b.id, 0))
     return [by_layer[key] for key in sorted(by_layer)]
-
-
-def _ordered_components(diagram: Diagram) -> list[tuple[str, list[str]]]:
-    """Groups in reading order: the machine first, your own code last.
-
-    Ranked by the most senior role any member has, so `your computer` and
-    the node come before the control plane, and the control plane before
-    anything the reader wrote. Ties break on the group name, which keeps the
-    order stable across refreshes — a picture that reshuffles every `R` is
-    impossible to build a mental model of.
-    """
-    scored = []
-    for heading, members in diagram.groups():
-        roles = {diagram.role_of(node) for node in members}
-        rank = min((ROLES.index(r) for r in roles if r in ROLES), default=len(ROLES))
-        scored.append((rank, heading, members))
-    scored.sort(key=lambda item: (item[0], item[1]))
-    return [(heading, members) for _rank, heading, members in scored]
 
 
 def _order_within_layers(

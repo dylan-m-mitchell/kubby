@@ -216,14 +216,24 @@ class TestDiagram:
     def test_an_unavailable_cluster_draws_nothing(self):
         assert diagram.build_diagram({"available": False, "error": "nope"}).nodes == {}
 
-    def test_a_namespace_is_one_group_however_its_members_link(self):
+    def test_a_namespace_is_one_container_however_its_members_link(self):
         """Grouping by connectivity split `default` into pieces and repeated
         its name once per disconnected piece."""
         built = diagram.build_diagram(realistic())
-        groups = dict(built.groups())
-        assert "default" in groups and "host" in groups
+        containers = {c.label: c for c in built.containers}
+        assert "default" in containers and "your computer" in containers
         # six objects in the namespace, plus its Ingress
-        assert len(groups["default"]) == 7
+        assert len(containers["default"].members) == 7
+
+    def test_containment_is_a_container_and_not_an_edge(self):
+        """"Your computer" contains the node minikube made on it. That is
+        containment, so it is a box around it — an arrow would claim the two
+        talk to each other, which is not what a laptop and a VM inside it
+        do."""
+        built = diagram.build_diagram(realistic())
+        host = next(c for c in built.containers if c.id == "host")
+        assert host.members
+        assert not [e for e in built.edges if e[0] == "host"]
 
     def test_nothing_outside_the_cluster_is_drawn(self):
         """No browser, no "you". The picture is of the cluster, not of an
@@ -261,11 +271,20 @@ class TestPlace:
         overflows and the panel scrolls.
         """
         widest = 1
-        for _heading, members in built.groups():
+        for container in built.containers:
+            members = container.members
             placement = place.place(
                 diagram.Diagram(
                     nodes={m: built.nodes[m] for m in members},
-                    edges=[e for e in built.edges if e[0] in members and e[1] in members],
+                    containers=[
+                        diagram.Container(
+                            id=container.id, label=container.label, members=members
+                        )
+                    ],
+                    edges=[
+                        e for e in built.edges
+                        if e[0] in members and e[1] in members
+                    ],
                 ),
                 10_000,
             )
@@ -302,11 +321,12 @@ class TestPlace:
             {b.band for b in narrow.boxes.values()}
         )
 
-    def test_groups_are_ordered_machine_first_your_code_last(self):
+    def test_containers_are_ordered_machine_first_your_code_last(self):
         built = diagram.build_diagram(realistic())
-        order = [text for _x, _y, text in place.place(built, 200).headings]
-        assert order.index("host") < order.index("node")
-        assert order.index("node") < order.index("default")
+        order = [c.label for c in built.ordered_containers()]
+        assert order[0] == "your computer"
+        # the control plane before the reader's own namespaces
+        assert order.index("kube-system") < order.index("default")
 
     def test_an_edge_within_a_group_points_rightwards(self):
         built = diagram.build_diagram(realistic())
@@ -352,6 +372,57 @@ class TestPlace:
 
     def test_an_empty_diagram_places_to_nothing(self):
         assert place.place(diagram.Diagram(), 80).boxes == {}
+
+    @pytest.mark.parametrize("width", [62, 90, 140, 200])
+    def test_every_box_sits_inside_its_container(self, width):
+        """Containment is a frame, not proximity. A reader should not have to
+        infer which boxes belong together from which ones are nearby."""
+        built = diagram.build_diagram(realistic())
+        placement = place.place(built, width)
+        for container in built.containers:
+            frame = placement.containers[container.id]
+            for member in container.members:
+                box = placement.boxes[member]
+                assert frame.x <= box.x, container.label
+                assert box.x + box.width <= frame.x + frame.width, container.label
+                assert frame.y <= box.y, container.label
+                assert box.y + box.height <= frame.y + frame.height, container.label
+
+    @pytest.mark.parametrize("width", [62, 90, 140, 200])
+    def test_a_container_is_sized_to_its_own_contents(self, width):
+        """Not to the band. Sizing to the band padded every container out to
+        the height of the tallest one beside it."""
+        built = diagram.build_diagram(realistic())
+        placement = place.place(built, width)
+        for container in built.containers:
+            frame = placement.containers[container.id]
+            members = [placement.boxes[m] for m in container.members]
+            lowest = max(b.y + b.height for b in members)
+            assert frame.y + frame.height - lowest <= 3, container.label
+
+    @pytest.mark.parametrize("width", [62, 90, 140, 200])
+    def test_containers_never_overlap(self, width):
+        built = diagram.build_diagram(realistic())
+        placement = place.place(built, width)
+        frames = list(placement.containers.values())
+        for index, first in enumerate(frames):
+            for second in frames[index + 1:]:
+                if first.band != second.band:
+                    continue
+                apart = (
+                    first.x + first.width <= second.x
+                    or second.x + second.width <= first.x
+                )
+                assert apart, (first.label, second.label)
+
+    def test_a_container_label_is_not_truncated(self):
+        """The frame is only as wide as its contents, so a long title has to
+        be short enough to fit or it is cut mid-word."""
+        built = diagram.build_diagram(realistic())
+        placement = place.place(built, 200)
+        for frame in placement.containers.values():
+            rendered = paint.render(placement).plain
+            assert frame.label in rendered, frame.label
 
 
 # ---------------------------------------------------------------------------

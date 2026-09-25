@@ -81,13 +81,43 @@ class Node:
 
 
 @dataclass
+class Container:
+    """Something that *contains* other boxes, drawn as a box around them.
+
+    The distinction from an edge is the whole point. A namespace contains its
+    workloads, so it is a box they sit inside; a Service points at the
+    workload it backs, so it is a line between them. Drawing containment as
+    adjacency — a heading above a scatter of boxes — makes the two look like
+    the same kind of fact, and makes the picture sprawl: a reader has to
+    infer the grouping from proximity.
+    """
+
+    id: str
+    label: str
+    members: list[str] = field(default_factory=list)
+    #: Reading order, lowest first: the machine, then the control plane, then
+    #: the reader's own namespaces.
+    rank: int = 0
+
+
+@dataclass
 class Diagram:
     nodes: dict[str, Node] = field(default_factory=dict)
     edges: list[tuple[str, str]] = field(default_factory=list)
+    containers: list[Container] = field(default_factory=list)
     _seen: set[tuple[str, str]] = field(default_factory=set, repr=False)
 
     def add(self, node: Node) -> None:
         self.nodes[node.id] = node
+
+    def contain(self, container: Container) -> None:
+        self.containers.append(container)
+
+    def container_of(self, node_id: str) -> Container | None:
+        for container in self.containers:
+            if node_id in container.members:
+                return container
+        return None
 
     def link(self, source: str, target: str) -> None:
         """Record an edge, once.
@@ -107,25 +137,21 @@ class Diagram:
     # ----- shape -------------------------------------------------------
 
     def groups(self) -> list[tuple[str, list[str]]]:
-        """Boxes grouped by the thing they belong to.
+        """Boxes by the container they are inside, in reading order."""
+        return [(c.label, list(c.members)) for c in self.ordered_containers()]
 
-        Grouped by namespace and role, **not** by connectivity. Grouping by
-        connectivity looked reasonable and was wrong: the members of a
-        namespace mostly do not link to each other, so `kubby-demo` came out
-        as four separate components and its name appeared four times, once
-        per disconnected piece. A namespace is a group whether or not
-        anything in it talks to anything else in it.
+    def ordered_containers(self) -> list[Container]:
+        """Containers in reading order: the machine, then what runs on it.
 
-        Connectivity decides layering *within* a group instead — which is
-        what it is actually good for.
+        Ties break on the label so the order is stable across refreshes — a
+        picture that reshuffles every `R` is impossible to build a mental
+        model of.
         """
-        buckets: dict[str, list[str]] = {}
-        for node_id, node in self.nodes.items():
-            buckets.setdefault(node.group, []).append(node_id)
-        return [(group, sorted(members)) for group, members in buckets.items()]
+        return sorted(self.containers, key=lambda c: (c.rank, c.label))
 
     def components(self) -> list[list[str]]:
-        """Weakly-connected sets, kept for ordering inside a group."""
+        """Weakly-connected sets, used for ordering boxes within a
+        container."""
         parent = {node: node for node in self.nodes}
 
         def find(node: str) -> str:
@@ -183,23 +209,33 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
         return diagram
 
     # --- the host and the node ------------------------------------------
+    # "your computer" *contains* the node minikube made on it. That is
+    # containment, not a relationship, so it becomes a box around the node
+    # boxes with no arrow between them — an arrow says "these talk to each
+    # other", which is not what a laptop and a VM inside it do.
     facts = cluster.get("node_facts") or []
     driver = str(cluster.get("driver") or "").strip()
-    if facts:
-        driver_text = f"minikube, {driver} driver" if driver else "minikube, auto driver"
-        diagram.add(Node("host", ["your computer", driver_text], "host", "host"))
-        for fact in facts:
-            fact_name = str(fact.get("name") or "?")
-            lines = [fact_name]
-            for extra in (
-                fact.get("os_image"),
-                fact.get("runtime"),
-                _capacity_text(fact, human_memory),
-            ):
-                if extra:
-                    lines.append(str(extra))
-            diagram.add(Node(_node_id(fact_name), lines, "node", "node"))
-            diagram.link("host", _node_id(fact_name))
+    host_members: list[str] = []
+    for fact in facts:
+        lines = [str(fact.get("name") or "?")]
+        for extra in (
+            f"minikube, {driver} driver" if driver else "minikube, auto driver",
+            fact.get("os_image"),
+            fact.get("runtime"),
+            _capacity_text(fact, human_memory),
+        ):
+            if extra:
+                lines.append(str(extra))
+        node_id = _node_id(str(fact.get("name") or "?"))
+        diagram.add(Node(node_id, lines, "node", "host"))
+        host_members.append(node_id)
+    if host_members:
+        # The driver goes on the node box rather than in the container's title,
+        # which is only as wide as the widest thing inside it and would
+        # truncate the name that matters.
+        diagram.contain(
+            Container(id="host", label="your computer", members=host_members, rank=0)
+        )
 
     # --- workloads, grouped into namespaces -----------------------------
     workloads: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -331,6 +367,26 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
                     str(backend.get("name") or ""),
                 ),
             )
+
+    # --- namespaces, as boxes the objects sit inside --------------------
+    # Rank 1 for the control plane and 2 for the reader's own namespaces, so
+    # the picture reads: the machine, then what runs on it, then their code.
+    for name in sorted(kept):
+        members = sorted(
+            node_id
+            for node_id, node in diagram.nodes.items()
+            if node.group == name and node_id not in host_members
+        )
+        if not members:
+            continue
+        diagram.contain(
+            Container(
+                id=f"ns:{name}",
+                label=name,
+                members=members,
+                rank=1 if name in INFRA_NAMESPACES else 2,
+            )
+        )
 
     return diagram
 
