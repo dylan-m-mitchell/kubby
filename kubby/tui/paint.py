@@ -1,0 +1,242 @@
+"""Drawing the placed picture: headings, boxes, then edges.
+
+The order matters, and it is the reason the arrows are consistent. Boxes go
+down first and each locks the cells it occupies; edges are routed last into
+whatever space is left, which is to say into the gutters between columns. An
+edge can therefore never cross a border, so it can never be merged into one,
+so the line character is always the same plain ``│`` or ``─``.
+
+The consequence worth stating: an arrowhead stops one cell short of the box
+it points at, reading as ``─►│`` — the arrow pointing *at* the border rather
+than a glyph sitting on top of it.
+"""
+
+from __future__ import annotations
+
+from rich.text import Text
+
+from kubby.tui.draw import Canvas, Rect
+from kubby.tui.place import Placement, PlacedBox
+
+#: Style for the connecting lines. Dim, so the boxes stay the subject.
+EDGE_STYLE = "#3d444d"
+
+#: Style for a component's heading.
+HEADING_STYLE = "bold"
+
+#: Style for a box's border, by what the box is.
+ROLE_STYLE = {
+    "client": "#58a6ff",
+    "host": "#d2a8ff",
+    "node": "#8b949e",
+    "infra": "#8b949e",
+    "app": "",
+}
+
+
+def shape_for(box: PlacedBox) -> str:
+    """The border shape, so shapes carry meaning.
+
+    An ellipse only holds a short single line: the text has to fit between
+    the slants, and a wide label degenerates into a rectangle with unjoined
+    corners. Rather than hand-maintaining which box is an ellipse, the rule
+    is a predicate on the content, so it cannot be forgotten when a node is
+    added.
+    """
+    if box.node.role in ("infra", "node", "host"):
+        return "heavy"
+    longest = max((len(line) for line in box.node.lines), default=0)
+    if len(box.node.lines) == 1 and longest <= 8:
+        return "ellipse"
+    return "round"
+
+
+def render(placement: Placement) -> Text:
+    """Draw *placement*."""
+    # One column wider than the content: cross-band edges route down that
+    # margin, and it is the only column guaranteed to be free of boxes.
+    canvas = Canvas(placement.width + 1, placement.height)
+
+    for x, y, text in placement.headings:
+        canvas.write(x, y, text[: max(0, placement.width - x)], HEADING_STYLE)
+
+    for box in placement.boxes.values():
+        rect = Rect(box.x, box.y, box.width, box.height)
+        style = _style(box)
+        canvas.box(rect, shape_for(box), style)
+        canvas.label(rect, box.node.lines, style)
+
+    for source, target in placement.edges:
+        _route(canvas, placement, source, target)
+
+    return canvas.to_text()
+
+
+def _style(box: PlacedBox) -> str | None:
+    if box.node.broken_service:
+        return "red"
+    if not box.node.healthy:
+        return "red"
+    if box.node.role == "app":
+        return "green"
+    return ROLE_STYLE.get(box.node.role) or None
+
+
+def _route(canvas: Canvas, placement: Placement, source: str, target: str) -> None:
+    """Route one edge orthogonally, out into a gutter and back.
+
+    Three cases, and they cover everything because the boxes are on a grid:
+
+    * same row, target to the right — one straight run
+    * stepped — a lane beside the source, down or up it, then in
+    * target to the left, which is what a wrapped band produces — mirrored
+
+    In every case the run stops one cell short of the target. Its border is
+    locked, so an edge that overlapped it would be clipped mid-character,
+    and one that butts against it reads as pointing *at* the box.
+    """
+    src = placement.boxes[source]
+    dst = placement.boxes[target]
+
+    sx, sy = src.x + src.width, src.y + src.height // 2
+    ex, ey = dst.x, dst.y + dst.height // 2
+
+    if src.band != dst.band:
+        _route_across_bands(canvas, placement, src, dst)
+        return
+
+    if ex > sx + 2:
+        if sy == ey:
+            canvas.line([(sx, sy), (ex - 1, sy)], EDGE_STYLE)
+            canvas.arrow_head(ex - 1, sy, "right", EDGE_STYLE)
+            return
+        lane = sx + 1
+        canvas.line([(sx, sy), (lane, sy)], EDGE_STYLE)
+        canvas.line([(lane, sy), (lane, ey)], EDGE_STYLE)
+        canvas.line([(lane, ey), (ex - 1, ey)], EDGE_STYLE)
+        canvas.arrow_head(ex - 1, ey, "right", EDGE_STYLE)
+        return
+
+    if ex >= sx:
+        # Stacked in one column: drop into the gutter below the source, come
+        # back up, and enter from the left.
+        lane = _free_lane(canvas, sx + 1, sy, ey)
+        canvas.line([(sx, sy), (lane, sy)], EDGE_STYLE)
+        canvas.line([(lane, sy), (lane, ey)], EDGE_STYLE)
+        canvas.line([(lane, ey), (ex - 1, ey)], EDGE_STYLE)
+        canvas.arrow_head(ex - 1, ey, "right", EDGE_STYLE)
+        return
+
+    # Target is to the left in the same band. A horizontal run would have to
+    # pass through whatever sits between, so go around: out to the right of
+    # the source, vertically to a clear row, back left past the target, and
+    # in from its right-hand side.
+    lane = _free_lane(canvas, sx + 1, sy, sy)
+    detour = _clear_row(canvas, sy, sx, dst.x + dst.width)
+    canvas.line([(sx, sy), (lane, sy)], EDGE_STYLE)
+    canvas.line([(lane, sy), (lane, detour)], EDGE_STYLE)
+    canvas.line([(lane, detour), (dst.x + dst.width + 1, detour)], EDGE_STYLE)
+    canvas.line(
+        [(dst.x + dst.width + 1, detour), (dst.x + dst.width + 1, ey)], EDGE_STYLE
+    )
+    canvas.arrow_head(dst.x + dst.width + 1, ey, "left", EDGE_STYLE)
+
+
+def _route_across_bands(
+    canvas: Canvas, placement: Placement, src: PlacedBox, dst: PlacedBox
+) -> None:
+    """Route an edge whose ends are in different bands.
+
+    It runs along the clear row between the two bands, which exists
+    precisely so this is possible: a straight or stepped route would have to
+    cross every box in between, and the lock would clip it into a stub with
+    an arrowhead floating free of any line.
+
+    It enters the target from *above* (or below), never from the side. The
+    side gutter is where the target's own outgoing edges live, and sharing
+    it put two arrowheads in adjacent cells — which read as one
+    bidirectional arrow between the two boxes.
+    """
+    lower = min(src.band, dst.band)
+    gap = placement.gaps.get(lower)
+    if gap is None:
+        return  # adjacent bands with no reserved row; nothing sensible to do
+
+    down = dst.band > src.band
+    target_x = dst.x + dst.width // 2
+    # Drop out of the source into the clear row below its band, run out to a
+    # margin column that nothing else is drawn in, go down (or up) that
+    # margin to the band the target is in, and come in along the clear row
+    # above it.
+    #
+    # The margin is what makes a long edge possible at all. Descent in a
+    # gutter beside the source drew a rule down the full height of the
+    # picture, because that gutter is beside every band below it too; and
+    # using the gap above the *source* rather than above the *target* sent a
+    # short edge on a journey the length of the whole picture.
+    drop_x = src.x + src.width // 2
+    margin = placement.width + 1
+    if down:
+        canvas.line([(drop_x, src.y + src.height), (drop_x, gap)], EDGE_STYLE)
+    else:
+        canvas.line([(drop_x, src.y), (drop_x, gap)], EDGE_STYLE)
+    canvas.line([(drop_x, gap), (margin, gap)], EDGE_STYLE)
+
+    target_gap = placement.gaps.get(dst.band - 1 if down else dst.band)
+    lane = target_gap if target_gap is not None else gap
+    canvas.line([(margin, gap), (margin, lane)], EDGE_STYLE)
+    # Step right of the band's heading before coming down, so the descent
+    # does not cut through the heading text. If the box is too narrow to
+    # enter clear of it, enter at its centre and accept the overlap rather
+    # than missing the box entirely.
+    clear_of = placement.heading_right.get(dst.band, 0) + 2
+    target_x = min(max(target_x, clear_of), dst.x + dst.width - 1)
+    canvas.line([(margin, lane), (target_x, lane)], EDGE_STYLE)
+    if down:
+        canvas.line([(target_x, lane), (target_x, dst.y)], EDGE_STYLE)
+        canvas.arrow_head(target_x, dst.y, "down", EDGE_STYLE, force=True)
+    else:
+        canvas.line([(target_x, lane), (target_x, dst.y + dst.height)], EDGE_STYLE)
+        canvas.arrow_head(
+            target_x, dst.y + dst.height, "up", EDGE_STYLE, force=True
+        )
+
+
+def _clear_row(canvas: Canvas, near: int, after: int, before: int) -> int:
+    """The nearest row to *near* with nothing drawn between two columns."""
+    for distance in range(1, canvas.height):
+        for row in (near + distance, near - distance):
+            if 0 <= row < canvas.height and not any(
+                canvas.locked(x, row) for x in range(after, min(before, canvas.width))
+            ):
+                return row
+    return min(near + 1, canvas.height - 1)
+
+
+def _free_lane(canvas: Canvas, preferred: int, y1: int, y2: int) -> int:
+    """The first column at or after *preferred* that is clear for the hop."""
+    x = preferred
+    while x < canvas.width and any(
+        canvas.locked(x, y) for y in range(min(y1, y2), max(y1, y2) + 1)
+    ):
+        x += 1
+    return min(x, canvas.width - 1)
+
+
+def centre(picture: Text, width: int) -> Text:
+    """Centre a picture narrower than the space it has.
+
+    Only when it fits: centring an over-wide picture would push its left edge
+    off the scroll origin, where it cannot be scrolled back to.
+    """
+    widest = max((len(line) for line in picture.plain.splitlines()), default=0)
+    if widest >= width:
+        return picture
+    pad = " " * ((width - widest) // 2)
+    out = Text()
+    for index, line in enumerate(picture.split(allow_blank=True)):
+        if index:
+            out.append("\n")
+        out.append(pad)
+        out.append_text(line)
+    return out

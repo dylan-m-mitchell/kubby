@@ -1,0 +1,374 @@
+"""What the picture shows, as data.
+
+A step up from Mermaid source. The builder used to emit a flowchart string
+and hand it to a library, which meant the only description of the picture
+was a string meant for something else. This is the picture's own model:
+boxes with labels and meanings, edges between them, and the grouping the
+layout needs. It is pure, so it is directly testable, and it is the only
+place that decides *what* is drawn — :mod:`kubby.tui.place` decides where.
+
+Why not a library's layout: the graph here is mostly *disconnected*. With
+the control plane's components unconnected to each other and the node's
+edges gone, it is around fifteen separate components, and a layered layout
+puts each one in its own column — 301 columns wide for twenty boxes. A
+general-purpose layered algorithm is the wrong tool for a picture that is
+really a handful of small groups.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+#: What a box *is*, which decides its colour and its border weight. Ordered
+#: by how early it should appear in the picture: the reader should meet the
+#: machine, then what runs on it, then their own workloads.
+ROLES = ("client", "host", "node", "infra", "app")
+
+ROLE_STYLE = {
+    "client": "#58a6ff",
+    "host": "#d2a8ff",
+    "node": "#8b949e",
+    "infra": "#8b949e",
+    "app": "",
+}
+
+#: Control-plane components and what each one is for. A beginner looking at
+#: `kube-apiserver` and `etcd` for the first time is looking at two names
+#: with no meaning, and the meaning is the reason to draw them at all.
+INFRA_ROLES = {
+    "kube-apiserver": "every request passes through",
+    "etcd": "all cluster state lives here",
+    "kube-scheduler": "picks the node for a pod",
+    "kube-controller-manager": "keeps reality as you asked",
+    "kube-proxy": "programs the pod network",
+    "coredns": "service names to addresses",
+    "storage-provisioner": "creates volumes on demand",
+}
+
+#: Namespaces that are cluster infrastructure rather than anyone's
+#: application. A naming convention, not a fact the API establishes —
+#: nothing marks a namespace as infrastructure.
+INFRA_NAMESPACES = frozenset(
+    {"kube-system", "kube-public", "kube-node-lease", "ingress-nginx"}
+)
+
+#: Namespaces left out of the picture entirely. Only the ingress controller's:
+#: see the note where the namespaces are filtered.
+OMITTED_NAMESPACES = frozenset({"ingress-nginx"})
+
+
+@dataclass
+class Node:
+    """One box."""
+
+    id: str
+    lines: list[str]
+    role: str
+    group: str
+    #: False when the workload is not actually serving. Decided on container
+    #: readiness, not pod phase: a container in CrashLoopBackOff keeps its
+    #: pod in phase `Running` until it finally gives up, and a broken box
+    #: drawn healthy is the one thing the picture must never do.
+    healthy: bool = True
+    #: Set for a Service whose selector matched nothing — the single most
+    #: common beginner mistake, and the one worth colouring red.
+    broken_service: bool = False
+
+
+@dataclass
+class Diagram:
+    nodes: dict[str, Node] = field(default_factory=dict)
+    edges: list[tuple[str, str]] = field(default_factory=list)
+    _seen: set[tuple[str, str]] = field(default_factory=set, repr=False)
+
+    def add(self, node: Node) -> None:
+        self.nodes[node.id] = node
+
+    def link(self, source: str, target: str) -> None:
+        """Record an edge, once.
+
+        Deduplicated because a Service with three replicas links to the same
+        workload three times — they all resolve to one Deployment — and two
+        arrows drawn on top of each other read as a heavier arrow rather
+        than as the mistake it is.
+        """
+        if source not in self.nodes or target not in self.nodes or source == target:
+            return
+        if (source, target) in self._seen:
+            return
+        self._seen.add((source, target))
+        self.edges.append((source, target))
+
+    # ----- shape -------------------------------------------------------
+
+    def groups(self) -> list[tuple[str, list[str]]]:
+        """Boxes grouped by the thing they belong to.
+
+        Grouped by namespace and role, **not** by connectivity. Grouping by
+        connectivity looked reasonable and was wrong: the members of a
+        namespace mostly do not link to each other, so `kubby-demo` came out
+        as four separate components and its name appeared four times, once
+        per disconnected piece. A namespace is a group whether or not
+        anything in it talks to anything else in it.
+
+        Connectivity decides layering *within* a group instead — which is
+        what it is actually good for.
+        """
+        buckets: dict[str, list[str]] = {}
+        for node_id, node in self.nodes.items():
+            buckets.setdefault(node.group, []).append(node_id)
+        return [(group, sorted(members)) for group, members in buckets.items()]
+
+    def components(self) -> list[list[str]]:
+        """Weakly-connected sets, kept for ordering inside a group."""
+        parent = {node: node for node in self.nodes}
+
+        def find(node: str) -> str:
+            while parent[node] != node:
+                parent[node] = parent[parent[node]]
+                node = parent[node]
+            return node
+
+        for source, target in self.edges:
+            a, b = find(source), find(target)
+            if a != b:
+                parent[a] = b
+
+        buckets: dict[str, list[str]] = {}
+        for node in self.nodes:
+            buckets.setdefault(find(node), []).append(node)
+        return list(buckets.values())
+
+    def role_of(self, node: str) -> str:
+        return self.nodes[node].role
+
+
+def _infra_name(name: str) -> str | None:
+    for prefix in INFRA_ROLES:
+        if name == prefix or name.startswith(f"{prefix}-"):
+            return prefix
+    return None
+
+
+def build_diagram(cluster: dict[str, Any]) -> Diagram:
+    """Turn a cluster model into the boxes and edges to draw.
+
+    Order of business, and it is the order the picture reads in: the machine
+    you are on, the machine minikube made on it, what runs on that, and then
+    your own workloads and the services in front of them.
+    """
+    from kubby.cluster import human_memory
+
+    diagram = Diagram()
+    if not cluster.get("available", True):
+        return diagram
+
+    namespaces = [
+        ns
+        for ns in (cluster.get("namespaces") or [])
+        # An empty namespace has no wiring to show, and the ingress
+        # controller's namespace is the machinery behind enabling an addon
+        # rather than part of the cluster's story — four boxes, three of them
+        # admission webhooks, and the part that teaches something (the rule
+        # and the host it answers to) is already in the app's own group.
+        if ns.get("pods") and ns.get("name") not in OMITTED_NAMESPACES
+    ]
+    pods = [pod for ns in namespaces for pod in ns.get("pods") or []]
+    if not namespaces and not pods:
+        return diagram
+
+    # --- the host and the node ------------------------------------------
+    facts = cluster.get("node_facts") or []
+    driver = str(cluster.get("driver") or "").strip()
+    if facts:
+        driver_text = f"minikube, {driver} driver" if driver else "minikube, auto driver"
+        diagram.add(Node("host", ["your computer", driver_text], "host", "host"))
+        for fact in facts:
+            lines = [str(fact.get("name") or "?")]
+            for extra in (
+                fact.get("os_image"),
+                fact.get("runtime"),
+                _capacity_text(fact, human_memory),
+            ):
+                if extra:
+                    lines.append(str(extra))
+            diagram.add(Node(_node_id(fact["name"]), lines, "node", "node"))
+            diagram.link("host", _node_id(fact["name"]))
+
+    # --- the client, when there is somewhere for traffic to come from ----
+    if cluster.get("ingresses"):
+        diagram.add(Node("you", ["you", "(browser)"], "client", "client"))
+
+    # --- workloads, grouped into namespaces -----------------------------
+    workloads: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for pod in pods:
+        workload = pod.get("workload") or {}
+        name = str(workload.get("name") or pod.get("name") or "?")
+        kind = str(workload.get("kind") or "Pod")
+        key = (str(pod.get("namespace") or "default"), kind, name)
+        entry = workloads.setdefault(
+            key,
+            {"name": name, "kind": kind, "namespace": key[0], "pods": [], "infra": None},
+        )
+        entry["pods"].append(pod)
+        if entry["infra"] is None:
+            entry["infra"] = _infra_name(name)
+
+    for (namespace, kind, name), entry in workloads.items():
+        pods_in = entry["pods"]
+        infra = entry["infra"]
+        if infra:
+            # Infrastructure is labelled with what it does, not a ready count.
+            # "kube-apiserver 1/1" teaches nothing; "every request passes
+            # through" is the fact the reader came for.
+            lines = [infra, INFRA_ROLES[infra]]
+            role = "infra"
+        else:
+            ready = sum(1 for p in pods_in if _ready(p))
+            lines = [name, f"{ready}/{len(pods_in)}"]
+            role = "infra" if namespace in INFRA_NAMESPACES else "app"
+        diagram.add(
+            Node(
+                _workload_id(namespace, kind, name),
+                lines,
+                role,
+                namespace,
+                healthy=all(_ready(p) for p in pods_in),
+            )
+        )
+        # No edge from the node to the control plane, even though the
+        # connection is real. Seven of them became a picket fence down one
+        # lane, and the reading order already says it: the node's box, then
+        # the control plane directly beneath it.
+
+    # --- services, in front of the workloads they back --------------------
+    # Scoped to the namespaces that survived the filter above: a Service in
+    # an omitted namespace has no pods left to point at, so drawing it would
+    # put a box in the picture that leads nowhere.
+    kept = {ns["name"] for ns in namespaces}
+    for svc in cluster.get("services") or []:
+        if str(svc.get("namespace") or "default") not in kept:
+            continue
+        if svc["name"] == "kube-dns":
+            # coredns's own label already says what DNS does, in the same
+            # words. This box and its edge would say it less well.
+            continue
+        namespace = str(svc.get("namespace") or "default")
+        ports = sorted({str(p.get("port")) for p in svc.get("ports") or [] if p.get("port")})
+        backing = svc.get("backing_pods") or []
+        if backing:
+            detail = ", ".join(ports) if ports else "no ports"
+            healthy = True
+        elif svc.get("has_selector"):
+            # A selector that matched nothing. The red box worth having.
+            detail, healthy = "0 endpoints", False
+        else:
+            # No selector is not broken: the API server's own Service has
+            # none, and so does one fronting hand-managed Endpoints.
+            detail, healthy = (", ".join(ports) if ports else "no ports"), True
+        svc_id = _service_id(namespace, str(svc["name"]))
+        diagram.add(
+            Node(
+                svc_id,
+                [str(svc["name"]), detail],
+                "infra" if namespace in INFRA_NAMESPACES else "app",
+                namespace,
+                healthy=healthy,
+                broken_service=not backing and bool(svc.get("has_selector")),
+            )
+        )
+        for pod_ref in backing:
+            pod = next(
+                (
+                    p
+                    for p in pods
+                    if p.get("name") == pod_ref.get("pod")
+                    and p.get("namespace") == pod_ref.get("namespace")
+                ),
+                None,
+            )
+            if pod is None:
+                continue
+            workload = pod.get("workload") or {}
+            diagram.link(
+                svc_id,
+                _workload_id(
+                    str(pod.get("namespace") or "default"),
+                    str(workload.get("kind") or "Pod"),
+                    str(workload.get("name") or pod.get("name") or "?"),
+                ),
+            )
+
+    # --- ingress, and the way in ------------------------------------------
+    for ing in cluster.get("ingresses") or []:
+        hosts = ", ".join(sorted({r["host"] for r in ing.get("rules") or []})) or "*"
+        ing_id = _ingress_id(str(ing.get("namespace") or "default"), str(ing["name"]))
+        diagram.add(Node(ing_id, [str(ing["name"]), hosts], "client", "client"))
+        if "you" in diagram.nodes:
+            diagram.link("you", ing_id)
+        for backend in ing.get("backends") or []:
+            diagram.link(
+                ing_id,
+                _service_id(
+                    str(backend.get("namespace") or "default"),
+                    str(backend.get("name") or ""),
+                ),
+            )
+
+    return diagram
+
+
+def _ready(pod: dict[str, Any]) -> bool:
+    if "ready" in pod:
+        return bool(pod["ready"])
+    return pod.get("phase") in ("Running", "Succeeded")
+
+
+def _capacity_text(fact: dict[str, Any], human_memory: Any) -> str:
+    """``2 of 16 cpu, 2Gi of 15.6Gi`` — the share, and the whole.
+
+    Only the share is what a Pod may ask for, and on a 2-CPU minikube on a
+    16-CPU laptop the two differ sharply. Showing the host's figure alone is
+    how someone concludes the cluster is starved when it is not. Equal
+    values collapse rather than repeat.
+    """
+    def pair(allocatable: str, capacity: str, suffix: str = "") -> str:
+        if not allocatable and not capacity:
+            return ""
+        if allocatable == capacity:
+            return f"{allocatable}{suffix}"
+        return f"{allocatable or '?'} of {capacity or '?'}{suffix}"
+
+    parts = [
+        text
+        for text in (
+            pair(str(fact.get("allocatable_cpu") or ""), str(fact.get("capacity_cpu") or ""), " cpu"),
+            pair(
+                human_memory(fact.get("allocatable_memory") or ""),
+                human_memory(fact.get("capacity_memory") or ""),
+            ),
+        )
+        if text
+    ]
+    return ", ".join(parts)
+
+
+def _safe(text: str) -> str:
+    return "".join(c for c in str(text or "?") if c not in '"\\[]{}()|<>`')
+
+
+def _node_id(name: str) -> str:
+    return "node_" + _safe(name).replace("-", "_").replace(".", "_")
+
+
+def _workload_id(namespace: str, kind: str, name: str) -> str:
+    return f"w_{_safe(namespace)}_{_safe(kind)}_{_safe(name)}".replace(" ", "_")
+
+
+def _service_id(namespace: str, name: str) -> str:
+    return f"svc_{_safe(namespace)}_{_safe(name)}".replace(" ", "_")
+
+
+def _ingress_id(namespace: str, name: str) -> str:
+    return f"ing_{_safe(namespace)}_{_safe(name)}".replace(" ", "_")

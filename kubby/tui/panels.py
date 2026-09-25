@@ -31,7 +31,9 @@ from textual.message import Message
 from textual.widgets import OptionList, RichLog, Static, Tree
 from textual.widgets.option_list import Option
 
-from kubby.tui import graph as graph_mod
+from kubby.tui import diagram as diagram_mod
+from kubby.tui import paint as paint_mod
+from kubby.tui import place as place_mod
 
 
 class PanelFocused(Message):
@@ -348,7 +350,7 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
     limitation: the layout that positions the boxes already reports where
     each one landed, so moving a cursor between them later is a search over
     those rectangles and not a layout engine. See ``node_rects`` in
-    :mod:`kubby.tui.graph`.
+    :mod:`kubby.tui.paint`.
 
     It scrolls because a real cluster does not fit a terminal panel. A
     13-workload cluster came out 72 columns by 63 lines against a panel of
@@ -380,6 +382,9 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
         super().__init__(**kwargs)
         self._cluster: dict[str, Any] = {}
         self._picture = Static("", id="graph-picture")
+        #: The last placement, kept so the `hjkl` cursor can move between
+        #: boxes without re-laying the picture out on every keypress.
+        self.placement: place_mod.Placement | None = None
 
     def compose(self) -> ComposeResult:
         yield self._picture
@@ -410,15 +415,13 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
             return
 
         self.border_subtitle = f"{cluster.get('pod_count') or 0} pods"
-        source = graph_mod.build_mermaid(cluster)
         width = max(20, self.size.width)
-        picture, _direction = graph_mod.render_best(
-            source, width, max(5, self.size.height)
-        )
+        placement = place_mod.place(diagram_mod.build_diagram(cluster), width)
         # Centred rather than left-aligned, which is what the tree looks like
         # because a tree is a list. A picture with a shape wants the space
-        # either side of it. Only applied when it fits — see `center`.
-        self._picture.update(graph_mod.center(picture, width))
+        # either side of it. Only applied when it fits — see `centre`.
+        self.placement = placement
+        self._picture.update(paint_mod.centre(paint_mod.render(placement), width))
 
 
 class ClusterPanel(PanelBase, Vertical, can_focus=True):

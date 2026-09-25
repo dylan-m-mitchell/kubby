@@ -5,7 +5,6 @@ description = "Terminal UI for managing local Kubernetes cluster resources."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "termaid>=0.9.0",
     "textual>=8.2.8",
 ]
 
