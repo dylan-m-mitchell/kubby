@@ -798,6 +798,38 @@ class TestClusterGraphView:
             await pilot.pause()
             assert graph_panel.scroll_offset.y >= before
 
+    async def test_the_picture_re_lays_out_when_the_terminal_resizes(
+        self, fake_service
+    ):
+        """Regression: the redraw was handled on the app, which sees the
+        resize *before* the new layout is applied. It therefore re-laid the
+        picture out at the width it already had, producing a byte-identical
+        picture, and the view sat frozen at its launch size until `R` was
+        pressed. Deferring with `call_after_refresh` only moved the lag to
+        one resize behind. The panel now handles its own resize, where the
+        new size is current.
+        """
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(80, 30)) as pilot:
+            await wait_until(lambda: app.cluster)
+            panel = app.query_one(GraphPanel)
+            narrow = (panel.placement.width, panel.placement.height)
+
+            await pilot.resize_terminal(160, 50)
+            await wait_until(
+                lambda: (panel.placement.width, panel.placement.height) != narrow
+            )
+            wide = (panel.placement.width, panel.placement.height)
+            assert wide != narrow
+
+            # and back again, which is where the one-resize-behind version
+            # stopped responding entirely
+            await pilot.resize_terminal(80, 30)
+            await wait_until(
+                lambda: (panel.placement.width, panel.placement.height) != wide
+            )
+            assert (panel.placement.width, panel.placement.height) == narrow
+
     async def test_a_refresh_redraws_without_losing_the_view(self, fake_service):
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)) as pilot:

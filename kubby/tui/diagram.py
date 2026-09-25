@@ -23,10 +23,14 @@ from typing import Any
 #: What a box *is*, which decides its colour and its border weight. Ordered
 #: by how early it should appear in the picture: the reader should meet the
 #: machine, then what runs on it, then their own workloads.
-ROLES = ("client", "host", "node", "infra", "app")
+#:
+#: There is deliberately no "client" role. The picture represents what is
+#: running on the cluster, and a browser on the other end of a request is
+#: not that — drawing it made the picture an application architecture
+#: diagram, which is a different thing and a misleading one here.
+ROLES = ("host", "node", "infra", "app")
 
 ROLE_STYLE = {
-    "client": "#58a6ff",
     "host": "#d2a8ff",
     "node": "#8b949e",
     "infra": "#8b949e",
@@ -197,10 +201,6 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
             diagram.add(Node(_node_id(fact_name), lines, "node", "node"))
             diagram.link("host", _node_id(fact_name))
 
-    # --- the client, when there is somewhere for traffic to come from ----
-    if cluster.get("ingresses"):
-        diagram.add(Node("you", ["you", "(browser)"], "client", "client"))
-
     # --- workloads, grouped into namespaces -----------------------------
     workloads: dict[tuple[str, str, str], dict[str, Any]] = {}
     for pod in pods:
@@ -305,13 +305,24 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
                 ),
             )
 
-    # --- ingress, and the way in ------------------------------------------
+    # --- ingress, which is a resource in the cluster like any other -------
+    # An Ingress is a real object with a real backend, so it is drawn and
+    # linked to the Service it routes to — that relationship is cluster
+    # wiring. What is *not* drawn is the client on the other end: it is not
+    # part of the cluster, and a picture of the cluster is not a picture of
+    # an application architecture.
     for ing in cluster.get("ingresses") or []:
         hosts = ", ".join(sorted({r["host"] for r in ing.get("rules") or []})) or "*"
-        ing_id = _ingress_id(str(ing.get("namespace") or "default"), str(ing.get("name") or "?"))
-        diagram.add(Node(ing_id, [str(ing.get("name") or "?"), hosts], "client", "client"))
-        if "you" in diagram.nodes:
-            diagram.link("you", ing_id)
+        namespace = str(ing.get("namespace") or "default")
+        ing_id = _ingress_id(namespace, str(ing["name"]))
+        diagram.add(
+            Node(
+                ing_id,
+                [str(ing["name"]), hosts],
+                "infra" if namespace in INFRA_NAMESPACES else "app",
+                namespace,
+            )
+        )
         for backend in ing.get("backends") or []:
             diagram.link(
                 ing_id,

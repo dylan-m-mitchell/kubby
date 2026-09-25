@@ -222,7 +222,27 @@ class TestDiagram:
         built = diagram.build_diagram(realistic())
         groups = dict(built.groups())
         assert "default" in groups and "host" in groups
-        assert len(groups["default"]) == 6
+        # six objects in the namespace, plus its Ingress
+        assert len(groups["default"]) == 7
+
+    def test_nothing_outside_the_cluster_is_drawn(self):
+        """No browser, no "you". The picture is of the cluster, not of an
+        application architecture — a client on the other end of a request is
+        not part of the cluster, and drawing it made the picture assert
+        things it could not know."""
+        built = diagram.build_diagram(realistic())
+        assert "client" not in diagram.ROLES
+        for node in built.nodes.values():
+            assert "browser" not in " ".join(node.lines)
+            assert node.group != "client"
+
+    def test_an_ingress_is_still_drawn_and_still_links_to_its_service(self):
+        """An Ingress is a real object in the cluster with a real backend, so
+        it belongs in the picture. Only the client goes."""
+        built = diagram.build_diagram(realistic())
+        shop = _box(built, "shop")
+        assert shop.group == "default"
+        assert (shop.id, _box(built, "web-svc").id) in built.edges
 
 
 # ---------------------------------------------------------------------------
@@ -231,15 +251,47 @@ class TestDiagram:
 
 
 class TestPlace:
+    @staticmethod
+    def _widest_single_group(built: diagram.Diagram) -> int:
+        """How wide the widest group is, in columns, laid out on its own.
+
+        A group cannot be split across bands — it is a namespace, and a
+        namespace shown in two pieces with its name on both is worse than one
+        that overflows. So below this width the picture legitimately
+        overflows and the panel scrolls.
+        """
+        widest = 1
+        for _heading, members in built.groups():
+            placement = place.place(
+                diagram.Diagram(
+                    nodes={m: built.nodes[m] for m in members},
+                    edges=[e for e in built.edges if e[0] in members and e[1] in members],
+                ),
+                10_000,
+            )
+            widest = max(
+                widest,
+                max((b.x + b.width for b in placement.boxes.values()), default=0),
+            )
+        return widest
+
     @pytest.mark.parametrize("width", [40, 62, 80, 100, 140, 200])
     def test_the_picture_never_exceeds_the_width_asked_for(self, width):
         """The assertion that would have caught "it does not scale with the
         screen size": the old renderer returned byte-identical output at 62
-        and at 84 columns, 112 wide either way."""
+        and at 84 columns, 112 wide either way.
+
+        The allowance is the widest single group, because a group narrower
+        than nothing is not a thing — a namespace with seven objects in it
+        is 47 columns wide whatever the panel is, and the panel scrolls.
+        What must not happen is a *band* growing with the panel, which is
+        what the old renderer did.
+        """
         built = diagram.build_diagram(realistic())
         placement = place.place(built, width)
         widest = max((b.x + b.width for b in placement.boxes.values()), default=0)
-        assert widest <= width, f"{widest} > {width}"
+        floor = self._widest_single_group(built)
+        assert widest <= max(width, floor), f"{widest} > {width} (floor {floor})"
 
     def test_a_narrow_panel_wraps_into_bands(self):
         built = diagram.build_diagram(realistic())

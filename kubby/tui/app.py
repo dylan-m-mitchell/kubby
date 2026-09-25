@@ -395,17 +395,6 @@ class KubbyApp(App[None]):
         # Cluster state changed → start/stop/delete availability changed.
         self._update_keybar()
 
-    def on_resize(self, event: Any) -> None:
-        """Redraw the graph when the terminal changes size.
-
-        The picture is laid out for a width, so a resize leaves it either
-        truncated or padded. Redrawing is cheap next to leaving it wrong.
-        """
-        try:
-            self.query_one(ClusterPanel).refresh_picture()
-        except NoMatches:
-            pass  # not composed yet; the first render will use the real size
-
     def _update_header(self) -> None:
         self.query_one("#status", Static).update(
             render_status(self.system, self.cluster, self.busy_label)

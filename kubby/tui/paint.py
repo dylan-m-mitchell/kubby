@@ -26,7 +26,6 @@ HEADING_STYLE = "bold"
 
 #: Style for a box's border, by what the box is.
 ROLE_STYLE = {
-    "client": "#58a6ff",
     "host": "#d2a8ff",
     "node": "#8b949e",
     "infra": "#8b949e",

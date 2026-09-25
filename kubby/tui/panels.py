@@ -396,6 +396,18 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
     def refresh_picture(self) -> None:
         self.render_picture()
 
+    def on_resize(self) -> None:
+        """Redraw when this panel changes size.
+
+        Handled here rather than on the app: the app's own resize arrives
+        before the new layout has been applied, so the panel still reports
+        its *previous* width and the picture comes out identical. Deferred
+        from there with ``call_after_refresh`` it was reliably one resize
+        behind, which looked like a picture that had frozen at its launch
+        size until `R` was pressed.
+        """
+        self.render_picture()
+
     def render_picture(self) -> None:
         """Draw the picture for the current cluster and panel size."""
         cluster = self._cluster
