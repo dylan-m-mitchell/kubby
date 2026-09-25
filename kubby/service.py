@@ -53,6 +53,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import threading
@@ -260,6 +261,38 @@ class KubbyService:
     # minikube jobs
     # ------------------------------------------------------------------
 
+    #: minikube's own one-line failure summary, e.g.
+    #: ``X Exiting due to GUEST_PROVISION: error provisioning guest: ...``.
+    #: Its output is long, repeats itself three times over, and is wrapped in
+    #: box-drawing characters; this is the one line worth pulling out, because
+    #: "exit code 80" on its own tells the reader nothing at all.
+    _EXIT_RE = re.compile(r"Exiting due to ([A-Z_]+):\s*(.+?)\s*$")
+    #: minikube knows its own remedy for the most common local failure — a
+    #: machine left in a state podman cannot start. It says so, mid-wall-of-
+    #: text, and then exits.
+    _DELETE_ADVICE = 'Running "minikube delete" may fix it'
+
+    def _emit_failure_summary(self, lines: list[str]) -> None:
+        """Add the readable part of a failed job to the log.
+
+        The full stream is already in the log panel, unmodified. This only
+        adds what is worth reading at a glance: which stage failed, and
+        whether minikube told us how to fix it.
+        """
+        reason = ""
+        advice = ""
+        for line in lines:
+            match = self._EXIT_RE.search(line)
+            if match:
+                reason = f"{match.group(1)}: {match.group(2)}"
+            elif self._DELETE_ADVICE in line:
+                advice = "minikube delete, then start again"
+        if reason:
+            self._emit(f"  failed at: {reason}")
+        if advice:
+            self._emit(f"  try: {advice}")
+
+
     def start_minikube(self) -> dict[str, Any]:
         """Kick off ``minikube start`` using the persisted settings."""
         return self._kick_job("start")
@@ -321,6 +354,10 @@ class KubbyService:
         ok = False
         err: str | None = None
         proc: subprocess.Popen[str] | None = None
+        # Kept so a failure can be summarised; the log panel already has
+        # every line, this is only for picking the useful ones back out.
+        seen: list[str] = []
+        seen_lock = threading.Lock()
         try:
             try:
                 # Stream stdout/stderr incrementally so the UI sees live
@@ -343,7 +380,10 @@ class KubbyService:
 
                 def _drain(stream) -> None:
                     for line in iter(stream.readline, ""):
-                        self._emit(line.rstrip("\r\n"))
+                        text = line.rstrip("\r\n")
+                        with seen_lock:
+                            seen.append(text)
+                        self._emit(text)
 
                 t_out = threading.Thread(target=_drain, args=(proc.stdout,), daemon=True)
                 t_err = threading.Thread(target=_drain, args=(proc.stderr,), daemon=True)
@@ -372,6 +412,7 @@ class KubbyService:
                     else:
                         self._emit(f"! minikube {action} failed (exit {returncode})")
                         err = f"exit code {returncode}"
+                        self._emit_failure_summary(seen)
             except FileNotFoundError:
                 msg = "minikube binary not found on PATH"
                 self._emit(f"! {msg}")
