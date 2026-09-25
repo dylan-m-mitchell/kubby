@@ -169,21 +169,11 @@ def place(diagram: Diagram, width: int) -> Placement:
     return placement
 
 
-@dataclass
-class _Item:
-    """One thing inside a container: a nested container, or a box."""
-
-    kind: str  # "container" or "box"
-    id: str
-    width: int
-    height: int
-
-
 def _inner_width(container_id: str, diagram: Diagram, available: int) -> int:
     """How much room a container's contents have, once its borders take
     their share."""
     depth = 0
-    current = container_id
+    current: str | None = container_id
     while current is not None:
         found = next(
             (c for c in diagram.containers if c.id == current), None
@@ -193,38 +183,6 @@ def _inner_width(container_id: str, diagram: Diagram, available: int) -> int:
         depth += 1
         current = found.parent
     return max(12, available - depth * (CONTAINER_PAD * 2 + 1))
-
-
-def _items(container: Any, diagram: Diagram, available: int) -> list[_Item]:
-    """A container's contents: nested containers, and boxes of its own.
-
-    A box that already belongs to a child container is not an item here —
-    it is placed with its container, so a frame is never drawn around one
-    while the other sits outside it.
-    """
-    out: list[_Item] = []
-    for child in diagram.children_of(container.id):
-        child_width, child_height = _measure(child, diagram, available)
-        out.append(_Item("container", child.id, child_width, child_height))
-    for node_id in container.members:
-        if node_id not in diagram.nodes:
-            continue
-        owner = diagram.container_of(node_id)
-        # A box that belongs to a *child* container is placed with that
-        # child, not here — but a box that belongs to this one is a loose
-        # item of this one. Skipping both emptied every frame.
-        if owner is not None and owner.id != container.id:
-            continue
-        node = diagram.nodes[node_id]
-        out.append(
-            _Item(
-                "box",
-                node_id,
-                max((len(line) for line in node.lines), default=0) + 2 + 2 * BOX_PAD,
-                len(node.lines) + 2,
-            )
-        )
-    return out
 
 
 def _box_columns(container: Any, diagram: Diagram) -> list[tuple[int, int, list]]:

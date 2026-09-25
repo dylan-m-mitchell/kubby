@@ -303,9 +303,11 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
         # the control plane directly beneath it.
 
     # --- services, in front of the workloads they back --------------------
-    # Scoped to the namespaces that survived the filter above: a Service in
-    # an omitted namespace has no pods left to point at, so drawing it would
-    # put a box in the picture that leads nowhere.
+    # Scoped to the non-omitted namespaces: a Service in an omitted
+    # namespace has no pods left to point at, so drawing it would put a box
+    # in the picture that leads nowhere. Namespaces with no pods at all
+    # still count here, so a lone Service (e.g. a selector matching nothing)
+    # is drawn rather than hidden with its empty namespace.
     kept = {
         str(ns.get("name") or "default")
         for ns in (cluster.get("namespaces") or [])
@@ -371,13 +373,15 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
     # part of the cluster, and a picture of the cluster is not a picture of
     # an application architecture.
     for ing in cluster.get("ingresses") or []:
-        hosts = ", ".join(sorted({r["host"] for r in ing.get("rules") or []})) or "*"
+        if not isinstance(ing, dict):
+            continue
+        hosts = ", ".join(sorted({str(r.get("host") or "*") for r in ing.get("rules") or [] if isinstance(r, dict)})) or "*"
         namespace = str(ing.get("namespace") or "default")
-        ing_id = _ingress_id(namespace, str(ing["name"]))
+        ing_id = _ingress_id(namespace, str(ing.get("name") or "?"))
         diagram.add(
             Node(
                 ing_id,
-                [str(ing["name"]), hosts],
+                [str(ing.get("name") or "?"), hosts],
                 "infra" if namespace in INFRA_NAMESPACES else "app",
                 namespace,
             )

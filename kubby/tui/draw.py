@@ -227,12 +227,12 @@ class Canvas:
     # ----- edges -------------------------------------------------------
 
     def line(self, points: list[tuple[int, int]], style: str | None = None) -> None:
-        """Draw an orthogonal polyline, stopping at anything locked.
+        """Draw an orthogonal polyline, skipping anything locked.
 
-        Stopping rather than merging is the whole point: a locked cell is a
+        Skipping rather than merging is the whole point: a locked cell is a
         border, and an arrow that ends up merged into one produces
         ``├┼─►`` and a different junction character on every crossing. Here
-        it simply never gets there.
+        a locked cell is left untouched and the run continues beyond it.
         """
         for (x1, y1), (x2, y2) in zip(points, points[1:]):
             if x1 == x2:

@@ -279,7 +279,7 @@ def _lane_around(
     """The innermost reserved column inside a frame that holds both boxes.
 
     Innermost, because the outermost frame that holds both is usually
-    ``your computer`` and a lane out there would run the length of the
+    the widest one and a lane out there would run the length of the
     picture to join two boxes in one namespace.
     """
 

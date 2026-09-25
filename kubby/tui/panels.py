@@ -378,8 +378,8 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
     It scrolls because a real cluster does not fit a terminal panel. A
     13-workload cluster came out 72 columns by 63 lines against a panel of
     roughly 62 by 24, and no amount of compaction fixes that — the overflow
-    is boxes side by side, not spacing. The renderer picks whichever
-    direction overflows less, so what does overflow is the axis that
+    is boxes side by side, not spacing. The layout wraps groups into bands
+    to fit the panel width, so what does overflow is the axis that
     scrolls the way a person expects.
     """
 
