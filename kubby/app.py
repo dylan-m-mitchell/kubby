@@ -37,7 +37,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Print install status for all managed tools and exit (no TUI).",
+        help=(
+            "Print which managed tools are present (and where to get any "
+            "that aren't), then exit (no TUI)."
+        ),
     )
     parser.add_argument(
         "--debug",
@@ -65,7 +68,10 @@ def _print_check_report() -> int:
     print(f"python:       {info['python']}")
     print(f"platform:     {info['platform']} {info['release']}")
     print(f"package mgr:  {info['package_manager_label']}")
-    print(f"elevation:    {info['elevation']}")
+    # Host context, not a kubby capability: kubby installs nothing and never
+    # elevates itself, but minikube may still ask for a password, so it is
+    # worth knowing which prompt to expect.
+    print(f"root prompt:  {info['elevation']}")
     print()
     print("Managed tools")
     print("-------------")
@@ -75,7 +81,9 @@ def _print_check_report() -> int:
         if s["installed"]:
             status = f"installed ({s['version'] or 'unknown'}) at {s['path']}"
         else:
-            status = "NOT FOUND"
+            # The registry's website is the whole answer now — kubby will not
+            # install it, so say where to get it.
+            status = f"NOT FOUND — get it from {s.get('website') or 'upstream'}"
         print(f"  {s['label']:<{width}} {status}")
     return 0
 

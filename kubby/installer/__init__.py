@@ -1,4 +1,9 @@
-"""Installer subpackage: detects and installs the managed tools.
+"""Installer subpackage: knows about the managed tools and how to find them.
+
+Despite the name, nothing here installs anything. What survives is the
+registry of known tools, detection on ``PATH``, and the read-only host
+facts the status line reports. The subpackage name is kept because
+renaming it would churn every import for no benefit.
 
 Submodules are imported via relative ``from . import ...``. The
 fully-qualified ``from kubby.installer import X`` form also works,

@@ -9,7 +9,6 @@ exercise re-check without touching the host.
 
 from __future__ import annotations
 
-import time
 from typing import Any
 
 import pytest
@@ -38,7 +37,7 @@ class FakeService:
                 "key": "minikube",
                 "label": "minikube",
                 "description": "",
-                "website": "",
+                "website": "https://minikube.sigs.k8s.io/",
                 "installed": True,
                 "version": "1.38.1",
                 "path": "/usr/local/bin/minikube",
@@ -47,7 +46,7 @@ class FakeService:
                 "key": "helm",
                 "label": "helm",
                 "description": "",
-                "website": "",
+                "website": "https://helm.sh/",
                 "installed": False,
                 "version": None,
                 "path": None,
@@ -56,7 +55,7 @@ class FakeService:
                 "key": "podman",
                 "label": "podman",
                 "description": "",
-                "website": "",
+                "website": "https://podman.io/",
                 "installed": True,
                 "version": "4.9.3",
                 "path": "/usr/bin/podman",
@@ -65,7 +64,7 @@ class FakeService:
                 "key": "kubectl",
                 "label": "kubectl",
                 "description": "",
-                "website": "",
+                "website": "https://kubernetes.io/docs/reference/kubectl/",
                 "installed": True,
                 "version": "1.36.2",
                 "path": "/usr/local/bin/kubectl",
@@ -99,12 +98,8 @@ class FakeService:
 
         self.job_running = False
         self.job_kind: str | None = None
-        #: what install/start/stop/delete calls should report
+        #: what start/stop/delete calls should report
         self.job_result: dict[str, Any] = {"ok": True, "started": True}
-        self.install_result: dict[str, Any] = {"ok": True, "installed": ["helm"],
-                                               "failed": [], "skipped": 0}
-        #: seconds an install "takes" — gives pilot tests a busy window
-        self.install_delay = 0.0
         self.prerequisites: dict[str, Any] = {"ok": True, "issues": [],
                                               "settings_path": "/tmp/settings.json"}
         self.settings: dict[str, Any] = {"minikube": {
@@ -194,39 +189,10 @@ class FakeService:
         self.job_kind = None
         self.on_job_done({"ok": ok, "error": error, "action": action})
 
-    # ----- installs ----------------------------------------------------
-
-    def install_tool(self, key: str) -> dict[str, Any]:
-        if self.job_running:
-            kind = self.job_kind or "another job"
-            return {"ok": False, "log": "",
-                    "error": f"a {kind} is already in progress — wait for it to finish"}
-        self.calls.append(f"install_tool:{key}")
-        return self._simulate_install(f"tool {key}")
-
-    def install_all(self) -> dict[str, Any]:
-        if self.job_running:
-            kind = self.job_kind or "another job"
-            return {"ok": False, "installed": [], "failed": [], "skipped": 0,
-                    "error": f"a {kind} is already in progress — wait for it to finish"}
-        self.calls.append("install_all")
-        return self._simulate_install("every tool")
-
-    def _simulate_install(self, what: str) -> dict[str, Any]:
-        """Stream two lines like the real installer, then return its summary."""
-        if self.install_delay:
-            time.sleep(self.install_delay)
-        self.on_log(f"$ installing {what}")
-        self.on_log("done")
-        return dict(self.install_result)
-
     # ----- job state ---------------------------------------------------
 
     def is_job_running(self) -> bool:
         return self.job_running
-
-    def is_install_active(self) -> bool:
-        return False
 
 
 @pytest.fixture
