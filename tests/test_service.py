@@ -165,6 +165,62 @@ class TestMinikubeJobs:
         assert payloads == [{"ok": False, "error": "exit code 3", "action": "start"}]
         assert any("failed (exit 3)" in line for line in lines)
 
+    def test_failure_names_the_stage_and_minikubes_own_advice(self, monkeypatch):
+        # Real output from a genuine failure: minikube repeats the error
+        # three times inside box-drawing banners, and the one actionable
+        # sentence is buried mid-wall. The summary is what makes that
+        # readable without scrolling.
+        stderr = (
+            "* Failed to start podman container. "
+            'Running "minikube delete" may fix it: driver start: exit status 125\n'
+            "stderr:\n"
+            "Error: no such container\n"
+            "X Exiting due to GUEST_PROVISION: error provisioning guest: "
+            "Failed to start host\n"
+        )
+        lines, payloads, on_log, on_done = collect()
+        monkeypatch.setattr(
+            service_mod.subprocess, "Popen",
+            lambda *a, **k: FakeProc(stderr=stderr, rc=80),
+        )
+        svc = KubbyService(on_log=on_log, on_job_done=on_done)
+        svc.start_minikube()
+        assert wait_until(lambda: not svc.is_job_running())
+
+        assert payloads[0]["error"] == "exit code 80"
+        assert any(
+            "failed at: GUEST_PROVISION: error provisioning guest" in line
+            for line in lines
+        ), lines
+        assert any("try: minikube delete, then start again" in line for line in lines)
+
+    def test_failure_summary_is_omitted_when_minikube_says_nothing_useful(
+        self, monkeypatch
+    ):
+        # A plain failure must not gain invented advice.
+        lines, _payloads, on_log, on_done = collect()
+        monkeypatch.setattr(
+            service_mod.subprocess, "Popen",
+            lambda *a, **k: FakeProc(stderr="boom\n", rc=3),
+        )
+        svc = KubbyService(on_log=on_log, on_job_done=on_done)
+        svc.start_minikube()
+        assert wait_until(lambda: not svc.is_job_running())
+        assert not any("failed at:" in line or "try:" in line for line in lines)
+
+    def test_summary_does_not_mutate_the_streamed_output(self, monkeypatch):
+        # The full log is the record; the summary is additive only.
+        stderr = "X Exiting due to HOST_PROVISION: something broke\n"
+        lines, _payloads, on_log, on_done = collect()
+        monkeypatch.setattr(
+            service_mod.subprocess, "Popen",
+            lambda *a, **k: FakeProc(stderr=stderr, rc=7),
+        )
+        svc = KubbyService(on_log=on_log, on_job_done=on_done)
+        svc.start_minikube()
+        assert wait_until(lambda: not svc.is_job_running())
+        assert any(line == stderr.strip() for line in lines), lines
+
     def test_done_fires_on_timeout(self, monkeypatch):
         _lines, payloads, on_log, on_done = collect()
         monkeypatch.setattr(
