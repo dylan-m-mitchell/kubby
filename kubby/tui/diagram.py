@@ -382,7 +382,8 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
             # is built for omitted namespaces below. Drawing it would orphan
             # it — never placed, its edge silently dropped.
             continue
-        hosts = ", ".join(sorted({str(r.get("host") or "*") for r in ing.get("rules") or [] if isinstance(r, dict)})) or "*"
+        rules = [r for r in ing.get("rules") or [] if isinstance(r, dict)]
+        hosts = ", ".join(sorted({str(r.get("host") or "*") for r in rules})) or "*"
         ing_id = _ingress_id(namespace, str(ing.get("name") or "?"))
         diagram.add(
             Node(

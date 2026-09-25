@@ -312,6 +312,42 @@ class TestDiagram:
             assert "browser" not in " ".join(node.lines)
             assert node.group != "client"
 
+    def test_an_ingress_in_an_omitted_namespace_is_not_drawn(self):
+        """A box with no frame to sit in is worse than no box.
+
+        Services already skip omitted namespaces; an Ingress that did not
+        was added to the diagram, never placed (no container is built for an
+        omitted namespace), and its edge silently dropped by the
+        `source in placement.boxes` filter. The picture just lost the box
+        and said nothing.
+        """
+        model = realistic()
+        model["ingresses"] = model["ingresses"] + [
+            {
+                "name": "web",
+                "namespace": "ingress-nginx",
+                "rules": [{"host": "web.example"}],
+            }
+        ]
+        built = diagram.build_diagram(model)
+        assert "ingress-nginx" not in {c.label for c in built.containers}
+        assert not [
+            n for n in built.nodes.values() if n.group == "ingress-nginx"
+        ]
+
+    def test_a_malformed_ingress_does_not_take_the_picture_down(self):
+        """One bad object from the API should cost one box, not the picture.
+        The normalising layer this renderer replaced used to default these
+        fields, and losing that turned a partial ingress into a KeyError."""
+        model = realistic()
+        model["ingresses"] = model["ingresses"] + [
+            {"namespace": "default", "rules": [{}, "not a rule"]},
+            "not even a dict",
+        ]
+        built = diagram.build_diagram(model)
+        assert built.nodes
+        assert any(n.lines[0] == "?" for n in built.nodes.values())
+
     def test_an_ingress_is_still_drawn_and_still_links_to_its_service(self):
         """An Ingress is a real object in the cluster with a real backend, so
         it belongs in the picture. Only the client goes."""
