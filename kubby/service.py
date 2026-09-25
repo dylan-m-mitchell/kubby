@@ -502,17 +502,26 @@ class KubbyService:
                 pass
 
         # --- pods ---
+        # `node` and `owner_*` are read here as well as name/status: the
+        # graph needs them, and re-fetching `get pods -A` to get them would
+        # double the most expensive call in a refresh. The tree ignores the
+        # extra keys.
         pods_by_ns: dict[str, list[dict[str, str]]] = {}
         pod_count = 0
         pods_resp = _run(["kubectl", "get", "pods", "-A", "-o", "json"])
         if pods_resp and pods_resp.returncode == 0:
             try:
-                for item in json.loads(pods_resp.stdout).get("items", []):
-                    ns = item["metadata"]["namespace"]
-                    pod_name = item["metadata"]["name"]
-                    phase = item.get("status", {}).get("phase", "Unknown")
+                for pod in cluster_mod.parse_pods(json.loads(pods_resp.stdout)):
+                    ns = pod["namespace"]
                     pods_by_ns.setdefault(ns, []).append(
-                        {"name": pod_name, "status": phase}
+                        {
+                            "name": pod["name"],
+                            "status": pod["phase"],
+                            "node": pod["node"],
+                            "ip": pod["ip"],
+                            "owner_kind": pod["owner_kind"],
+                            "owner_name": pod["owner_name"],
+                        }
                     )
                     pod_count += 1
             except (json.JSONDecodeError, KeyError):
@@ -541,7 +550,7 @@ class KubbyService:
     # cluster graph (the topology picture)
     # ------------------------------------------------------------------
 
-    def get_cluster_graph(self) -> dict[str, Any]:
+    def get_cluster_graph(self, info: dict[str, Any] | None = None) -> dict[str, Any]:
         """Return the cluster's *wiring*, not just its inventory.
 
         Deliberately separate from :meth:`get_cluster_info`: the tree needs
@@ -550,9 +559,13 @@ class KubbyService:
         degrades to empty on failure, exactly as the node/namespace/pod
         calls do — one dead API must not blank the whole picture.
 
-        Costs five extra ``kubectl`` round-trips. That is only affordable
-        because kubby has no auto-refresh; this runs when the user presses
-        ``R``.
+        Pass *info* when the caller already has it. A refresh fetches the
+        inventory anyway, and re-running :meth:`get_cluster_info` here would
+        repeat three of the round-trips for nothing.
+
+        Costs four extra ``kubectl`` calls on top of the inventory. That is
+        only affordable because kubby has no auto-refresh; this runs when the
+        user presses ``R``.
         """
         def _json(args: list[str], timeout: int = 15) -> dict[str, Any]:
             """Run kubectl and parse its JSON, or ``{}`` if anything fails."""
@@ -576,15 +589,26 @@ class KubbyService:
         if not shutil.which("kubectl"):
             return {"available": False, "error": "kubectl not found on PATH"}
 
-        # The inventory calls, shared with the tree's data.
-        info = self.get_cluster_info()
+        if info is None:
+            info = self.get_cluster_info()
         if not info.get("running"):
             return {"available": False, "error": info.get("error") or "cluster not running"}
+
+        # `get pods -A` already ran as part of the inventory and carries the
+        # node and owner fields, so the pods are reused rather than
+        # re-fetched. Two shapes have to be reconciled on the way: the
+        # inventory keys pods by namespace and calls the phase `status`,
+        # while the graph wants both on the pod itself.
+        pods = [
+            {"namespace": ns.get("name") or "default", **pod}
+            for ns in (info.get("namespaces") or [])
+            for pod in ns.get("pods") or []
+        ]
 
         model = cluster_mod.build_model(
             nodes=info.get("nodes") or [],
             namespaces=[str(n.get("name") or "") for n in (info.get("namespaces") or [])],
-            pods=cluster_mod.parse_pods(_json(["kubectl", "get", "pods", "-A", "-o", "json"])),
+            pods=pods,
             workloads=cluster_mod.parse_workloads(
                 _json(["kubectl", "get", "deploy,statefulset,daemonset", "-A", "-o", "json"])
             ),

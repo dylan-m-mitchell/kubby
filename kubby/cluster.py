@@ -70,7 +70,11 @@ def parse_pods(payload: Any) -> list[dict[str, Any]]:
             {
                 "name": name,
                 "namespace": meta.get("namespace") or "default",
-                "phase": (item.get("status", {}) or {}).get("phase", "Unknown"),
+                # `status` is what the tree has always called it; accept
+                # either so the inventory's pods can be reused as they are.
+                "phase": (item.get("status", {}) or {}).get("phase")
+                or item.get("status")
+                or "Unknown",
                 "node": spec.get("nodeName") or "",
                 "ip": (spec.get("podIP") or ""),
                 "owner_kind": owner.get("kind") or "",

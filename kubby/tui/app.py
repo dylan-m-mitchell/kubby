@@ -359,6 +359,10 @@ class KubbyApp(App[None]):
         system = self.service.system_info()
         tools = self.service.get_status()
         cluster = self.service.get_cluster_info()
+        # The graph reuses the inventory above rather than re-fetching it, so
+        # this costs four extra calls, not seven.
+        graph = self.service.get_cluster_graph(cluster)
+        cluster = {**cluster, "graph": graph}
         images = self.service.list_local_images()
         self._call_on_ui(self._apply_data, system, tools, cluster, images)
 
@@ -390,6 +394,17 @@ class KubbyApp(App[None]):
         self._render_images()
         # Cluster state changed → start/stop/delete availability changed.
         self._update_keybar()
+
+    def on_resize(self, event: Any) -> None:
+        """Redraw the graph when the terminal changes size.
+
+        The picture is laid out for a width, so a resize leaves it either
+        truncated or padded. Redrawing is cheap next to leaving it wrong.
+        """
+        try:
+            self.query_one(ClusterPanel).refresh_picture()
+        except NoMatches:
+            pass  # not composed yet; the first render will use the real size
 
     def _update_header(self) -> None:
         self.query_one("#status", Static).update(
@@ -644,13 +659,19 @@ class KubbyApp(App[None]):
             ("minikube panel", self._panel_rows(MinikubePanel)),
             ("tools panel", self._panel_rows(ToolsPanel) + list_nav),
             ("images panel", images_rows),
+            # The cluster panel is two views behind one pair of keys, so the
+            # help says which is showing rather than listing two panels.
             (
-                "namespaces panel",
-                move_rows
+                "cluster panel",
+                [
+                    ("g", "the graph (default)"),
+                    ("t", "the namespace tree"),
+                ]
+                + move_rows
                 + [
-                    ("h", "collapse, or out to the parent"),
-                    ("l", "expand, or in to the first pod"),
-                    ("enter/space", "expand / collapse"),
+                    ("h", "collapse, or out to the parent (tree)"),
+                    ("l", "expand, or in to the first pod (tree)"),
+                    ("enter/space", "expand / collapse (tree)"),
                 ],
             ),
         ]

@@ -89,6 +89,11 @@ class FakeService:
             ],
             "pod_count": 3,
         }
+        #: Services and Ingress for the graph view. Empty by default so the
+        #: default picture is the plain inventory; tests that care about the
+        #: wiring set them.
+        self.services: list[dict[str, Any]] = []
+        self.ingresses: list[dict[str, Any]] = []
         self.images: list[dict[str, Any]] = [
             {"name": "docker.io/library/nginx:alpine", "tags": ["alpine"],
              "created": "", "size": 125_829_120, "local": True},
@@ -131,6 +136,29 @@ class FakeService:
                 {**ns, "pods": [dict(p) for p in ns.get("pods", [])]}
                 for ns in self.cluster["namespaces"]
             ],
+        }
+
+    def get_cluster_graph(self, info=None) -> dict[str, Any]:
+        self.calls.append("get_cluster_graph")
+        if info is None:
+            info = self.get_cluster_info()
+        if not info.get("running", True):
+            return {"available": False, "error": info.get("error")}
+        return {
+            "available": True,
+            "error": None,
+            "context": info.get("context"),
+            "version": info.get("version"),
+            "nodes": [dict(n) for n in self.cluster["nodes"]],
+            "namespaces": [
+                {**ns, "pods": [dict(p) for p in ns.get("pods", [])]}
+                for ns in self.cluster["namespaces"]
+            ],
+            "services": [dict(s) for s in self.services],
+            "ingresses": [dict(i) for i in self.ingresses],
+            "pod_count": sum(
+                len(ns.get("pods", [])) for ns in self.cluster["namespaces"]
+            ),
         }
 
     def list_local_images(self, query: str | None = None) -> list[dict[str, Any]]:

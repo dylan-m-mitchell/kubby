@@ -14,6 +14,7 @@ from textual.widgets import Static
 from kubby.tui.app import KubbyApp, APP_KEYS, render_status
 from kubby.tui.panels import (
     ClusterPanel,
+    ClusterTree,
     ImagesPanel,
     LogPanel,
     MinikubePanel,
@@ -73,7 +74,7 @@ class TestShell:
             assert visited == list(PANEL_IDS) + [PANEL_IDS[0]]
 
             # The focused panel is visually distinguished (lazygit style).
-            app.query_one(ClusterPanel).focus()
+            app.query_one(ClusterTree).focus()
             await pilot.pause()
             focused = app.screen.focused
             blurred = app.query_one(MinikubePanel)
@@ -163,7 +164,7 @@ class TestShell:
             assert any("✓" in p and "minikube" in p for p in prompts)
             assert any("✗" in p and "helm" in p for p in prompts)
 
-            cluster = app.query_one(ClusterPanel)
+            cluster = app.query_one(ClusterTree)
             labels = [str(node.label) for node in cluster.root.children]
             assert labels == ["default  1 pod", "kube-system  2 pods"]
             assert cluster.border_subtitle == "1/1 ready"
@@ -207,7 +208,7 @@ class TestShell:
 
             status = app.query_one("#status", Static)
             assert "no cluster" in str(status.content)
-            labels = [str(node.label) for node in app.query_one(ClusterPanel).root.children]
+            labels = [str(node.label) for node in app.query_one(ClusterTree).root.children]
             assert labels == ["no cluster"]
             assert "no tools" in str(
                 next(iter(app.query_one(ToolsPanel).options)).prompt
