@@ -118,10 +118,10 @@ model that does not answer at all fails the run immediately, with a comment
 saying no review happened, instead of spending every round's budget on a
 dead connection.
 
-- **Opt out:** open the PR as a draft (label it `skip-agent-review` before
-  marking it ready), or add that label before opening — the workflow only
-  starts on open/reopen/ready-for-review, so a label added afterwards is
-  never re-read.
+- **Opt out:** open the PR as a draft, add the `skip-agent-review` label,
+  then mark it ready for review. Labels are only read when the workflow
+  starts — on open/reopen/ready-for-review — so the label must already be
+  on the PR at that moment; adding it later never takes effect.
 - **Model:** set the `REVIEW_MODEL` repository variable to choose one.
   Without it, adding the `OPENCODE_API_KEY` secret (an OpenCode Console
   service-account key) selects a paid model; with neither, the loop falls

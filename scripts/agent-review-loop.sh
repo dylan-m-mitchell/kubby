@@ -73,6 +73,14 @@ if [[ -z "$GH_TOKEN_VALUE" && -n "${GH_TOKEN_FILE:-}" && -r "${GH_TOKEN_FILE:-}"
   GH_TOKEN_VALUE=$(<"$GH_TOKEN_FILE")
 fi
 unset GH_TOKEN GITHUB_TOKEN
+# The file's contents now live only in this shell's memory. Delete it at
+# once: GH_TOKEN_FILE is in the step environment, so it reaches the agent's
+# shell too, and a file that no longer exists cannot be read back no matter
+# which permission (if any) would have covered the read. Nothing below
+# re-reads it — every gh call and the push go through GH_TOKEN_VALUE.
+if [[ -n "${GH_TOKEN_FILE:-}" ]]; then
+  rm -f "$GH_TOKEN_FILE" 2>/dev/null || true
+fi
 
 REPO=${REPO:-${GITHUB_REPOSITORY:-}}
 PR_NUMBER=${PR_NUMBER:?PR_NUMBER is required}
@@ -333,7 +341,7 @@ run_agent() {
   # a round that wrote its verdict before the limit still counts.
   local rc=0
   timeout --kill-after=30 "$AGENT_ROUND_TIMEOUT" \
-    env -u GH_TOKEN -u GITHUB_TOKEN \
+    env -u GH_TOKEN -u GITHUB_TOKEN -u GH_TOKEN_FILE \
     opencode run --standalone --auto \
       --agent ci-reviewer \
       --model "$REVIEW_MODEL" \
@@ -434,7 +442,7 @@ probe_model() {
     attempt=$((attempt + 1))
     rc=0
     timeout --kill-after=15 60 \
-      env -u GH_TOKEN -u GITHUB_TOKEN \
+      env -u GH_TOKEN -u GITHUB_TOKEN -u GH_TOKEN_FILE \
       opencode run --standalone --auto \
         --model "$REVIEW_MODEL" \
         --title "PR #$PR_NUMBER reachability probe" \
@@ -474,7 +482,7 @@ write_diff "$ART/pr.diff"
   # The paths come out of the diff the agent reviews, not a second git
   # calculation — that is what stopped this warning from being silently
   # skipped whenever the base commit was missing from the clone.
-  guardrail_files=$(grep -E '^diff --git a/(scripts/agent-review-loop\.sh|\.opencode/agents/)' \
+  guardrail_files=$(grep -E '^diff --git a/(scripts/agent-review-loop\.sh|\.opencode/agents/|\.github/workflows/agent-review\.yml)' \
     "$ART/pr.diff" 2>/dev/null |
     sed -E 's|^diff --git a/([^ ]+) b/.*|\1|' | sort -u || true)
   if [[ -n "$guardrail_files" ]]; then
