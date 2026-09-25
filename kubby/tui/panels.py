@@ -103,7 +103,7 @@ class PanelBase:
 #: A constant rather than a mixin on purpose: Textual *replaces* BINDINGS
 #: along the MRO instead of merging them, so a mixin's bindings are silently
 #: dropped the moment a panel declares its own. A panel therefore has to
-#: concatenate this explicitly — see ``ToolsPanel`` and ``ImagesPanel``.
+#: include this explicitly — see ``ImagesPanel`` and ``ClusterPanel``.
 #:
 #: ``h``/``l`` are deliberately absent: a one-column list has no horizontal
 #: dimension, so there is nothing for them to do, and inventing a meaning
@@ -225,7 +225,9 @@ class ToolsPanel(PanelBase, OptionList):
     JUMP_KEY = "2"
     EMPTY_TEXT = "no tools"
 
-    BINDINGS = LIST_NAV_BINDINGS
+    # Each panel owns its list: aliasing the shared constant would let a
+    # mutation on one panel leak into the others.
+    BINDINGS = list(LIST_NAV_BINDINGS)
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(markup=False, **kwargs)
@@ -272,8 +274,9 @@ class ToolsPanel(PanelBase, OptionList):
                     self.highlighted = index
                     break
         if self.highlighted is None:
-            # OptionList starts with nothing highlighted; a row must always
-            # be actionable, otherwise `i` has no target after a refresh.
+            # OptionList starts with nothing highlighted; keep a row
+            # highlighted so keyboard navigation has a position after a
+            # refresh.
             self.highlighted = 0
 
 
