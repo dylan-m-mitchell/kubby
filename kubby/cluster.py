@@ -66,15 +66,22 @@ def parse_pods(payload: Any) -> list[dict[str, Any]]:
         # Prefer the most specific owner. A pod can carry several; the
         # controller that actually manages it is the one worth naming.
         owner = owners[0] if owners else {}
+        # `status` is what the tree has always called it; accept either so
+        # the inventory's pods can be reused as they are. A status dict
+        # without a phase string is "Unknown", never the dict itself.
+        status_val = item.get("status")
+        if isinstance(status_val, dict):
+            phase = status_val.get("phase")
+            phase = phase if isinstance(phase, str) and phase else "Unknown"
+        elif isinstance(status_val, str) and status_val:
+            phase = status_val
+        else:
+            phase = "Unknown"
         pods.append(
             {
                 "name": name,
                 "namespace": meta.get("namespace") or "default",
-                # `status` is what the tree has always called it; accept
-                # either so the inventory's pods can be reused as they are.
-                "phase": (item.get("status", {}) or {}).get("phase")
-                or item.get("status")
-                or "Unknown",
+                "phase": phase,
                 "node": spec.get("nodeName") or "",
                 "ip": (spec.get("podIP") or ""),
                 "owner_kind": owner.get("kind") or "",
@@ -346,10 +353,11 @@ def build_model(
         resolved = resolve_workload(pod, workloads, replica_sets)
         entry = dict(pod)
         entry["workload"] = resolved
-        pods_by_ns.setdefault(pod["namespace"], []).append(entry)
+        entry.setdefault("namespace", "default")
+        pods_by_ns.setdefault(entry.get("namespace") or "default", []).append(entry)
 
     # Address fallback: a slice without targetRef still points at pods by IP.
-    pods_by_ip = {p["ip"]: p for p in pods if p.get("ip")}
+    pods_by_ip = {p.get("ip"): p for p in pods if p.get("ip")}
 
     services_out: list[dict[str, Any]] = []
     for svc in services:

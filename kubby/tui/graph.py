@@ -196,8 +196,7 @@ def build_mermaid(cluster: dict[str, Any], direction: str = "TB") -> str:
     # A namespace with no pods has no wiring, and the picture is about
     # wiring. Drawing an empty box for kube-public and kube-node-lease on
     # every fresh cluster is noise, and the tree still lists them.
-    namespaces = [ns for ns in all_namespaces if ns.get("pods") or ns.get("collapsed")]
-    namespaces = [ns for ns in namespaces if ns.get("pods")]
+    namespaces = [ns for ns in all_namespaces if ns.get("pods")]
 
     # The client. Traffic enters the cluster here, which is the single most
     # useful thing to show someone who has not seen one before.
@@ -208,6 +207,14 @@ def build_mermaid(cluster: dict[str, Any], direction: str = "TB") -> str:
     service_ids: dict[tuple[str, str], str] = {}
     for svc in cluster.get("services") or []:
         service_ids[(svc["namespace"], svc["name"])] = _service_id(svc)
+
+    # Same kind+name in two namespaces must not share a Mermaid id, or the
+    # picture merges them into one box. The short id is kept when it is
+    # unambiguous so the source stays readable (and stable for existing
+    # goldens); only a real collision pays for the longer namespaced id.
+    _kind_name_counts: dict[tuple[str, str], int] = {}
+    for (_pns, _kind, _name) in workloads:
+        _kind_name_counts[(_kind, _name)] = _kind_name_counts.get((_kind, _name), 0) + 1
 
     for ns in namespaces:
         name = ns["name"]
@@ -233,7 +240,10 @@ def build_mermaid(cluster: dict[str, Any], direction: str = "TB") -> str:
         for (pod_ns, kind, wl_name), entry in workloads.items():
             if pod_ns != name:
                 continue
-            box = _node_id("w", kind, wl_name)
+            if _kind_name_counts.get((kind, wl_name), 1) > 1:
+                box = _node_id("w", pod_ns, kind, wl_name)
+            else:
+                box = _node_id("w", kind, wl_name)
             entry["id"] = box
             cls = "ok" if _is_healthy(entry["pods"]) else "bad"
             lines.append(f'    {box}["{_workload_label(entry, entry["pods"])}"]:::{cls}')
@@ -389,13 +399,6 @@ def _declare_service(
     else:
         body, cls = port_text, "manual"
     lines.append(f'{indent}{sid}["{_label(svc["name"], body, 24)}"]:::{cls}')
-
-
-def _find_service(cluster: dict[str, Any], namespace: str, name: str) -> dict[str, Any] | None:
-    for svc in cluster.get("services") or []:
-        if svc["namespace"] == namespace and svc["name"] == name:
-            return svc
-    return None
 
 
 def _append_classes(lines: list[str]) -> None:
