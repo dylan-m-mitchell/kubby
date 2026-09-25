@@ -10,6 +10,8 @@ because its namespace was collapsed.
 from __future__ import annotations
 
 
+from rich.text import Text
+
 from fixtures_cluster_graph import realistic
 from kubby.tui import graph
 
@@ -55,6 +57,71 @@ def _model(**over):
     }
     base.update(over)
     return base
+
+
+# ---------------------------------------------------------------------------
+# the architecture layer: what the cluster physically is
+# ---------------------------------------------------------------------------
+
+
+class TestArchitecture:
+    def test_host_and_node_are_drawn(self):
+        src = graph.build_mermaid(realistic())
+        assert 'host_your_computer["your computer\\nminikube, docker driver"]' in src
+        assert "host_your_computer --> node_minikube" in src
+
+    def test_node_box_names_its_os_and_runtime(self):
+        """A pod is a container on that runtime, not a VM in the abstract."""
+        src = graph.build_mermaid(realistic())
+        assert "Debian GNU/Linux 12 (bookworm)" in src
+        assert "docker 29.2.1" in src
+
+    def test_node_box_shows_allocatable_against_capacity(self):
+        """The explanation for a Pod stuck Pending with 'insufficient cpu':
+        the node can hand out 2 of the host's 16, and only the first number
+        is what a Pod may ask for."""
+        src = graph.build_mermaid(realistic())
+        assert "2 of 16 cpu" in src
+        assert "2Gi of 15.6Gi" in src
+
+    def test_equal_capacity_and_allocatable_is_not_a_pointless_pair(self):
+        model = realistic()
+        for fact in model["node_facts"]:
+            fact["allocatable_cpu"] = fact["capacity_cpu"]
+            fact["allocatable_memory"] = fact["capacity_memory"]
+        src = graph.build_mermaid(model)
+        assert "16 cpu, 15.6Gi" in src
+        assert "of 16 cpu" not in src
+        assert "2Gi of" not in src
+
+    def test_each_control_plane_component_gets_a_box_and_a_job(self):
+        src = graph.build_mermaid(realistic())
+        assert 'w_Pod_etcd["etcd\\nall cluster state lives here"]' in src
+        assert "service names to addresses" in src
+
+    def test_control_plane_boxes_carry_no_ready_count(self):
+        """"kube-apiserver 1/1" tells a newcomer nothing; the job is the
+        fact they came for."""
+        src = graph.build_mermaid(realistic())
+        assert "all cluster state lives here\\n" not in src
+        assert "1/1\\n" not in src.split("w_Pod_etcd")[1][:60]
+
+    def test_user_workloads_still_get_ready_counts(self):
+        src = graph.build_mermaid(realistic())
+        assert 'w_Deployment_web["web\\n3/3  80"]' in src
+        assert 'w_Deployment_api["api\\n1/2  8080"]' in src
+
+    def test_a_cluster_with_no_node_facts_still_renders(self):
+        """A node object we could not read must not remove the picture."""
+        model = realistic()
+        model["node_facts"] = []
+        src = graph.build_mermaid(model)
+        assert "your computer" not in src
+        assert "web-svc" in src
+
+    def test_every_node_appears_as_a_box(self):
+        src = graph.build_mermaid(realistic())
+        assert "node_minikube[" in src and "node_worker_2[" in src
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +234,7 @@ class TestStructure:
 
     def test_service_points_at_the_workload_backing_it(self):
         src = graph.build_mermaid(realistic())
-        assert "svc_default_web_svc --> w_ReplicaSet_web" in src
+        assert "svc_default_web_svc --> w_Deployment_web" in src
 
     def test_service_with_no_endpoints_is_red(self):
         src = graph.build_mermaid(realistic())
@@ -182,11 +249,13 @@ class TestStructure:
         assert 'kubernetes\\n443"]:::bad' not in src
         assert 'kubernetes\\n443"]:::manual' in src
 
-    def test_control_plane_namespace_is_collapsed(self):
+    def test_control_plane_is_drawn_one_box_per_component(self):
+        """The control plane is the reason to look at this picture at all:
+        "kube-apiserver 1/1" teaches nothing, "every request passes
+        through" does."""
         src = graph.build_mermaid(realistic())
-        assert 'w_kube_system_collapsed["kube-system\\n2 workloads"]' in src
-        # and its individual pods are not drawn
-        assert "coredns-77d-xyz" not in src
+        assert 'w_Pod_etcd["etcd\\nall cluster state lives here"]' in src
+        assert 'w_Deployment_coredns["coredns\\nservice names to addresses"]' in src
 
     def test_empty_namespaces_are_left_out(self):
         """kube-public and kube-node-lease have no wiring; a box each is
@@ -197,17 +266,17 @@ class TestStructure:
                                {"name": "default", "pods": [_pod("w-1")],
                                 "workload_count": 1, "collapsed": False}])
         )
-        assert "kube-public" not in src
+        assert "kube-public" not in src and "kube_public" not in src
 
     def test_each_node_workload_edge_appears_once(self):
         """Regression: one edge per *pod* meant seven near-identical lines
         strung across the diagram and a picture three screens tall."""
         src = graph.build_mermaid(realistic())
-        assert src.count("node_minikube --> w_kube_system_collapsed") == 1
+        assert src.count("node_minikube --> w_Deployment_coredns") == 1
 
     def test_pods_spread_over_two_nodes_each_get_one_edge(self):
         src = graph.build_mermaid(realistic())
-        assert "node_minikube --> w_ReplicaSet_web" in src
+        assert "node_minikube --> w_Deployment_web" in src
         assert "node_worker_2 --> w_StatefulSet_postgres" in src
 
     def test_no_duplicate_edges_at_all(self):
@@ -269,13 +338,19 @@ class TestRender:
 
 class TestRenderBest:
     def test_picks_the_direction_that_fits_better(self):
-        """A panel-shaped region is wider than tall, and the aspect-ratio
-        heuristic used to choose TB (42x151) over LR (63x72) on a real
-        cluster. Both overflow; the point is which one overflows less."""
+        """A panel-shaped region is wider than tall, so an aspect-ratio
+        heuristic chose TB where LR overflowed less. Asserted against the
+        *other* direction rather than a magic number: what matters is that
+        the choice is the better of the two, not what the answer happens to
+        be today."""
         source = graph.build_mermaid(realistic())
-        text, direction = graph.render_best(source, 62, 24)
-        assert direction == "LR"
-        assert graph._max_width(text) < 151
+        width, height = 62, 24
+        chosen, direction = graph.render_best(source, width, height)
+        other = graph.render(graph._retarget(source, "LR" if direction == "TB" else "TB"),
+                             width)
+        assert graph._overflow(chosen, width, height) <= graph._overflow(
+            other, width, height
+        )
 
     def test_never_raises_on_malformed_source(self):
         text, direction = graph.render_best("}{ nonsense", 60, 20)
@@ -285,6 +360,35 @@ class TestRenderBest:
     def test_returns_a_direction_the_caller_can_keep(self):
         _, direction = graph.render_best(graph.build_mermaid(realistic()), 200, 200)
         assert direction in ("TB", "LR")
+
+
+class TestCentre:
+    def test_a_narrow_picture_is_centred(self):
+        """Left-padded by half the slack on every line.
+
+        Padding only the left is the right contract: the widget fills the
+        rest of the row, and per-line centring would misalign the boxes,
+        which is the one thing a drawing must not do.
+        """
+        picture = Text("hi\nthere")
+        centred = graph.center(picture, 20)
+        plain = centred.plain.splitlines()
+        # widest line is "there" (5), so 7 spaces of slack either side
+        assert plain == [" " * 7 + "hi", " " * 7 + "there"]
+
+    def test_odd_slack_rounds_down(self):
+        centred = graph.center(Text("abc"), 10)
+        assert centred.plain == " " * 3 + "abc"
+
+    def test_a_picture_wider_than_the_panel_is_left_alone(self):
+        """Centring an over-wide picture would push its left edge past the
+        scroll origin, where it cannot be scrolled back to."""
+        wide = Text("x" * 40)
+        assert graph.center(wide, 20) is wide
+
+    def test_centre_is_a_no_op_on_an_exact_fit(self):
+        exact = Text("y" * 10)
+        assert graph.center(exact, 10) is exact
 
 
 class TestNodeRects:

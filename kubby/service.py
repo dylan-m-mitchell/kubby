@@ -607,6 +607,20 @@ class KubbyService:
 
         model = cluster_mod.build_model(
             nodes=info.get("nodes") or [],
+            # The inventory's node list carries only name/status/roles. The
+            # architecture layer wants the rest of `nodeInfo` — the OS, the
+            # runtime, the CPU and memory a Pod can actually ask for — so the
+            # node object is asked for again rather than widened for the
+            # tree, which needs none of it.
+            node_facts=cluster_mod.parse_node_facts(
+                _json(["kubectl", "get", "nodes", "-o", "json"])
+            ),
+            # The driver the user configured, for the "how minikube runs"
+            # line. Empty means auto, which the picture says rather than
+            # guessing at.
+            driver=str(
+                (settings_mod.load()["minikube"].get("driver") or "").strip()
+            ),
             namespaces=[str(n.get("name") or "") for n in (info.get("namespaces") or [])],
             pods=pods,
             workloads=cluster_mod.parse_workloads(

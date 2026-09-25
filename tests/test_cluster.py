@@ -354,6 +354,95 @@ class TestParseIngress:
 
 
 # ---------------------------------------------------------------------------
+# node facts — what a node *is*, as opposed to what runs on it
+# ---------------------------------------------------------------------------
+
+
+class TestParseNodeFacts:
+    def _payload(self):
+        return {
+            "items": [
+                {
+                    "metadata": {
+                        "name": "minikube",
+                        "labels": {"node-role.kubernetes.io/control-plane": ""},
+                    },
+                    "spec": {"podCIDR": "10.244.0.0/16"},
+                    "status": {
+                        "nodeInfo": {
+                            "kubeletVersion": "v1.35.1",
+                            "osImage": "Debian GNU/Linux 12 (bookworm)",
+                            "containerRuntimeVersion": "docker://29.2.1",
+                            "kernelVersion": "6.1.0",
+                            "architecture": "amd64",
+                        },
+                        "addresses": [
+                            {"type": "Hostname", "address": "minikube"},
+                            {"type": "InternalIP", "address": "192.168.49.2"},
+                        ],
+                        "capacity": {"cpu": "16", "memory": "16313348Ki"},
+                        "allocatable": {"cpu": "2", "memory": "2097152Ki"},
+                        "conditions": [{"type": "Ready", "status": "True"}],
+                    },
+                }
+            ]
+        }
+
+    def test_reads_the_machine_not_just_its_name(self):
+        (fact,) = cluster.parse_node_facts(self._payload())
+        assert fact["os_image"] == "Debian GNU/Linux 12 (bookworm)"
+        assert fact["runtime"] == "docker 29.2.1"
+        assert fact["kubelet_version"] == "v1.35.1"
+        assert fact["pod_cidr"] == "10.244.0.0/16"
+        assert fact["status"] == "Ready"
+        assert fact["roles"] == ["control-plane"]
+
+    def test_capacity_and_allocatable_are_kept_separate(self):
+        """On a 2-CPU minikube on a 16-CPU laptop these differ, and only the
+        second is what a Pod can ask for. Collapsing them is how people
+        conclude the cluster is starved when it is not."""
+        (fact,) = cluster.parse_node_facts(self._payload())
+        assert fact["capacity_cpu"] == "16"
+        assert fact["allocatable_cpu"] == "2"
+
+    def test_internal_ip_is_preferred_over_the_hostname(self):
+        (fact,) = cluster.parse_node_facts(self._payload())
+        assert fact["internal_ip"] == "192.168.49.2"
+
+    def test_not_ready_node(self):
+        payload = self._payload()
+        payload["items"][0]["status"]["conditions"] = [
+            {"type": "Ready", "status": "False"}
+        ]
+        assert cluster.parse_node_facts(payload)[0]["status"] == "NotReady"
+
+    def test_missing_payload_is_empty(self):
+        assert cluster.parse_node_facts(None) == []
+
+
+class TestHumanMemory:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("16313348Ki", "15.6Gi"),
+            ("2097152Ki", "2Gi"),
+            ("2Gi", "2Gi"),
+            ("512Mi", "512Mi"),
+            ("1500Mi", "1.5Gi"),
+            ("3Ti", "3Ti"),
+            ("0", "0"),
+            ("", ""),
+            # Not a quantity: pass it through rather than invent a number.
+            ("bogus", "bogus"),
+        ],
+    )
+    def test_kubernetes_memory_quantities_become_readable(self, raw, expected):
+        # 16313348Ki is 15.6Gi. Scaling by the suffix alone divides once too
+        # few and reports 15931Gi, which is off by 1024.
+        assert cluster.human_memory(raw) == expected
+
+
+# ---------------------------------------------------------------------------
 # the assembled model
 # ---------------------------------------------------------------------------
 

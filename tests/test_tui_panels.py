@@ -813,6 +813,17 @@ class TestClusterGraphView:
             )
             assert app.query_one(ClusterPanel).view == "tree"
 
+    async def test_the_picture_is_centred_not_left_aligned(self, fake_service):
+        """A tree is a list and reads fine flush left. A picture has a shape
+        and wants the space either side of it."""
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(120, 44)):
+            await wait_until(lambda: app.cluster)
+            picture = self._picture(app)
+            first = picture.splitlines()[0]
+            assert first.startswith(" "), "picture is flush left"
+            assert len(first) - len(first.lstrip()) > 0
+
     async def test_jk_still_drive_the_tree_in_tree_view(self, fake_service):
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)) as pilot:

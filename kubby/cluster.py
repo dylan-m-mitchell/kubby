@@ -49,6 +49,102 @@ def _int_or(value: Any, default: int = 0) -> int:
         return default
 
 
+def human_memory(quantity: str) -> str:
+    """``16313348Ki`` -> ``15.6Gi``.
+
+    Kubernetes reports memory in binary units with no parsing helper
+    anywhere in the API, and nobody reads raw Ki. Everything is converted
+    through bytes first — scaling by the suffix alone gets the exponent
+    wrong (``16313348Ki`` is 15.6Gi, not 15931Gi, which is what dividing
+    once by 1024 and labelling it Gi gives you).
+    """
+    text = str(quantity or "").strip()
+    if not text:
+        return ""
+    scales = {"Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4}
+    for suffix, scale in scales.items():
+        if not text.endswith(suffix):
+            continue
+        try:
+            value = float(text[: -len(suffix)])
+        except ValueError:
+            return text
+        total = value * scale
+        for unit, size in (("Ti", 1024**4), ("Gi", 1024**3), ("Mi", 1024**2)):
+            if total >= size:
+                # `2Gi` not `2.0Gi`: a trailing zero is noise on a box label.
+                return f"{total / size:.1f}{unit}".replace(".0", "")
+        return f"{total:g}B"
+    return text
+
+
+def parse_node_facts(payload: Any) -> list[dict[str, Any]]:
+    """Extract what a node *is*, as opposed to what runs on it.
+
+    A person looking at a cluster for the first time wants to know that the
+    node is a whole machine with its own OS, its own kernel, its own disk
+    and a fixed share of CPU and memory — and that the share is usually far
+    smaller than the host's. That is the explanation for a Pod stuck in
+    ``Pending`` that says "insufficient cpu", and it is invisible in a list
+    of pods.
+
+    ``capacity`` vs ``allocatable`` is the pair worth keeping: on a 2-CPU
+    minikube on a 16-CPU laptop, capacity reports 16 and allocatable
+    reports 2, and only the second one is what a Pod can ask for.
+    """
+    facts: list[dict[str, Any]] = []
+    for item in (payload or {}).get("items", []):
+        meta = item.get("metadata", {})
+        name = meta.get("name")
+        if not name:
+            continue
+        status = item.get("status", {}) or {}
+        info = status.get("nodeInfo", {}) or {}
+        capacity = status.get("capacity", {}) or {}
+        allocatable = status.get("allocatable", {}) or {}
+
+        internal_ip = ""
+        for address in status.get("addresses", []) or []:
+            if address.get("type") == "InternalIP":
+                internal_ip = address.get("address") or ""
+                break
+
+        roles: list[str] = []
+        for label in meta.get("labels", {}) or {}:
+            if label.startswith("node-role.kubernetes.io/"):
+                role = label.split("/", 1)[1]
+                if role:
+                    roles.append(role)
+
+        ready = "Unknown"
+        for condition in status.get("conditions", []) or []:
+            if condition.get("type") == "Ready":
+                ready = "Ready" if condition.get("status") == "True" else "NotReady"
+
+        facts.append(
+            {
+                "name": name,
+                "status": ready,
+                "roles": roles,
+                "internal_ip": internal_ip,
+                "os_image": info.get("osImage") or "",
+                "kernel": info.get("kernelVersion") or "",
+                "architecture": info.get("architecture") or "",
+                "kubelet_version": info.get("kubeletVersion") or "",
+                # e.g. "docker://29.2.1" -> the runtime minikube is using.
+                "runtime": (info.get("containerRuntimeVersion") or "").replace(
+                    "://", " "
+                ).strip(),
+                "pod_cidr": (item.get("spec", {}) or {}).get("podCIDR") or "",
+                "capacity_cpu": capacity.get("cpu") or "",
+                "allocatable_cpu": allocatable.get("cpu") or "",
+                "capacity_memory": capacity.get("memory") or "",
+                "allocatable_memory": allocatable.get("memory") or "",
+            }
+        )
+    return facts
+
+
 def parse_pods(payload: Any) -> list[dict[str, Any]]:
     """Extract the pod fields the graph needs, including node and owner.
 
@@ -340,6 +436,8 @@ def build_model(
     services: list[dict[str, Any]],
     endpoint_slices: dict[tuple[str, str], list[dict[str, str]]],
     ingresses: list[dict[str, Any]],
+    node_facts: list[dict[str, Any]] | None = None,
+    driver: str = "",
 ) -> dict[str, Any]:
     """Assemble the whole picture's data from the parsed pieces.
 
@@ -399,6 +497,8 @@ def build_model(
 
     return {
         "nodes": nodes,
+        "node_facts": node_facts or [],
+        "driver": driver,
         "namespaces": namespaces_out,
         "services": services_out,
         "ingresses": ingresses,

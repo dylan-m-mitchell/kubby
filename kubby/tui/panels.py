@@ -411,10 +411,14 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
 
         self.border_subtitle = f"{cluster.get('pod_count') or 0} pods"
         source = graph_mod.build_mermaid(cluster)
+        width = max(20, self.size.width)
         picture, _direction = graph_mod.render_best(
-            source, max(20, self.size.width), max(5, self.size.height)
+            source, width, max(5, self.size.height)
         )
-        self._picture.update(picture)
+        # Centred rather than left-aligned, which is what the tree looks like
+        # because a tree is a list. A picture with a shape wants the space
+        # either side of it. Only applied when it fits — see `center`.
+        self._picture.update(graph_mod.center(picture, width))
 
 
 class ClusterPanel(PanelBase, Vertical, can_focus=True):

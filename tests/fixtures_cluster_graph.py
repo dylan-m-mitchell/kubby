@@ -13,11 +13,20 @@ from __future__ import annotations
 
 import sys
 
+from kubby.cluster import resolve_workload
 from kubby.tui import graph
 
 
 def _pod(name, ns, phase="Running", node="minikube", ip="", owner=("ReplicaSet", "")):
-    return {
+    """A pod with its workload resolved the way the service resolves it.
+
+    Deliberately calls the real `resolve_workload` rather than hand-building
+    the dict: an earlier version of this fixture computed the workload name
+    itself and produced a `minikube` box for `etcd-minikube`, which the
+    service would never emit. A fixture that reimplements the logic under
+    test stops being evidence.
+    """
+    pod = {
         "name": name,
         "namespace": ns,
         "phase": phase,
@@ -25,12 +34,15 @@ def _pod(name, ns, phase="Running", node="minikube", ip="", owner=("ReplicaSet",
         "ip": ip,
         "owner_kind": owner[0],
         "owner_name": owner[1],
-        "workload": {
-            "name": owner[1].rsplit("-", 1)[0] if owner[1] else name,
-            "kind": owner[0],
-            "inferred": False,
-        },
     }
+    replica_sets = {
+        ("default", "web-7d4f9c"): {"kind": "Deployment", "name": "web"},
+        ("default", "api-6b8c7d"): {"kind": "Deployment", "name": "api"},
+        ("default", "worker-5f7a9b"): {"kind": "Deployment", "name": "worker"},
+        ("kube-system", "coredns-77d"): {"kind": "Deployment", "name": "coredns"},
+    }
+    pod["workload"] = resolve_workload(pod, {}, replica_sets)
+    return pod
 
 
 def realistic() -> dict:
@@ -71,6 +83,29 @@ def realistic() -> dict:
         "error": None,
         "context": "minikube",
         "version": "v1.35.1",
+        "driver": "docker",
+        "node_facts": [
+            {
+                "name": "minikube", "status": "Ready", "roles": ["control-plane"],
+                "internal_ip": "192.168.49.2",
+                "os_image": "Debian GNU/Linux 12 (bookworm)",
+                "kernel": "6.1.0", "architecture": "amd64",
+                "kubelet_version": "v1.35.1", "runtime": "docker 29.2.1",
+                "pod_cidr": "10.244.0.0/16",
+                "capacity_cpu": "16", "allocatable_cpu": "2",
+                "capacity_memory": "16313348Ki", "allocatable_memory": "2097152Ki",
+            },
+            {
+                "name": "worker-2", "status": "Ready", "roles": [],
+                "internal_ip": "192.168.49.3",
+                "os_image": "Debian GNU/Linux 12 (bookworm)",
+                "kernel": "6.1.0", "architecture": "amd64",
+                "kubelet_version": "v1.35.1", "runtime": "docker 29.2.1",
+                "pod_cidr": "10.244.1.0/24",
+                "capacity_cpu": "16", "allocatable_cpu": "2",
+                "capacity_memory": "16313348Ki", "allocatable_memory": "2097152Ki",
+            },
+        ],
         "nodes": [
             {"name": "minikube", "status": "Ready", "roles": ["control-plane"]},
             {"name": "worker-2", "status": "Ready", "roles": []},

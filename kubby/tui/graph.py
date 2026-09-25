@@ -31,9 +31,16 @@ from termaid import render_rich
 from termaid.layout.grid import compute_layout
 from termaid.parser import parse_flowchart
 
-#: Widest node label we will emit. A Deployment name plus a ready count and
-#: a port; longer names are truncated rather than allowed to break a box.
+#: Widest workload label we will emit. A Deployment name plus a ready count
+#: and a port; longer names are truncated rather than allowed to break a box.
 MAX_LABEL = 22
+
+#: A wider budget for the architecture boxes — the node's OS image, a
+#: control-plane component's job. These are fixed strings of known length
+#: rather than user-supplied names, so truncating them only ever loses
+#: information ("Debian GNU/Linux 12 (book…" tells you less than the whole
+#: thing) and the picture scrolls anyway.
+MAX_DETAIL = 34
 
 #: Subgraph labels are namespace names, and a namespace name can be longer
 #: than the box it titles. Anything past this is cut with an ellipsis.
@@ -44,13 +51,17 @@ MAX_NS_LABEL = 18
 #: and a bad id corrupts the source rather than failing loudly.
 _BAD_ID = re.compile(r"[^A-Za-z0-9_]")
 
-#: Characters that would end a Mermaid label early or open a shape, and so
-#: spill the rest of the name into the diagram as source. Dashes, dots,
-#: slashes, colons, spaces and commas are all fine in a label and are kept:
-#: sanitising a *label* with the id rule turns `kube-system` into
-#: `kube_system` and `53, 9153` into `53__9153`, which is worse than
-#: useless — it misreports the name.
-_BAD_LABEL = re.compile(r'["\[\]{}()`|<>\\`]')
+#: Characters stripped from a label. Deliberately tiny: a quoted Mermaid
+#: label was tested against quotes, brackets, braces, parens, pipes and
+#: angle brackets, and termaid renders every one of them correctly. Only the
+#: double quote (which could close the label) and the backslash (which is
+#: the escape this module itself uses for line breaks) are removed.
+#:
+#: Stripping more than this is actively harmful. An earlier version also
+#: removed brackets and parens, which turned a real OS string into
+#: "Debian GNU/Linux 12 bookworm" — mangling the name to defend against
+#: input that RFC 1123 makes impossible in the first place.
+_BAD_LABEL = re.compile(r'["\\]')
 
 
 def _node_id(prefix: str, *parts: str) -> str:
@@ -100,7 +111,16 @@ def _workload_label(workload: dict[str, Any], pods: list[dict[str, Any]]) -> str
     kubby happens to know about — and a pod's own phase is the more direct
     answer to "is this thing up" anyway. A pod still pulling or crashlooping
     is exactly what makes a box red, so it must not be counted as ready.
+
+    A control-plane component is labelled with what it *does* instead of a
+    ready count. "kube-apiserver 1/1" tells a newcomer nothing; "every
+    request goes through here" is the fact they came for.
     """
+    entry = _control_plane_entry(pods[0]) if pods else None
+    if entry is not None:
+        name, role = entry
+        return _label(name, role, MAX_DETAIL)
+
     ready = sum(1 for p in pods if p.get("phase") in ("Running", "Succeeded"))
     detail = f"{ready}/{len(pods)}"
 
@@ -216,25 +236,17 @@ def build_mermaid(cluster: dict[str, Any], direction: str = "TB") -> str:
     for (_pns, _kind, _name) in workloads:
         _kind_name_counts[(_kind, _name)] = _kind_name_counts.get((_kind, _name), 0) + 1
 
+    # The host and the node, above everything else. Emitted first so the
+    # picture reads top-down: your computer, the machine minikube made on
+    # it, and only then what is running inside.
+    node_ids: dict[str, str] = {}
+    _architecture_lines(lines, cluster, node_ids)
+
     for ns in namespaces:
         name = ns["name"]
         ns_services = [
             svc for svc in (cluster.get("services") or []) if svc["namespace"] == name
         ]
-
-        if ns.get("collapsed"):
-            # A plain node, deliberately not a subgraph: the namespace is one
-            # summary box, so the wrapper adds no structure — and an edge
-            # crossing a one-box subgraph's label row corrupts its border.
-            # Its services stay visible, because on a fresh cluster the DNS
-            # Service is the spine everything else resolves through.
-            count = ns.get("workload_count") or len(ns["pods"])
-            box = _node_id("w", name, "collapsed")
-            lines.append(f'  {box}["{_label(name, f"{count} workloads", 24)}"]:::manual')
-            for svc in ns_services:
-                _declare_service(lines, service_ids[(name, svc["name"])], svc, "  ")
-            continue
-
         ns_id = _node_id("ns", name)
         lines.append(f"  subgraph {ns_id} [{_safe_label(name, MAX_NS_LABEL)}]")
         for (pod_ns, kind, wl_name), entry in workloads.items():
@@ -245,8 +257,8 @@ def build_mermaid(cluster: dict[str, Any], direction: str = "TB") -> str:
             else:
                 box = _node_id("w", kind, wl_name)
             entry["id"] = box
-            cls = "ok" if _is_healthy(entry["pods"]) else "bad"
-            lines.append(f'    {box}["{_workload_label(entry, entry["pods"])}"]:::{cls}')
+            entry["healthy"] = _is_healthy(entry["pods"])
+            lines.append(f'    {box}["{_workload_label(entry, entry["pods"])}"]')
 
         # Services live in their own namespace's box. Floating them at the
         # top level made every service-to-pod edge leave its namespace and
@@ -259,7 +271,7 @@ def build_mermaid(cluster: dict[str, Any], direction: str = "TB") -> str:
     for ing in cluster.get("ingresses") or []:
         ing_id = _node_id("ing", ing["namespace"], ing["name"])
         hosts = ", ".join(sorted({r["host"] for r in ing.get("rules") or []})) or "*"
-        lines.append(f'  {ing_id}["{_label(ing["name"], hosts, 26)}"]:::ext')
+        lines.append(f'  {ing_id}["{_label(ing["name"], hosts, MAX_DETAIL)}"]:::ext')
         edge("YOU", ing_id)
         for backend in ing.get("backends") or []:
             sid = service_ids.get((backend["namespace"], backend["name"]))
@@ -281,30 +293,44 @@ def build_mermaid(cluster: dict[str, Any], direction: str = "TB") -> str:
                 continue
             if entry.get("id"):
                 edge(sid, entry["id"])
-            else:
-                # Its namespace is collapsed, so the edge stops at the
-                # namespace's summary box rather than pointing at nothing.
-                edge(sid, _node_id("w", pod["namespace"], "collapsed"))
 
     # Node containment: which node actually runs what. One edge per
     # workload on that node, not one per pod.
     for node in cluster.get("nodes") or []:
-        host = [p for p in pods if p.get("node") == node["name"]]
-        if not host:
+        node_id = node_ids.get(node["name"])
+        if node_id is None:
             continue
-        node_id = _node_id("node", node["name"])
-        lines.append(f'  {node_id}["{_label(node["name"], f"{len(host)} pods", 24)}"]')
-        for pod in host:
+        for pod in pods:
+            if pod.get("node") != node["name"]:
+                continue
             workload = pod["workload"]
             entry = workloads.get((pod["namespace"], workload["kind"], workload["name"]))
-            target = entry.get("id") if entry and entry.get("id") else None
-            if target is None:
-                target = _node_id("w", pod["namespace"], "collapsed")
-            edge(node_id, target)
+            if entry and entry.get("id"):
+                edge(node_id, entry["id"])
 
     lines.extend(edges)
+    _colour_by_health(lines, workloads)
     _append_classes(lines)
     return "\n".join(lines) + "\n"
+
+
+def _colour_by_health(
+    lines: list[str], workloads: dict[tuple[str, str, str], dict[str, Any]]
+) -> None:
+    """Tag each workload box healthy or not, in place.
+
+    Separate from emission because a workload's health is only known once
+    every namespace has been walked, and a ``classDef`` is clearer applied
+    as a second pass than threaded through the emit loop.
+    """
+    for entry in workloads.values():
+        if "id" not in entry or "healthy" not in entry:
+            continue
+        cls = "ok" if entry["healthy"] else "bad"
+        for index, line in enumerate(lines):
+            if line.strip().startswith(f'{entry["id"]}["'):
+                lines[index] = line.rstrip() + f":::{cls}"
+                break
 
 
 def _normalise(cluster: dict[str, Any]) -> dict[str, Any]:
@@ -375,6 +401,124 @@ def _normalise(cluster: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+#: Control-plane components, and what each one is *for*. The picture shows
+#: one box per component; a beginner looking at ``kube-apiserver`` and
+#: ``etcd`` for the first time is looking at two names with no meaning, and
+#: the meaning is the whole reason to draw them separately rather than as
+#: one "control plane" box.
+CONTROL_PLANE_ROLES = {
+    "kube-apiserver": "every request passes through",
+    "etcd": "all cluster state lives here",
+    "kube-scheduler": "picks the node for a pod",
+    "kube-controller-manager": "keeps reality as you asked",
+    "kube-proxy": "programs the pod network",
+    "coredns": "service names to addresses",
+    "storage-provisioner": "creates volumes on demand",
+}
+
+
+def _control_plane_entry(pod: dict[str, Any]) -> tuple[str, str] | None:
+    """Classify a kube-system pod as a control-plane component, or ``None``.
+
+    Matched on a name prefix rather than a label, because the static pods
+    that make up a control plane are owned by the ``Node`` object and carry
+    no label saying so. ``kindnet``-style network plugins would land here
+    too, which is the intent: it *is* infrastructure, just not control
+    plane.
+    """
+    workload = pod.get("workload") or {}
+    name = str(workload.get("name") or pod.get("name") or "")
+    for prefix in CONTROL_PLANE_ROLES:
+        if name == prefix or name.startswith(f"{prefix}-"):
+            return prefix, CONTROL_PLANE_ROLES[prefix]
+    return None
+
+
+def _architecture_lines(
+    lines: list[str],
+    cluster: dict[str, Any],
+    node_ids: dict[str, str],
+) -> None:
+    """Draw the host and the node the workloads actually run inside.
+
+    This is the part that answers "what am I even looking at". A cluster
+    is not abstract: it is a machine, on your machine, running a real
+    operating system with a fixed slice of CPU and memory, and everything
+    the user deploys is a process inside it. Drawing that makes the
+    resource limits and the ``Pending`` pods that follow from them legible
+    instead of mysterious.
+    """
+    facts = cluster.get("node_facts") or []
+    if not facts:
+        return
+
+    host_id = "host_your_computer"
+    # The driver is how minikube runs that machine. "auto" is a real
+    # setting and is labelled as such rather than silently dropped.
+    driver = str(cluster.get("driver") or "").strip()
+    driver_text = f"minikube, {driver} driver" if driver else "minikube, auto driver"
+    lines.append(f'  {host_id}["{_label("your computer", driver_text, MAX_DETAIL)}"]:::host')
+
+    for fact in facts:
+        node_id = _node_id("node", fact["name"])
+        node_ids[fact["name"]] = node_id
+        # Four lines: the node's name, the OS it runs, the container runtime
+        # its pods are processes on, and what it can actually hand out. A
+        # Pod is a container on that runtime, not a VM in the abstract, and
+        # this is the box that says so. The capacity line lives *in* the
+        # node rather than in a box of its own, because a separate box
+        # costs two more nodes and two more edges for a fact that belongs to
+        # the node — and the edges were making the routing unreadable.
+        label = _safe_label(fact["name"], MAX_LABEL)
+        for extra in (
+            fact.get("os_image"),
+            fact.get("runtime"),
+            _capacity_text(fact),
+        ):
+            if extra:
+                label += f"\\n{_safe_label(extra, MAX_DETAIL)}"
+        lines.append(f'  {node_id}["{label}"]:::infra')
+
+    for fact in facts:
+        node_id = node_ids.get(fact["name"])
+        if node_id:
+            lines.append(f"  {host_id} --> {node_id}")
+
+
+def _capacity_text(fact: dict[str, Any]) -> str:
+    """``2 of 16 cpu, 2Gi of 15.6Gi`` — the allocatable share, and the whole.
+
+    Both halves matter when they differ, and on a 2-CPU minikube on a
+    16-CPU laptop they do: capacity reports 16 and allocatable reports 2,
+    and only the second is what a Pod can ask for. Showing just the host's
+    number is how people conclude the cluster is starved when it is not.
+
+    When the two are equal the "of" form is noise, so it collapses to the
+    single value.
+    """
+    from kubby.cluster import human_memory
+
+    def _pair(allocatable: str, capacity: str, suffix: str = "") -> str:
+        if not allocatable and not capacity:
+            return ""
+        if allocatable == capacity:
+            return f"{allocatable}{suffix}"
+        return f"{allocatable or '?'} of {capacity or '?'}{suffix}"
+
+    parts = [
+        text
+        for text in (
+            _pair(str(fact.get("allocatable_cpu") or ""), str(fact.get("capacity_cpu") or ""), " cpu"),
+            _pair(
+                human_memory(fact.get("allocatable_memory") or ""),
+                human_memory(fact.get("capacity_memory") or ""),
+            ),
+        )
+        if text
+    ]
+    return ", ".join(parts)
+
+
 def _service_id(svc: dict[str, Any]) -> str:
     return _node_id("svc", svc["namespace"], svc["name"])
 
@@ -398,14 +542,16 @@ def _declare_service(
         body, cls = "0 endpoints", "bad"
     else:
         body, cls = port_text, "manual"
-    lines.append(f'{indent}{sid}["{_label(svc["name"], body, 24)}"]:::{cls}')
+    lines.append(f'{indent}{sid}["{_label(svc["name"], body, MAX_DETAIL)}"]:::{cls}')
 
 
 def _append_classes(lines: list[str]) -> None:
     """Append the class definitions, reusing kubby's palette.
 
     Colours come from the same family the rest of the UI uses, so a healthy
-    workload looks healthy everywhere in the app.
+    workload looks healthy everywhere in the app. ``host`` and ``infra`` are
+    deliberately dim: the host and the machinery are context for the user's
+    own workloads, and should not compete with them for attention.
     """
     lines.extend(
         [
@@ -413,6 +559,8 @@ def _append_classes(lines: list[str]) -> None:
             "  classDef bad stroke:#f85149,color:#f85149",
             "  classDef ext stroke:#58a6ff,color:#58a6ff",
             "  classDef manual stroke:#768390,color:#768390",
+            "  classDef host stroke:#d2a8ff,color:#d2a8ff",
+            "  classDef infra stroke:#8b949e,color:#8b949e",
         ]
     )
 
@@ -474,6 +622,30 @@ def _overflow(text: Text, width: int, height: int) -> tuple[int, int, int]:
     over_w = max(0, _max_width(text) - width)
     over_h = max(0, len(lines) - height)
     return (int(over_w > 0) + int(over_h > 0), over_w + over_h, len(lines) * over_w)
+
+
+def center(picture: Text, width: int) -> Text:
+    """Centre a picture narrower than the space it has.
+
+    Only when it actually fits: a picture wider than the panel is already
+    scrolling, and centring it would push its left edge off the scroll
+    origin, where it cannot be scrolled back to.
+
+    Pads each line rather than wrapping in ``rich.align.Align``, so the
+    result is still a ``Text`` like everything else here and can be measured
+    and asserted on.
+    """
+    widest = _max_width(picture)
+    if widest >= width:
+        return picture
+    pad = " " * ((width - widest) // 2)
+    out = Text()
+    for index, line in enumerate(picture.split(allow_blank=True)):
+        if index:
+            out.append("\n")
+        out.append(pad)
+        out.append_text(line)
+    return out
 
 
 def render_best(source: str, width: int, height: int) -> tuple[Text, str]:
