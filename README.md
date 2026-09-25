@@ -4,8 +4,9 @@
 
 A terminal UI for managing local Kubernetes cluster resources.
 
-Start a minikube cluster, watch pods come up, install kubectl/helm/podman from
-the tools panel — all in one TUI (built with [Textual](https://textual.textualize.io/)).
+Start a minikube cluster, watch pods come up, and check which of the tools
+you need are already on the machine — all in one TUI (built with
+[Textual](https://textual.textualize.io/)).
 Press `?` inside the app for the full key reference.
 
 ## Install
@@ -25,32 +26,33 @@ chmod +x kubby
 ./kubby --debug          # stream Textual devtools (see Usage)
 ```
 
-### Install the managed CLIs
+### The managed CLIs
 
-The **tools** panel has an install action for every managed CLI
-(minikube, kubectl, helm, podman): `i` installs the highlighted tool, `I`
-installs everything that's missing. Each one runs the tool's official
-upstream installer with elevation (pkexec on a desktop session, sudo as a
-fallback):
+**kubby does not install anything.** The **tools** panel is read-only: it
+reports whether each of the CLIs below is on your `PATH` and at what version,
+and names where to get the ones that are missing. Managing those
+dependencies is yours — kubby stays out of it, and never runs anything as
+root.
 
-| Tool      | Source                                                                |
-|-----------|-----------------------------------------------------------------------|
-| minikube  | `minikube.sigs.k8s.io/scripts/install.sh`                             |
-| helm      | `get-helm-4` from `raw.githubusercontent.com/helm/helm/main/scripts/` |
-| kubectl   | latest stable binary from `dl.k8s.io` → `/usr/local/bin/kubectl`      |
-| podman    | host package manager (apt / dnf / pacman / zypper)                    |
+| Tool      | Where to get it                          |
+|-----------|------------------------------------------|
+| minikube  | <https://minikube.sigs.k8s.io/>         |
+| helm      | <https://helm.sh/>                       |
+| kubectl   | <https://kubernetes.io/docs/reference/kubectl/> |
+| podman    | <https://podman.io/>                     |
 
-An install doubles as upgrade — it is always enabled when no other job is in
-flight. The installer's output streams into the log panel at the bottom of
-the window; on success the row flips to **installed**, on failure the panel
-stays visible with diagnostics so you can read what went wrong.
+`kubby --check` prints the same table, which makes it a decent thing to run
+in a provisioning script or a container health check.
+
+If a tool is missing, the preflight shown before starting a cluster says so
+and points at the same place — it never offers to install it for you.
 
 ## Usage
 
 | Command         | Effect                                                             |
 |-----------------|--------------------------------------------------------------------|
 | `kubby`         | Launch the TUI                                                     |
-| `kubby --check` | Print install status for all managed tools, then exit              |
+| `kubby --check` | Print which managed tools are present, then exit                   |
 | `kubby --debug` | Enable Textual devtools: needs `textual-dev` installed *and* a running `textual dev` server to stream to |
 
 Inside the app: `1`–`4` jump straight to a panel, `?` opens the key
@@ -175,13 +177,13 @@ kubby/
   __init__.py
   __main__.py             # python -m kubby
   app.py                  # CLI: --check / --debug, launches the TUI
-  service.py              # UI-agnostic service layer (detect/install/minikube)
+  service.py              # UI-agnostic service layer (detect/driver/minikube)
   images.py               # local podman image listing
   settings.py             # settings.json load/save
   installer/
-    tools.py              # registry of managed tools + install scripts
+    tools.py              # registry of known tools (+ where to get each)
     detector.py           # PATH + version detection
-    linux.py              # package manager + elevation (pkexec / sudo)
+    linux.py              # host facts: package manager, root prompt
     minikube.py           # settings → minikube argv
   tui/
     app.py                # Textual shell: layout, bindings, workers
@@ -196,6 +198,6 @@ tests/                    # pytest suite (uv run pytest)
 
 ## Roadmap
 
-Step 1 covers the dependency detection/installation flow and the cluster
-overview (nodes, namespaces, pods). Subsequent steps add helm release
-management, in-cluster resource editing, and multi-cluster support.
+Step 1 covers tool presence detection and the cluster overview (nodes,
+namespaces, pods). Subsequent steps add helm release management, in-cluster
+resource editing, and multi-cluster support.
