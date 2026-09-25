@@ -185,7 +185,7 @@ timer_stop() {
   # EPOCHREALTIME is seconds with microsecond fraction; awk gives us whole
   # microseconds, which is then rendered as seconds with one decimal.
   us=$(awk -v a="$start" -v b="$now" 'BEGIN{printf "%d", (b-a)*1000000}')
-  elapsed=$((us / 1000000)).$(( (us % 1000000 + 500000) / 1000000 ))
+  elapsed=$(awk -v u="$us" 'BEGIN{printf "%.1f", u/1000000}')
   printf '%-18s %8ss\n' "$1" "$elapsed" | tee -a "$ART/timing.log" >&2
   rm -f "$ART/timer-$1.start"
 }
