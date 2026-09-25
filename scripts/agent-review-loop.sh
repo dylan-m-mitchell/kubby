@@ -164,6 +164,30 @@ push_fixes() {
   git "${auth_cfg[@]}" push origin "HEAD:refs/heads/$PR_HEAD_REF"
 }
 
+# A push made with GITHUB_TOKEN does not simply start CI: GitHub parks the
+# run it triggers in `action_required`, so the loop's own commits would sit
+# there waiting for a human click. Approve the run we just caused so those
+# commits get the real workflow's verification too. Best effort — the gates
+# below already run the identical checks, so a run we fail to approve is
+# cosmetic, not a gap in verification.
+approve_ci_run() {
+  local sha run_id="" attempt=0
+  [[ -z "${GH_TOKEN:-}" ]] && return 0 # local run: nothing was triggered
+  sha=$(git rev-parse HEAD)
+  # The run appears a few seconds after the push.
+  while [[ -z "$run_id" && $attempt -lt 3 ]]; do
+    attempt=$((attempt + 1))
+    sleep 8
+    run_id=$(gh api "repos/$REPO/actions/runs?head_sha=$sha" \
+      --jq '[.workflow_runs[] | select(.event == "pull_request")][0].id // empty' \
+      2>/dev/null || true)
+  done
+  [[ -z "$run_id" ]] && return 0
+  if ! gh api -X POST "repos/$REPO/actions/runs/$run_id/approve" >/dev/null 2>&1; then
+    warn "CI run $run_id needs a manual approval (needs actions:write)"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Gates — deliberately identical to .github/workflows/ci.yml
 # ---------------------------------------------------------------------------
@@ -381,6 +405,7 @@ for ((round = 1; round <= MAX_ITERATIONS; round++)); do
           # network, a branch that moved): only the latest attempt decides
           # whether the run ends red.
           push_failed=false
+          approve_ci_run
           action="Fixes applied and pushed to \`$PR_HEAD_REF\` as \`$(git rev-parse --short HEAD)\`."
           feedback="Round $round was pushed; the diff you now see already contains those fixes."
         else

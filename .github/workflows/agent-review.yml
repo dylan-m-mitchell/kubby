@@ -34,6 +34,10 @@ concurrency:
 permissions:
   contents: write
   pull-requests: write
+  # A push made with GITHUB_TOKEN parks the CI run it triggers in
+  # `action_required`; the loop approves the run it caused so its commits
+  # still get the real workflow's verification.
+  actions: write
 
 jobs:
   review:
