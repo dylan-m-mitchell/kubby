@@ -575,10 +575,20 @@ class KubbyApp(App[None]):
 
     def help_sections(self) -> list[tuple[str, list[tuple[str, str]]]]:
         """Sections for the overlay: globals, then each panel's own keys."""
+        # Nav keys are `show=False` (the keybar has ~27 characters of
+        # headroom, and four nav keys per panel would overflow it), so they
+        # are written out here instead — the overlay is the documented place
+        # to look up keys. The one-column panels say why h/l are absent
+        # rather than leaving it looking like an oversight.
+        move_row = ("j/k or up/down", "move down / up")
+        list_nav = [
+            move_row,
+            ("h/l", "not applicable — one column"),
+        ]
         images_rows = self._panel_rows(ImagesPanel) + [
             ("enter", "apply filter and close"),
             ("esc", "clear filter"),
-        ]
+        ] + list_nav
         return [
             (
                 "global",
@@ -588,12 +598,14 @@ class KubbyApp(App[None]):
                 ],
             ),
             ("minikube panel", self._panel_rows(MinikubePanel)),
-            ("tools panel", self._panel_rows(ToolsPanel)),
+            ("tools panel", self._panel_rows(ToolsPanel) + list_nav),
             ("images panel", images_rows),
             (
                 "namespaces panel",
                 [
-                    ("up/down", "move"),
+                    move_row,
+                    ("h", "collapse, or out to the parent"),
+                    ("l", "expand, or in to the first pod"),
                     ("enter/space", "expand / collapse"),
                 ],
             ),
