@@ -1,10 +1,10 @@
 """Main-screen panels for the kubby TUI.
 
-The layout mirrors the plan's sketch: a left sidebar (minikube, tools,
-images) beside a right-hand namespaces tree, a streaming log strip, and a
+The layout mirrors the plan's sketch: a left sidebar (minikube, machine,
+images) beside a right-hand cluster panel, a streaming log strip, and a
 keybar.  Every panel is bordered, focusable and lazygit-style, and the
 focused one gets a brighter border/title.  Each panel carries its jump key
-in its own title ("(1) minikube", "(2) tools", …), in brackets so the digit
+in its own title ("(1) minikube", "(2) machine", …), in brackets so the digit
 cannot be misread for part of the name.
 
 Navigable panels also move with vim's ``j``/``k`` for down/up.  The
@@ -31,7 +31,10 @@ from textual.message import Message
 from textual.widgets import OptionList, RichLog, Static, Tree
 from textual.widgets.option_list import Option
 
-from kubby.tui import graph as graph_mod
+from kubby.cluster import describe_node
+from kubby.tui import diagram as diagram_mod
+from kubby.tui import paint as paint_mod
+from kubby.tui import place as place_mod
 
 
 class PanelFocused(Message):
@@ -214,72 +217,98 @@ class MinikubePanel(PanelBase, Vertical, can_focus=True):
         return out
 
 
-class ToolsPanel(PanelBase, OptionList):
-    """Which managed tools are present, and at what version.
+class MachinePanel(PanelBase, VerticalScroll, can_focus=True):
+    """The machine the cluster runs on, as Kubernetes sees it.
 
-    Read-only. kubby does not install anything — a missing tool is
-    reported with where to get it (see `Tool.website`), and the preflight
-    points at the same place when a missing tool actually blocks starting a
-    cluster.
+    What the node *is*, rather than what runs on it: its own operating
+    system, its own container runtime, the address the host reaches it on,
+    the range pod addresses come from, and the share of CPU and memory a
+    Pod can actually ask for. That share is the explanation for a Pod stuck
+    ``Pending`` with "insufficient cpu", and it is invisible in a list of
+    pods.
+
+    This took the tools panel's place rather than joining it. A node's
+    figures answer "why is my Pod not starting", which is the question
+    somebody is asking while they look at a cluster; a list of installed
+    binaries does not, and once the graph stopped drawing the machine as a
+    box there was nowhere else for these facts to go. Tools are still
+    reported by ``kubby --check`` and by the preflight — they are just not
+    the story the sidebar should be telling.
     """
 
-    BORDER_TITLE = "tools"
+    BORDER_TITLE = "machine"
     JUMP_KEY = "2"
-    EMPTY_TEXT = "no tools"
+    EMPTY_TEXT = "no cluster"
 
-    # Each panel owns its list: aliasing the shared constant would let a
-    # mutation on one panel leak into the others.
-    BINDINGS = list(LIST_NAV_BINDINGS)
+    #: Listed explicitly rather than mixed in, because Textual *replaces*
+    #: BINDINGS along the MRO instead of merging them, and ScrollableWidget
+    #: has its own. Same reasoning as `GraphPanel`: j/k scroll, because that
+    #: is what they do on a read-only view, and the same gesture moves a
+    #: cursor on a list.
+    BINDINGS = [
+        Binding("j", "scroll_down", "scroll", show=False),
+        Binding("k", "scroll_up", "scroll", show=False),
+        # The picture scrolls sideways when it is wider than the panel, and
+        # h/l are the horizontal half of the same gesture j/k already is.
+        Binding("l", "scroll_right", "scroll", show=False),
+        Binding("h", "scroll_left", "scroll", show=False),
+    ]
 
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(markup=False, **kwargs)
+    def compose(self) -> ComposeResult:
+        yield Static(Text(self.EMPTY_TEXT, style="dim"), id="machine-body")
 
-    def selected_tool(self) -> str | None:
-        """Registry key of the highlighted row (None for the empty state)."""
-        index = self.highlighted
-        if index is None:
-            return None
-        try:
-            option = self.get_option_at_index(index)
-        except Exception:
-            return None
-        return option.id
+    def set_cluster(self, info: dict[str, Any]) -> None:
+        self.query_one("#machine-body", Static).update(self._machine_text(info))
 
-    def set_tools(self, tools: list[dict[str, Any]]) -> None:
-        # Keep the user's selection across a refresh, so the row they are
-        # looking at does not move under them.
-        selected = self.selected_tool()
-        self.clear_options()
-        if not tools:
-            self.add_option(Option(Text(self.EMPTY_TEXT, style="dim")))
-            return
-        for tool in tools:
-            label = str(tool.get("label") or tool.get("key") or "?")
-            if tool.get("installed"):
-                row = Text("✓ ", style="green")
-                row.append(f"{label:<9}")
-                row.append(str(tool.get("version") or "installed"), style="dim")
-            else:
-                row = Text("✗ ", style="red")
-                row.append(f"{label:<9}")
-                # kubby cannot install it, so say where it comes from. The
-                # registry's `website` is already carried through
-                # `get_status()`; this is the first thing that renders it.
-                row.append("not installed", style="dim")
-                site = str(tool.get("website") or "")
-                if site:
-                    row.append(f"  {site}", style="dim italic")
-            self.add_option(Option(row, id=str(tool.get("key"))))
-        if selected is not None:
-            for index, tool in enumerate(tools):
-                if str(tool.get("key")) == selected:
-                    self.highlighted = index
-                    break
-        if self.highlighted is None:
-            # OptionList starts with nothing highlighted; keep a row
-            # highlighted so keyboard navigation has a position after a
-            # refresh.
-            self.highlighted = 0
+    @staticmethod
+    def _nothing_to_say(info: dict[str, Any]) -> str:
+        """What to show when there are no node facts to describe.
+
+        The reason when there is no cluster, and a plain statement when there
+        is one but its nodes could not be read — a panel that silently shows
+        nothing looks like a machine with no specifications.
+        """
+        if not info.get("running", True):
+            return str(info.get("error") or "not running")
+        return "no node facts"
+
+    @staticmethod
+    def _machine_text(info: dict[str, Any]) -> Text:
+        # The node's own facts come from the graph payload rather than the
+        # inventory: the inventory's node list is name/status/roles, and
+        # widening it for this panel would cost every caller the `nodeInfo`
+        # and capacity blocks it has no use for.
+        graph = info.get("graph") or {}
+        facts = graph.get("node_facts") or []
+        if not facts:
+            return Text(MachinePanel._nothing_to_say(info), style="dim")
+
+        out = Text()
+        driver = str(graph.get("driver") or "")
+        head = " · ".join(
+            part
+            for part in (str(info.get("version") or ""), f"{driver} driver" if driver else "")
+            if part
+        )
+        if head:
+            out.append(head, style="cyan")
+
+        for index, fact in enumerate(facts):
+            out.append("\n")
+            ready = str(fact.get("status") or "") == "Ready"
+            out.append("● " if ready else "○ ", style="green" if ready else "yellow")
+            out.append(str(fact.get("name") or "the machine"), style="bold")
+            roles = [str(r) for r in fact.get("roles") or []]
+            if roles:
+                out.append(f"  {', '.join(roles)}", style="dim")
+            # `describe_node`'s first line is the name, already shown above
+            # beside its ready state.
+            for line in describe_node(fact)[1:]:
+                out.append("\n")
+                out.append(line, style="dim")
+            if index < len(facts) - 1:
+                out.append("\n")
+        return out
 
 
 class ImagesPanel(PanelBase, OptionList):
@@ -347,14 +376,13 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
     Read-only for now, which is a deliberate first step rather than a
     limitation: the layout that positions the boxes already reports where
     each one landed, so moving a cursor between them later is a search over
-    those rectangles and not a layout engine. See ``node_rects`` in
-    :mod:`kubby.tui.graph`.
+    those rectangles and not a layout engine.
 
     It scrolls because a real cluster does not fit a terminal panel. A
     13-workload cluster came out 72 columns by 63 lines against a panel of
     roughly 62 by 24, and no amount of compaction fixes that — the overflow
-    is boxes side by side, not spacing. The renderer picks whichever
-    direction overflows less, so what does overflow is the axis that
+    is boxes side by side, not spacing. The layout wraps groups into bands
+    to fit the panel width, so what does overflow is the axis that
     scrolls the way a person expects.
     """
 
@@ -366,6 +394,19 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
     #: second one — a border inside a border reads as two panels.
     DEFAULT_CLASSES = "panel-inner"
 
+    #: Scrolls sideways as well as down. A namespace with seven objects in
+    #: it is 33 columns wide whatever the panel is, and a 50-column terminal
+    #: leaves this panel 13 — so without it, ten to twenty columns of the
+    #: cluster were clipped and unreachable, while the code and its comments
+    #: claimed the panel scrolled. The picture cannot be made narrower than
+    #: its widest namespace, so the honest answer is to let the reader move
+    #: across it.
+    DEFAULT_CSS = """
+    GraphPanel {
+        overflow-x: auto;
+    }
+    """
+
     #: Listed explicitly rather than mixed in, because Textual *replaces*
     #: BINDINGS along the MRO instead of merging them, and ScrollableWidget
     #: has its own. j/k are the movement keys of record everywhere in this
@@ -374,29 +415,57 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
     BINDINGS = [
         Binding("j", "scroll_down", "scroll", show=False),
         Binding("k", "scroll_up", "scroll", show=False),
+        # The picture scrolls sideways when it is wider than the panel, and
+        # h/l are the horizontal half of the same gesture j/k already is.
+        Binding("l", "scroll_right", "scroll", show=False),
+        Binding("h", "scroll_left", "scroll", show=False),
     ]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._cluster: dict[str, Any] = {}
         self._picture = Static("", id="graph-picture")
+        #: The last placement, kept so the `hjkl` cursor can move between
+        #: boxes without re-laying the picture out on every keypress.
+        self.placement: place_mod.Placement | None = None
 
     def compose(self) -> ComposeResult:
         yield self._picture
+
+    def _clear(self) -> None:
+        """Forget the last picture, so a panel with nothing to draw does not
+        keep its width and its scroll range.
+
+        Without this, a cluster that stops being readable left a panel reading
+        `cannot draw the cluster` with a horizontal scrollbar out to the
+        width of the picture it was showing a moment ago, and a `placement`
+        pointing at boxes that are not there."""
+        self.placement = None
+        self.border_subtitle = None
+        self._picture.styles.width = None
 
     def set_cluster(self, cluster: dict[str, Any]) -> None:
         self._cluster = cluster or {}
         self.render_picture()
 
-    def refresh_picture(self) -> None:
+    def on_resize(self) -> None:
+        """Redraw when this panel changes size.
+
+        Handled here rather than on the app: the app's own resize arrives
+        before the new layout has been applied, so the panel still reports
+        its *previous* width and the picture comes out identical. Deferred
+        from there with ``call_after_refresh`` it was reliably one resize
+        behind, which looked like a picture that had frozen at its launch
+        size until `R` was pressed.
+        """
         self.render_picture()
 
     def render_picture(self) -> None:
         """Draw the picture for the current cluster and panel size."""
         cluster = self._cluster
         if not cluster:
+            self._clear()
             self._picture.update(Text(self.EMPTY_TEXT, style="dim"))
-            self.border_subtitle = None
             return
 
         if not cluster.get("available", True):
@@ -405,20 +474,23 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
             body = Text("cannot draw the cluster", style="dim")
             body.append(f"\n{cluster.get('error') or 'unavailable'}",
                         style="yellow")
+            self._clear()
             self._picture.update(body)
-            self.border_subtitle = None
             return
 
         self.border_subtitle = f"{cluster.get('pod_count') or 0} pods"
-        source = graph_mod.build_mermaid(cluster)
         width = max(20, self.size.width)
-        picture, _direction = graph_mod.render_best(
-            source, width, max(5, self.size.height)
-        )
+        placement = place_mod.place(diagram_mod.build_diagram(cluster), width)
         # Centred rather than left-aligned, which is what the tree looks like
         # because a tree is a list. A picture with a shape wants the space
-        # either side of it. Only applied when it fits — see `center`.
-        self._picture.update(graph_mod.center(picture, width))
+        # either side of it. Only applied when it fits — see `centre`.
+        self.placement = placement
+        self._picture.update(paint_mod.centre(paint_mod.render(placement), width))
+        # The Static is shrunk to the panel by default, so the panel's own
+        # horizontal scrollbar has nothing to scroll: the virtual size stays
+        # the panel's width and the columns past it are simply gone. Stating
+        # the width is what makes them reachable.
+        self._picture.styles.width = max(placement.width + 1, width)
 
 
 class ClusterPanel(PanelBase, Vertical, can_focus=True):
@@ -482,11 +554,6 @@ class ClusterPanel(PanelBase, Vertical, can_focus=True):
         """Hand the cluster to both views; each picks the part it needs."""
         self.query_one(ClusterTree).set_cluster(info)
         self.query_one(GraphPanel).set_cluster(info.get("graph") or {})
-
-    def refresh_picture(self) -> None:
-        """Redraw the graph after a resize, when the new width is known."""
-        if self.view == "graph":
-            self.query_one(GraphPanel).refresh_picture()
 
 
 class ClusterTree(PanelBase, Tree):

@@ -1,10 +1,17 @@
-"""A realistic cluster model, for looking at the picture.
+"""A realistic cluster to look at, not a demo that only looks good.
 
-Not a test: this is the shape a developer's cluster actually has — an
-Ingress fronting a Service, a Deployment behind it, a second Service with a
-selector that matches nothing, a StatefulSet, and pods spread over two
-nodes. It exists so the graph can be *looked at* while it is being built,
-including the cases that are awkward to arrange on a live cluster.
+Not a test. Every shape here exists because it is the thing people get
+wrong:
+
+  * an Ingress with a real host rule, so external traffic has a way in
+  * a Deployment whose Service actually has backing pods
+  * a Service whose selector matches nothing, so it has *no endpoints* —
+    the single most common beginner mistake, and the one drawn red
+  * a crashlooping pod, and one asking for more CPU than the node has
+  * a StatefulSet, so the picture shows something other than Deployments
+  * a Service in another namespace, so cross-group wiring appears
+  * a Service with no selector at all — the API server's own — which must
+    *not* be reported as broken
 
 Usage:  uv run python tests/fixtures_cluster_graph.py
 """
@@ -13,144 +20,154 @@ from __future__ import annotations
 
 import sys
 
-from kubby.cluster import resolve_workload
-from kubby.tui import graph
+sys.path.insert(0, "tests")
+
+from kubby.cluster import resolve_workload  # noqa: E402
+from kubby.tui import diagram, paint, place  # noqa: E402
+
+#: ReplicaSet name -> the workload it fronts, so the fixture produces the
+#: same workload names the service would.
+_REPLICA_SETS = {
+    ("default", "web-abc"): {"kind": "Deployment", "name": "web"},
+    ("default", "api-abc"): {"kind": "Deployment", "name": "api"},
+    ("kube-system", "coredns-abc"): {"kind": "Deployment", "name": "coredns"},
+}
 
 
-def _pod(name, ns, phase="Running", node="minikube", ip="", owner=("ReplicaSet", "")):
-    """A pod with its workload resolved the way the service resolves it.
-
-    Deliberately calls the real `resolve_workload` rather than hand-building
-    the dict: an earlier version of this fixture computed the workload name
-    itself and produced a `minikube` box for `etcd-minikube`, which the
-    service would never emit. A fixture that reimplements the logic under
-    test stops being evidence.
-    """
+def _pod(name, ns, phase="Running", node="minikube", ready=True, owner=("ReplicaSet", "")):
     pod = {
         "name": name,
         "namespace": ns,
         "phase": phase,
+        "ready": ready,
         "node": node,
-        "ip": ip,
+        "ip": "",
         "owner_kind": owner[0],
         "owner_name": owner[1],
     }
-    replica_sets = {
-        ("default", "web-7d4f9c"): {"kind": "Deployment", "name": "web"},
-        ("default", "api-6b8c7d"): {"kind": "Deployment", "name": "api"},
-        ("default", "worker-5f7a9b"): {"kind": "Deployment", "name": "worker"},
-        ("kube-system", "coredns-77d"): {"kind": "Deployment", "name": "coredns"},
-    }
-    pod["workload"] = resolve_workload(pod, {}, replica_sets)
+    # The real resolver, not a local guess. An earlier version of this
+    # fixture computed the name itself and produced a `minikube` box for
+    # `etcd-node`, which the service would never emit — a fixture that
+    # reimplements the logic under test stops being evidence.
+    pod["workload"] = resolve_workload(pod, {}, _REPLICA_SETS)
     return pod
+
+
+def _svc(name, ns, port, backing, has_selector=True):
+    return {
+        "name": name,
+        "namespace": ns,
+        "type": "ClusterIP",
+        "cluster_ip": "10.96.0.1",
+        "has_selector": has_selector,
+        "ports": [{"port": port, "target": str(port), "node_port": None}],
+        "backing_pods": [{"namespace": n, "pod": p} for n, p in backing],
+    }
+
+
+def _node_facts(name, cpu="16", alloc_cpu="2", ip="192.168.49.2"):
+    return {
+        "name": name, "status": "Ready", "roles": ["control-plane"],
+        "internal_ip": ip, "os_image": "Debian GNU/Linux 12 (bookworm)",
+        "kernel": "6.1.0", "architecture": "amd64", "kubelet_version": "v1.35.1",
+        "runtime": "docker 29.2.1", "pod_cidr": "10.244.0.0/16",
+        "capacity_cpu": cpu, "allocatable_cpu": alloc_cpu,
+        "capacity_memory": "16313348Ki", "allocatable_memory": "2097152Ki",
+    }
 
 
 def realistic() -> dict:
     """A two-node cluster with an ingress, three services, four workloads."""
-    pods = [
-        # web: 3 healthy replicas
-        _pod("web-7d4f9c-abc", "default", ip="10.244.0.5", owner=("ReplicaSet", "web-7d4f9c")),
-        _pod("web-7d4f9c-def", "default", ip="10.244.1.5", owner=("ReplicaSet", "web-7d4f9c")),
-        _pod("web-7d4f9c-ghi", "default", ip="10.244.2.5", owner=("ReplicaSet", "web-7d4f9c")),
-        # api: 1 of 2 ready, the other still pulling
-        _pod("api-6b8c7d-aaa", "default", ip="10.244.0.7", owner=("ReplicaSet", "api-6b8c7d")),
-        _pod("api-6b8c7d-bbb", "default", phase="Pending", ip="", owner=("ReplicaSet", "api-6b8c7d")),
-        # worker: crashlooping
-        _pod("worker-5f7a9b-zzz", "default", phase="CrashLoopBackOff",
-             node="worker-2", ip="10.244.3.9", owner=("ReplicaSet", "worker-5f7a9b")),
-        # postgres: a StatefulSet, on the other node
-        _pod("postgres-0", "data", node="worker-2", ip="10.244.3.4",
-             owner=("StatefulSet", "postgres")),
-        # the control plane, collapsed away in the picture
-        _pod("coredns-77d-xyz", "kube-system", ip="10.244.0.4",
-             owner=("ReplicaSet", "coredns-77d")),
-        _pod("etcd-minikube", "kube-system", owner=("Node", "minikube")),
-    ]
-
-    def svc(name, ns, port, backing, has_selector=True, stype="ClusterIP"):
-        return {
-            "name": name,
-            "namespace": ns,
-            "type": stype,
-            "cluster_ip": f"10.96.0.{20 + len(backing)}",
-            "has_selector": has_selector,
-            "ports": [{"port": port, "target": str(port), "node_port": None}],
-            "backing_pods": [{"namespace": p[0], "pod": p[1]} for p in backing],
-        }
-
     return {
         "available": True,
         "error": None,
         "context": "minikube",
         "version": "v1.35.1",
         "driver": "docker",
-        "node_facts": [
-            {
-                "name": "minikube", "status": "Ready", "roles": ["control-plane"],
-                "internal_ip": "192.168.49.2",
-                "os_image": "Debian GNU/Linux 12 (bookworm)",
-                "kernel": "6.1.0", "architecture": "amd64",
-                "kubelet_version": "v1.35.1", "runtime": "docker 29.2.1",
-                "pod_cidr": "10.244.0.0/16",
-                "capacity_cpu": "16", "allocatable_cpu": "2",
-                "capacity_memory": "16313348Ki", "allocatable_memory": "2097152Ki",
-            },
-            {
-                "name": "worker-2", "status": "Ready", "roles": [],
-                "internal_ip": "192.168.49.3",
-                "os_image": "Debian GNU/Linux 12 (bookworm)",
-                "kernel": "6.1.0", "architecture": "amd64",
-                "kubelet_version": "v1.35.1", "runtime": "docker 29.2.1",
-                "pod_cidr": "10.244.1.0/24",
-                "capacity_cpu": "16", "allocatable_cpu": "2",
-                "capacity_memory": "16313348Ki", "allocatable_memory": "2097152Ki",
-            },
-        ],
+        "node_facts": [_node_facts("minikube"), _node_facts("worker-2", ip="192.168.49.3")],
         "nodes": [
             {"name": "minikube", "status": "Ready", "roles": ["control-plane"]},
             {"name": "worker-2", "status": "Ready", "roles": []},
         ],
         "namespaces": [
-            {"name": "default", "pods": pods[:6], "workload_count": 3, "collapsed": False},
-            {"name": "data", "pods": pods[6:7], "workload_count": 1, "collapsed": False},
-            {"name": "kube-system", "pods": pods[7:], "workload_count": 2, "collapsed": True},
+            {"name": "default", "workload_count": 2, "collapsed": False, "pods": [
+                _pod("web-1", "default", owner=("ReplicaSet", "web-abc")),
+                _pod("web-2", "default", owner=("ReplicaSet", "web-abc")),
+                _pod("api-1", "default", owner=("ReplicaSet", "api-abc")),
+            ]},
+            {"name": "data", "workload_count": 1, "collapsed": False, "pods": [
+                _pod("postgres-0", "data", node="worker-2", owner=("StatefulSet", "postgres")),
+            ]},
+            {"name": "kube-system", "workload_count": 2, "collapsed": True, "pods": [
+                _pod("coredns-1", "kube-system", owner=("ReplicaSet", "coredns-abc")),
+                _pod("etcd-node", "kube-system", owner=("Node", "minikube")),
+            ]},
         ],
         "services": [
-            svc("web-svc", "default", 80, [("default", "web-7d4f9c-abc"),
-                                           ("default", "web-7d4f9c-def"),
-                                           ("default", "web-7d4f9c-ghi")]),
-            svc("api-svc", "default", 8080, [("default", "api-6b8c7d-aaa")]),
+            _svc("web-svc", "default", 80, [("default", "web-1"), ("default", "web-2")]),
+            _svc("api-svc", "default", 8080, [("default", "api-1")]),
             # The classic beginner mistake: a selector that matches nothing.
-            svc("db-svc", "default", 5432, []),
-            svc("postgres", "data", 5432, [("data", "postgres-0")]),
+            _svc("db-svc", "default", 5432, []),
+            _svc("postgres", "data", 5432, [("data", "postgres-0")]),
             # Selectorless, so not reported as broken.
-            svc("kubernetes", "default", 443, [], has_selector=False),
-            svc("kube-dns", "kube-system", 53, [("kube-system", "coredns-77d-xyz")]),
+            _svc("kubernetes", "default", 443, [], has_selector=False),
         ],
         "ingresses": [
             {
-                "name": "shop",
-                "namespace": "ingress-nginx",
-                "class": "nginx",
+                "name": "shop", "namespace": "default", "class": "nginx",
                 "rules": [{"host": "shop.example", "service": "web-svc",
                            "namespace": "default"}],
                 "backends": [{"name": "web-svc", "namespace": "default"}],
             }
         ],
-        "pod_count": len(pods),
+        "pod_count": 5,
     }
 
 
-def main() -> int:
+def cross_namespace() -> dict:
+    """`realistic()` with the Ingress routing to another namespace's Service.
+
+    A cross-namespace backend is what `parse_ingress` explicitly honours —
+    `svc["namespace"]` — so the picture has to be able to draw an edge that
+    leaves one namespace's frame and enters another's. That route is the
+    only one which crosses frame borders, and the only one that used to come
+    out broken.
+    """
     model = realistic()
-    source = graph.build_mermaid(model)
-    if "--source" in sys.argv:
-        print(source)
-    else:
-        print(source)
-        print("=" * 78)
-        print(graph.render(source, 72))
-        print("=" * 78)
+    model["ingresses"] = [
+        {
+            "name": "shop", "namespace": "default", "class": "nginx",
+            "rules": [{"host": "shop.example", "service": "postgres",
+                       "namespace": "data"}],
+            "backends": [{"name": "postgres", "namespace": "data"}],
+        }
+    ]
+    return model
+
+
+def broken() -> dict:
+    """The same shape with the workload unhealthy, for the colour rules."""
+    model = realistic()
+    model["namespaces"][0]["pods"] = [
+        _pod("web-1", "default", phase="Running", ready=False,
+             owner=("ReplicaSet", "web-abc")),
+        _pod("api-1", "default", phase="Running", ready=False,
+             owner=("ReplicaSet", "api-abc")),
+    ]
+    return model
+
+
+def main() -> int:
+    for label, model in (("realistic", realistic()), ("broken", broken()),
+                         ("cross-namespace", cross_namespace())):
+        built = diagram.build_diagram(model)
+        placement = place.place(built, 72)
+        print("=" * 74)
+        print(f"{label}: {len(built.nodes)} boxes, {len(built.edges)} edges, "
+              f"{placement.width} x {placement.height}")
+        print("=" * 74)
+        print(paint.render(placement).plain)
+        print()
     return 0
 
 

@@ -149,7 +149,25 @@ class FakeService:
             "error": None,
             "context": info.get("context"),
             "version": info.get("version"),
+            "driver": "docker",
             "nodes": [dict(n) for n in self.cluster["nodes"]],
+            # Read by the sidebar's machine panel, which is the only thing
+            # describing the node now that the picture does not.
+            "node_facts": [
+                {
+                    "name": "minikube",
+                    "status": "Ready",
+                    "roles": ["control-plane"],
+                    "internal_ip": "192.168.49.2",
+                    "pod_cidr": "10.244.0.0/16",
+                    "os_image": "Debian GNU/Linux 12 (bookworm)",
+                    "runtime": "docker 27.1.1",
+                    "capacity_cpu": "8",
+                    "allocatable_cpu": "8",
+                    "capacity_memory": "16313348Ki",
+                    "allocatable_memory": "3900Mi",
+                }
+            ],
             "namespaces": [
                 {**ns, "pods": [{"namespace": ns.get("name") or "default", **pod}
                                 for pod in ns.get("pods", [])]}
