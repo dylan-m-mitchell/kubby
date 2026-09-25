@@ -142,11 +142,41 @@ def _route(canvas: Canvas, placement: Placement, source: str, target: str) -> No
         _route_across_bands(canvas, placement, src, dst)
         return
 
+    if not _shared_frame(placement, src, dst):
+        # Different namespaces, same band: the short routes all work within
+        # one frame and there is a whole frame in the way, so the only thing
+        # that can join them is the long way round.
+        _route_across_frames(canvas, placement, src, dst)
+        return
+
     if dst.y >= src.y + src.height and _columns_overlap(src, dst):
         _route_down(canvas, placement, src, dst)
         return
 
     _route_sideways(canvas, src, dst)
+
+
+def _shared_frame(placement: Placement, src: PlacedBox, dst: PlacedBox) -> bool:
+    """Whether one frame contains both boxes.
+
+    A frame is a namespace, so this is really "are these two in the same
+    namespace", and the answer decides which routes are even worth trying:
+    the ones that stay inside a frame cannot help if there is a frame in
+    between.
+    """
+    for frame in placement.containers.values():
+        if (
+            frame.x <= src.x
+            and src.x + src.width <= frame.x + frame.width
+            and frame.y <= src.y
+            and src.y + src.height <= frame.y + frame.height
+            and frame.x <= dst.x
+            and dst.x + dst.width <= frame.x + frame.width
+            and frame.y <= dst.y
+            and dst.y + dst.height <= frame.y + frame.height
+        ):
+            return True
+    return False
 
 
 def _route_sideways(canvas: Canvas, src: PlacedBox, dst: PlacedBox) -> None:
@@ -216,14 +246,42 @@ def _route_around(canvas: Canvas, src: PlacedBox, dst: PlacedBox) -> None:
     # broken one is a connection they will believe.
 
 
+def _columns_near(canvas: Canvas, lo: int, hi: int) -> list[int]:
+    """Every column, nearest the span ``lo..hi`` first, in both directions.
+
+    The span itself comes first because a run straight out of a box is the
+    cheapest and the least visible. The rest is there for when every column
+    the box spans is blocked on the way out, which the enclosing frame's own
+    title is a reliable way to arrange — it sits in exactly that band of
+    columns, just above or below the box.
+    """
+    order = [c for c in range(lo, hi + 1) if 0 <= c < canvas.width]
+    seen = set(order)
+    left, right = lo - 1, hi + 1
+    while left >= 0 or right < canvas.width:
+        if left >= 0 and left not in seen:
+            seen.add(left)
+            order.append(left)
+        if right < canvas.width and right not in seen:
+            seen.add(right)
+            order.append(right)
+        left -= 1
+        right += 1
+    return order
+
+
 def _rows_near(canvas: Canvas, near: int) -> list[int]:
     """Every row, nearest to *near* first, in both directions."""
-    rows: list[int] = []
+    order: list[int] = []
+    seen: set[int] = set()
     for distance in range(canvas.height + 1):
         for row in (near - distance, near + distance):
-            if 0 <= row < canvas.height and row not in rows:
-                rows.append(row)
-    return rows
+            if 0 <= row < canvas.height and row not in seen:
+                seen.add(row)
+                order.append(row)
+        if len(order) >= canvas.height:
+            break
+    return order
 
 
 def _columns_overlap(src: PlacedBox, dst: PlacedBox) -> bool:
@@ -251,34 +309,96 @@ def _route_across_bands(
     was refused there left the source with no line leaving it at all, and
     the horizontal leg began in mid-air a row below.
     """
-    lower = min(src.band, dst.band)
-    gap = placement.gaps.get(lower)
-    if gap is None:
-        return  # adjacent bands with no reserved row; nothing sensible to do
-
     down = dst.band > src.band
-    target_gap = placement.gaps.get(dst.band - 1 if down else dst.band)
-    lane = target_gap if target_gap is not None else gap
+    # Two different clear rows, and which is which depends on the direction.
+    #
+    # `gaps[n]` is the free row between band *n* and band *n+1*. Leaving the
+    # source means reaching the row on the side of the source we travel
+    # towards; arriving means the row on that side of the target. Taking
+    # `gaps[min(src, dst)]` for both put the *exit* row on the far side of
+    # the target when travelling up, so the first leg had to climb from the
+    # source through every band in between — and one box in any of them, in
+    # the source's own columns, killed every candidate column and the edge
+    # went undrawn.
+    exit_gap = placement.gaps.get(src.band if down else src.band - 1)
+    entry_gap = placement.gaps.get(dst.band - 1 if down else dst.band)
+    if exit_gap is None:
+        exit_gap = entry_gap if entry_gap is not None else placement.gaps.get(
+            min(src.band, dst.band)
+        )
+    _route_the_long_way(
+        canvas, placement, src, dst, exit_gap,
+        entry_gap if entry_gap is not None else exit_gap, down,
+    )
+
+
+def _route_across_frames(
+    canvas: Canvas, placement: Placement, src: PlacedBox, dst: PlacedBox
+) -> None:
+    """Two boxes in different frames that happen to share a band.
+
+    An Ingress in one namespace routing to a Service in another, with both
+    namespaces wide enough to sit side by side. The short routes all work
+    within one frame, so they all gave up: there is no clear row between two
+    boxes with a whole frame in between, and the lane that would join them
+    belongs to a frame that holds neither.
+
+    The shape is the same as a cross-band edge — out to a free row, along it
+    to the margin, down the margin, back along a free row to the target — so
+    it is the same code, with the two free rows searched for rather than
+    looked up in a table of band gaps.
+    """
+    down = dst.y > src.y
+    for exit_row in _rows_beside(canvas, src):
+        for entry_row in _rows_beside(canvas, dst):
+            if _route_the_long_way(
+                canvas, placement, src, dst, exit_row, entry_row, down
+            ):
+                return
+
+
+def _rows_beside(canvas: Canvas, box: PlacedBox) -> list[int]:
+    """Rows outside *box*'s own, nearest first, so an edge can pass by it."""
+    return [
+        row
+        for row in _rows_near(canvas, box.y + box.height // 2)
+        if row < box.y or row >= box.y + box.height
+    ]
+
+
+def _route_the_long_way(
+    canvas: Canvas,
+    placement: Placement,
+    src: PlacedBox,
+    dst: PlacedBox,
+    exit_gap: int,
+    lane: int,
+    down: bool,
+) -> bool:
+    """Out of the source, along a free row, out to the margin, along it, and
+    in to the target. Whether *exit_gap* and *lane* come from the band table
+    or from a search, the route is the same, and so is the reason it is only
+    ever drawn whole. Returns whether it managed it."""
     # One column past the picture, which is the only column guaranteed to
     # have nothing in it. Descent in a gutter beside the source drew a rule
     # down the full height of the picture, because that gutter is beside
     # every band below it too.
     margin = canvas.width - 1
-
     start_y = src.y + src.height if down else src.y - 1
-    approaches = _approaches(placement, dst, down)
-    for drop_x in range(src.x, src.x + src.width):
-        if not _clear(canvas, drop_x, start_y, gap, vertical=True):
-            continue
+    approaches = _approaches(dst, down)
+    for drop_x in _columns_near(canvas, src.x, src.x + src.width - 1):
+        # Out of the source sideways first. Every column the source spans
+        # can be blocked on the way to the gap — the frame's own title sits
+        # in exactly that band of columns, and a box below the source can sit
+        # in the rest — so the route has to be able to step out to the side
+        # and drop from there, not only fall straight out of the source.
+        out_x = src.x - 1 if drop_x < src.x else src.x + src.width
         for column, head_x, head_y, facing in approaches:
             legs = [
-                # Out of the source, starting at the first cell *past* its
-                # border. Starting on the border itself was refused, which
-                # left the source with no line leaving it and the next leg
-                # starting in mid-air.
-                (drop_x, start_y, drop_x, gap),
-                (drop_x, gap, margin, gap),
-                (margin, gap, margin, lane),
+                (out_x, start_y, drop_x, start_y),
+                (drop_x, start_y, drop_x, exit_gap),
+                (drop_x, exit_gap, margin, exit_gap),
+                (margin, exit_gap, margin, lane),
                 (margin, lane, column, lane),
                 # And in, stopping at the last cell *before* the target's
                 # border; the head goes on the border itself, deliberately.
@@ -288,34 +408,40 @@ def _route_across_bands(
                 continue
             _draw_legs(canvas, legs)
             canvas.arrow_head(head_x, head_y, facing, EDGE_STYLE, force=True)
-            return
+            return True
     # No column out of the source and in to the target is clear, which takes
     # a picture far denser than any real cluster. Draw nothing: a missing
     # line is a gap the reader can see, and a broken one is a connection
     # they will believe.
+    return False
 
 
-def _approaches(
-    placement: Placement, dst: PlacedBox, down: bool
-) -> list[tuple[int, int, int, str]]:
+def _approaches(dst: PlacedBox, down: bool) -> list[tuple[int, int, int, str]]:
     """Ways to come into *dst*: ``(column, head_x, head_y, facing)``.
 
-    From above when descending and below when ascending, stepped to the
-    right of the frame's own title so the run does not cut through the name.
-    Then the same from the side, for a box too narrow to be entered clear of
-    that — which points the other way, and so comes last.
+    Two families, most direct first. Straight in through the top or the
+    bottom, over every column the box spans; then in from either side, over
+    every row of it. The caller tries them in order and keeps the first whose
+    legs are all clear.
+
+    A single cell per family is not enough. Two edges can want the same
+    target — a cross-namespace Ingress and the Service beside it both point
+    at the same box — and the first one's arrowhead claims the cell. Locking
+    it is the point (see `Canvas.arrow_head`); the answer is for the second
+    edge to arrive a row or a column further along, not to give up.
     """
-    clear_of = placement.heading_right.get(dst.band, 0) + 2
     out: list[tuple[int, int, int, str]] = []
-    if dst.x <= clear_of <= dst.x + dst.width - 1:
+    mid_x = (dst.x + dst.x + dst.width - 1) // 2
+    for column in sorted(range(dst.x, dst.x + dst.width), key=lambda c: abs(c - mid_x)):
         if down:
-            out.append((clear_of, clear_of, dst.y - 1, "down"))
+            out.append((column, column, dst.y - 1, "down"))
         else:
-            out.append((clear_of, clear_of, dst.y + dst.height, "up"))
-    row = dst.y + dst.height // 2
-    if dst.x - 1 >= 0:
-        out.append((dst.x - 1, dst.x - 1, row, "right"))
-    out.append((dst.x + dst.width, dst.x + dst.width, row, "left"))
+            out.append((column, column, dst.y + dst.height, "up"))
+    mid_y = dst.y + dst.height // 2
+    for row in sorted(range(dst.y, dst.y + dst.height), key=lambda r: abs(r - mid_y)):
+        if dst.x - 1 >= 0:
+            out.append((dst.x - 1, dst.x - 1, row, "right"))
+        out.append((dst.x + dst.width, dst.x + dst.width, row, "left"))
     return out
 
 
@@ -344,21 +470,27 @@ def _route_down(
             return
 
     channel = _lane_around(placement, src, dst)
-    if channel is None:
-        return
-    out_y = src.y + src.height // 2
-    in_y = dst.y + dst.height // 2
-    out_x = src.x + src.width
-    in_x = dst.x + dst.width
-    legs = [
-        (out_x, out_y, channel, out_y),
-        (channel, out_y, channel, in_y),
-        (channel, in_y, in_x, in_y),
-    ]
-    if not _legs_clear(canvas, legs):
-        return
-    _draw_legs(canvas, legs)
-    canvas.arrow_head(in_x, in_y, "left", EDGE_STYLE, force=True)
+    if channel is not None:
+        out_y = src.y + src.height // 2
+        in_y = dst.y + dst.height // 2
+        out_x = src.x + src.width
+        in_x = dst.x + dst.width
+        legs = [
+            (out_x, out_y, channel, out_y),
+            (channel, out_y, channel, in_y),
+            (channel, in_y, in_x, in_y),
+        ]
+        if _legs_clear(canvas, legs):
+            _draw_legs(canvas, legs)
+            canvas.arrow_head(in_x, in_y, "left", EDGE_STYLE, force=True)
+            return
+
+    # The lane is one way round a stacked pair and the detour is another.
+    # Falling back to it is what stops a narrow panel losing an edge it
+    # could have drawn: the last leg of the lane route runs at the target's
+    # middle row, and when a third box shares that row and column there is
+    # no lane but there is a clear row somewhere else.
+    _route_around(canvas, src, dst)
 
 
 def _lane_around(placement: Placement, src: PlacedBox, dst: PlacedBox) -> int | None:
@@ -441,6 +573,11 @@ def _leg_span(
         if y1 == y2:
             return None
         return (x1, min(y1, y2), max(y1, y2) + 1, True)
+    if y1 != y2:
+        # `Canvas.line` would draw this as a horizontal run at `y1` and
+        # silently drop the vertical half, so the check has to say no rather
+        # than agree with a draw that is not the one being asked about.
+        raise ValueError(f"leg ({x1},{y1})->({x2},{y2}) is not axis-aligned")
     return (y1, min(x1, x2), max(x1, x2) + 1, False)
 
 
@@ -456,16 +593,6 @@ def _draw_legs(canvas: Canvas, legs: list[tuple[int, int, int, int]]) -> None:
     for leg in legs:
         if _leg_span(*leg) is not None:
             canvas.line([(leg[0], leg[1]), (leg[2], leg[3])], EDGE_STYLE)
-
-
-def _clear_row(canvas: Canvas, near: int, after: int, before: int) -> int:
-    """The nearest row to *near* with nothing solid between two columns."""
-    after, before = sorted((after, before))
-    for distance in range(0, canvas.height):
-        for row in (near + distance, near - distance):
-            if 0 <= row < canvas.height and _clear(canvas, row, after, before):
-                return row
-    return min(near + 1, canvas.height - 1)
 
 
 def _free_lane(canvas: Canvas, preferred: int, y1: int, y2: int) -> int:

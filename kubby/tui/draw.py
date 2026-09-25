@@ -15,13 +15,22 @@ right and not quite right in ways that made the picture illegible:
 Two rules make the output consistent here, and both are enforced by the
 canvas rather than left to convention:
 
-**A locked cell is never overwritten.** Box borders are locked once drawn,
-so an edge routed later cannot scratch a character through one.
+**A box is never overwritten.** A box locks every cell it occupies once
+drawn, so an edge routed later cannot scratch a character through its border
+or through the text inside it.
 
-**An edge stops one cell short of a locked cell.** Arrows therefore sit
-*beside* a border, pointing at it (``─►│``), never merged into it. That is
-the whole of the arrow-consistency guarantee: an arrow cannot end up fused
-with a border, because it is never allowed to write there.
+**An edge stops one cell short of a box.** Arrows therefore sit *beside* a
+border, pointing at it (``─►│``), never merged into it. That is the whole of
+the arrow-consistency guarantee: an arrow cannot end up fused with a border,
+because it is never allowed to write there.
+
+**A *frame* is the one exception, and deliberately.** An edge between two
+namespaces has to leave one frame and enter the other, and there is no way to
+do that without crossing a border. So a frame's border may be written, and
+what replaces it is the line character — the same ``─`` or ``│`` on every
+crossing. Refusing it instead left the line in two pieces with the arrowhead
+stranded beyond. `Canvas.solid` is the predicate that draws the line, and
+`_frame` is the set of cells it excuses.
 """
 
 from __future__ import annotations
@@ -113,11 +122,14 @@ class Canvas:
     def solid(self, x: int, y: int) -> bool:
         """Occupied by something an edge may not write over.
 
-        A box — its border or its text — is solid. A *frame* border is not:
-        an edge that crosses one is a line passing through the frame, which
-        is exactly what it is, and the alternative is refusing the cell and
-        leaving the line in two pieces with the arrow stranded on the far
-        side. The frame's *interior* is solid like any box interior.
+        A box — its border or its text — is solid. So is anything an earlier
+        edge has drawn that a later one must not run over, which is why an
+        arrowhead locks its cell.
+
+        A *frame* border is not solid, for the reason in the module
+        docstring. The frame's interior is not solid either: it holds the
+        boxes, and an edge has to be able to pass through the padding between
+        them to reach a box on the far side.
         """
         return self.locked(x, y) and (x, y) not in self._frame
 
@@ -250,12 +262,15 @@ class Canvas:
     # ----- edges -------------------------------------------------------
 
     def line(self, points: list[tuple[int, int]], style: str | None = None) -> None:
-        """Draw an orthogonal polyline, skipping anything locked.
+        """Draw an orthogonal polyline, skipping anything solid.
 
-        Skipping rather than merging is the whole point: a locked cell is a
-        border, and an arrow that ends up merged into one produces
-        ``├┼─►`` and a different junction character on every crossing. Here
-        a locked cell is left untouched and the run continues beyond it.
+        Skipping rather than merging is the whole point: a solid cell is a
+        box, and an arrow that ends up merged into one produces ``├┼─►`` and
+        a different junction character on every crossing. Here a solid cell
+        is left untouched and the run continues beyond it.
+
+        A *frame* border is not solid, so a run crossing one replaces the
+        border with the line character. See the module docstring for why.
         """
         for (x1, y1), (x2, y2) in zip(points, points[1:]):
             if x1 == x2:
@@ -291,8 +306,9 @@ class Canvas:
             self._locked[y][x] = True
             return True
         if self.solid(x, y):
-            # Never on a box, and never on a frame's border: a head belongs
-            # against the thing it points at, and a frame is not the thing.
+            # Never on a box. A head belongs against the thing it points at,
+            # and a frame is not the thing, so a head on a frame border is
+            # refused even though a *line* may cross one.
             self.skipped += 1
             return False
         return self.put(x, y, ARROWS[direction], style, lock=True)

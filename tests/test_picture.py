@@ -637,17 +637,26 @@ class TestPaint:
         _picture, severed = paint.render_checked(placement)
         assert severed == 0, f"{severed} cells refused at width {width}"
 
-    @pytest.mark.parametrize("model", [realistic, cross_namespace])
-    def test_every_edge_that_can_be_drawn_is_drawn(self, model):
+    @pytest.mark.parametrize("model", [realistic, broken, cross_namespace])
+    def test_every_edge_gets_drawn(self, model):
         """The companion to the above: not drawing an edge is worse than
-        drawing it badly, so the same sweep checks that an edge exists for
-        every link the model has, at every width."""
+        drawing it badly, so the same sweep checks each link is *drawn*.
+
+        Counted by arrowhead, not by `placement.edges` — that list is
+        filtered from the diagram's, so it only shrinks when a box goes
+        missing and says nothing at all about whether a route gave up. An
+        earlier version of this test asserted on it and could not fail.
+        """
         built = diagram.build_diagram(model())
-        expected = len(built.edges)
-        assert expected
+        assert built.edges
         for width in range(20, 121, 4):
             placement = place.place(built, width)
-            assert len(placement.edges) == expected, width
+            lines = paint.render(placement).plain.splitlines()
+            drawn = len(_arrow_cells(lines))
+            assert drawn == len(built.edges), (
+                f"{len(built.edges) - drawn} of {len(built.edges)} edges "
+                f"undrawn at width {width}"
+            )
 
     @pytest.mark.parametrize("model", [realistic, broken, cross_namespace])
     @pytest.mark.parametrize("width", list(range(28, 121, 3)))

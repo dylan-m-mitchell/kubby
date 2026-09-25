@@ -663,8 +663,8 @@ class KubbyApp(App[None]):
                 ]
                 + move_rows
                 + [
-                    ("h", "collapse, or out to the parent (tree)"),
-                    ("l", "expand, or in to the first pod (tree)"),
+                    ("h", "collapse, out to the parent, or scroll left (graph)"),
+                    ("l", "expand, in to the first pod, or scroll right (graph)"),
                     ("enter/space", "expand / collapse (tree)"),
                 ],
             ),

@@ -248,6 +248,10 @@ class MachinePanel(PanelBase, VerticalScroll, can_focus=True):
     BINDINGS = [
         Binding("j", "scroll_down", "scroll", show=False),
         Binding("k", "scroll_up", "scroll", show=False),
+        # The picture scrolls sideways when it is wider than the panel, and
+        # h/l are the horizontal half of the same gesture j/k already is.
+        Binding("l", "scroll_right", "scroll", show=False),
+        Binding("h", "scroll_left", "scroll", show=False),
     ]
 
     def compose(self) -> ComposeResult:
@@ -411,6 +415,10 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
     BINDINGS = [
         Binding("j", "scroll_down", "scroll", show=False),
         Binding("k", "scroll_up", "scroll", show=False),
+        # The picture scrolls sideways when it is wider than the panel, and
+        # h/l are the horizontal half of the same gesture j/k already is.
+        Binding("l", "scroll_right", "scroll", show=False),
+        Binding("h", "scroll_left", "scroll", show=False),
     ]
 
     def __init__(self, **kwargs: Any) -> None:
@@ -424,11 +432,20 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
     def compose(self) -> ComposeResult:
         yield self._picture
 
+    def _clear(self) -> None:
+        """Forget the last picture, so a panel with nothing to draw does not
+        keep its width and its scroll range.
+
+        Without this, a cluster that stops being readable left a panel reading
+        `cannot draw the cluster` with a horizontal scrollbar out to the
+        width of the picture it was showing a moment ago, and a `placement`
+        pointing at boxes that are not there."""
+        self.placement = None
+        self.border_subtitle = None
+        self._picture.styles.width = None
+
     def set_cluster(self, cluster: dict[str, Any]) -> None:
         self._cluster = cluster or {}
-        self.render_picture()
-
-    def refresh_picture(self) -> None:
         self.render_picture()
 
     def on_resize(self) -> None:
@@ -447,8 +464,8 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
         """Draw the picture for the current cluster and panel size."""
         cluster = self._cluster
         if not cluster:
+            self._clear()
             self._picture.update(Text(self.EMPTY_TEXT, style="dim"))
-            self.border_subtitle = None
             return
 
         if not cluster.get("available", True):
@@ -457,8 +474,8 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
             body = Text("cannot draw the cluster", style="dim")
             body.append(f"\n{cluster.get('error') or 'unavailable'}",
                         style="yellow")
+            self._clear()
             self._picture.update(body)
-            self.border_subtitle = None
             return
 
         self.border_subtitle = f"{cluster.get('pod_count') or 0} pods"

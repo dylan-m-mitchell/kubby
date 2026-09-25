@@ -695,8 +695,8 @@ class TestVimNavigation:
                 "down",                              # j
                 "up",                                # k
                 "also move",                         # arrows, demoted to a note
-                "collapse, or out to the parent",    # h on the tree
-                "expand, or in to the first pod",    # l on the tree
+                "collapse, out to the parent",       # h on the tree
+                "expand, in to the first pod",    # l on the tree
                 "not applicable — one column",       # why h/l is absent on lists
             ):
                 assert label in text, label
@@ -787,6 +787,29 @@ class TestClusterGraphView:
                 lambda: fake_service.calls.count("get_cluster_info") >= 2
             )
             assert "get_status" not in fake_service.calls
+
+    async def test_a_cluster_that_stops_being_drawable_forgets_the_picture(
+        self, fake_service
+    ):
+        """Otherwise a panel reading `cannot draw the cluster` keeps a
+        horizontal scrollbar out to the width of the picture it was showing a
+        moment ago, and a `placement` pointing at boxes that are not there."""
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(50, 40)) as pilot:
+            await wait_until(lambda: app.cluster)
+            panel = app.query_one(GraphPanel)
+            await wait_until(lambda: panel.placement is not None)
+            for _ in range(5):
+                await pilot.pause()
+            assert panel.placement is not None
+
+            app.query_one(ClusterPanel).set_cluster(
+                {**app.cluster, "graph": {"available": False, "error": "nope"}}
+            )
+            for _ in range(3):
+                await pilot.pause()
+            assert panel.placement is None
+            assert panel.max_scroll_x == 0
 
     async def test_the_graph_is_the_default_view(self, fake_service):
         app = KubbyApp(service=fake_service)
@@ -1111,8 +1134,8 @@ class TestKeybarAndHelp:
                 ('"j"', "down"),
                 ('"k"', "up"),
                 ('"up/down"', "also move"),
-                ('"h"', "collapse, or out to the parent"),
-                ('"l"', "expand, or in to the first pod"),
+                ('"h"', "collapse, out to the parent"),
+                ('"l"', "expand, in to the first pod"),
                 ('"q"', "quit"), ('"?"', "help"), ('"R"', "re-check"),
                 ('"x"', "hide log"),
                 ('"esc"', "close filter"),
