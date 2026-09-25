@@ -60,6 +60,7 @@ import subprocess
 import threading
 from typing import Any, Callable
 
+from kubby import cluster as cluster_mod
 from kubby import images as images_mod
 from kubby import settings as settings_mod
 from kubby.installer import (
@@ -534,6 +535,76 @@ class KubbyService:
             "nodes": nodes,
             "namespaces": namespaces,
             "pod_count": pod_count,
+        }
+
+    # ------------------------------------------------------------------
+    # cluster graph (the topology picture)
+    # ------------------------------------------------------------------
+
+    def get_cluster_graph(self) -> dict[str, Any]:
+        """Return the cluster's *wiring*, not just its inventory.
+
+        Deliberately separate from :meth:`get_cluster_info`: the tree needs
+        a third of this, and the extra calls should not be paid for by a
+        view that is not on screen. Every call here is independent and
+        degrades to empty on failure, exactly as the node/namespace/pod
+        calls do — one dead API must not blank the whole picture.
+
+        Costs five extra ``kubectl`` round-trips. That is only affordable
+        because kubby has no auto-refresh; this runs when the user presses
+        ``R``.
+        """
+        def _json(args: list[str], timeout: int = 15) -> dict[str, Any]:
+            """Run kubectl and parse its JSON, or ``{}`` if anything fails."""
+            try:
+                proc = subprocess.run(
+                    args, capture_output=True, text=True, timeout=timeout,
+                    env=self._subprocess_env(),
+                )
+            except (subprocess.TimeoutExpired, OSError):
+                log.warning("kubectl failed: %s", " ".join(args))
+                return {}
+            if proc.returncode != 0 or not proc.stdout.strip():
+                return {}
+            try:
+                data = json.loads(proc.stdout)
+            except json.JSONDecodeError:
+                log.warning("kubectl returned unparsable JSON: %s", " ".join(args))
+                return {}
+            return data if isinstance(data, dict) else {}
+
+        if not shutil.which("kubectl"):
+            return {"available": False, "error": "kubectl not found on PATH"}
+
+        # The inventory calls, shared with the tree's data.
+        info = self.get_cluster_info()
+        if not info.get("running"):
+            return {"available": False, "error": info.get("error") or "cluster not running"}
+
+        model = cluster_mod.build_model(
+            nodes=info.get("nodes") or [],
+            namespaces=[str(n.get("name") or "") for n in (info.get("namespaces") or [])],
+            pods=cluster_mod.parse_pods(_json(["kubectl", "get", "pods", "-A", "-o", "json"])),
+            workloads=cluster_mod.parse_workloads(
+                _json(["kubectl", "get", "deploy,statefulset,daemonset", "-A", "-o", "json"])
+            ),
+            replica_sets=cluster_mod.parse_replica_sets(
+                _json(["kubectl", "get", "replicasets", "-A", "-o", "json"])
+            ),
+            services=cluster_mod.parse_services(_json(["kubectl", "get", "svc", "-A", "-o", "json"])),
+            # EndpointSlice, not Endpoints: v1 Endpoints is deprecated as of
+            # Kubernetes 1.33 and a current cluster warns about it on stdout.
+            endpoint_slices=cluster_mod.parse_endpoint_slices(
+                _json(["kubectl", "get", "endpointslices", "-A", "-o", "json"])
+            ),
+            ingresses=cluster_mod.parse_ingress(_json(["kubectl", "get", "ingress", "-A", "-o", "json"])),
+        )
+        return {
+            "available": True,
+            "error": None,
+            "context": info.get("context"),
+            "version": info.get("version"),
+            **model,
         }
 
     # ------------------------------------------------------------------
