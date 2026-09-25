@@ -348,9 +348,7 @@ class ClusterPanel(PanelBase, Tree):
     JUMP_KEY = "4"
     EMPTY_TEXT = "no cluster"
 
-    BINDINGS = [
-        Binding("j", "cursor_down", "down", show=False),
-        Binding("k", "cursor_up", "up", show=False),
+    BINDINGS = LIST_NAV_BINDINGS + [
         Binding("h", "vim_collapse", "collapse", show=False),
         Binding("l", "vim_expand", "expand", show=False),
     ]
