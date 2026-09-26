@@ -1,11 +1,11 @@
 """Main-screen panels for the kubby TUI.
 
-The layout mirrors the plan's sketch: a left sidebar (minikube, machine,
-images) beside a right-hand cluster panel, a streaming log strip, and a
-keybar.  Every panel is bordered, focusable and lazygit-style, and the
+The layout mirrors the plan's sketch: a left sidebar (minikube, images)
+beside a right-hand cluster panel, a streaming log strip, and a keybar.  Every panel is bordered, focusable and lazygit-style, and the
 focused one gets a brighter border/title.  Each panel carries its jump key
-in its own title ("(1) minikube", "(2) machine", …), in brackets so the digit
-cannot be misread for part of the name.
+in its own title ("(1) minikube", "(3) images", …), in brackets so the digit
+cannot be misread for part of the name. (`2` is deliberately unassigned: it
+was the machine panel's, and the machine moved into the minikube panel.)
 
 Navigable panels also move with vim's ``j``/``k`` for down/up.  The
 namespaces tree additionally takes ``h``/``l`` to collapse/expand, the
@@ -31,7 +31,7 @@ from textual.message import Message
 from textual.widgets import OptionList, RichLog, Static, Tree
 from textual.widgets.option_list import Option
 
-from kubby.cluster import describe_node
+from kubby.cluster import node_addressing, node_identity, resource_shares
 from kubby.tui import diagram as diagram_mod
 from kubby.tui import paint as paint_mod
 from kubby.tui import place as place_mod
@@ -56,7 +56,7 @@ class PanelAction(Message):
 
 
 class PanelBase:
-    """Shared chrome + contract for the four main-screen panels.
+    """Shared chrome + contract for the main-screen panels.
 
     Concrete panels are *also* Textual widgets (the mixin sits leftmost in
     the MRO so its handlers run before the widget's own).
@@ -144,8 +144,21 @@ def format_size(size: Any) -> str:
 
 
 class MinikubePanel(PanelBase, Vertical, can_focus=True):
-    """Cluster summary — context, version, reachable/not — plus the
-    start/stop/delete keys."""
+    """The machine minikube made, and the cluster it is running — plus the
+    start/stop/delete keys.
+
+    Two panels' worth of fact in one, because they are one fact. Whether
+    the cluster is up, and what the machine under it is, are the same
+    question asked from two ends: a node is a whole machine with its own OS,
+    its own runtime and its own fixed share of CPU and memory, and that
+    share is usually a fraction of the host's. It is the explanation for a
+    Pod stuck ``Pending`` with "insufficient cpu", and it is invisible in a
+    list of pods.
+
+    The share is drawn as a bar because the proportion is the point.
+    `2 of 16 cpu` is a number to read; `\u2593\u2593\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591` is the cluster
+    being an eighth of the laptop, seen rather than worked out.
+    """
 
     BORDER_TITLE = "minikube"
     JUMP_KEY = "1"
@@ -205,6 +218,12 @@ class MinikubePanel(PanelBase, Vertical, can_focus=True):
             out.append("\n")
             out.append("ctx ", style="dim")
             out.append(str(context))
+            # The driver goes here rather than on a line of its own: the
+            # node's runtime is two lines below, and `docker 29.2.1` already
+            # says which driver this is.
+            driver = str((info.get("graph") or {}).get("driver") or "")
+            if driver:
+                out.append(f" · {driver}", style="dim")
         nodes = info.get("nodes") or []
         if nodes:
             ready = sum(1 for n in nodes if n.get("status") == "Ready")
@@ -214,100 +233,49 @@ class MinikubePanel(PanelBase, Vertical, can_focus=True):
                 style="green" if ready == len(nodes) else "yellow",
             )
             out.append(" nodes ready", style="dim")
+        out.append(MinikubePanel._machine_text(info))
         return out
-
-
-class MachinePanel(PanelBase, VerticalScroll, can_focus=True):
-    """The machine the cluster runs on, as Kubernetes sees it.
-
-    What the node *is*, rather than what runs on it: its own operating
-    system, its own container runtime, the address the host reaches it on,
-    the range pod addresses come from, and the share of CPU and memory a
-    Pod can actually ask for. That share is the explanation for a Pod stuck
-    ``Pending`` with "insufficient cpu", and it is invisible in a list of
-    pods.
-
-    This took the tools panel's place rather than joining it. A node's
-    figures answer "why is my Pod not starting", which is the question
-    somebody is asking while they look at a cluster; a list of installed
-    binaries does not, and once the graph stopped drawing the machine as a
-    box there was nowhere else for these facts to go. Tools are still
-    reported by ``kubby --check`` and by the preflight — they are just not
-    the story the sidebar should be telling.
-    """
-
-    BORDER_TITLE = "machine"
-    JUMP_KEY = "2"
-    EMPTY_TEXT = "no cluster"
-
-    #: Listed explicitly rather than mixed in, because Textual *replaces*
-    #: BINDINGS along the MRO instead of merging them, and ScrollableWidget
-    #: has its own. Same reasoning as `GraphPanel`: j/k scroll, because that
-    #: is what they do on a read-only view, and the same gesture moves a
-    #: cursor on a list.
-    BINDINGS = [
-        Binding("j", "scroll_down", "scroll", show=False),
-        Binding("k", "scroll_up", "scroll", show=False),
-        # The picture scrolls sideways when it is wider than the panel, and
-        # h/l are the horizontal half of the same gesture j/k already is.
-        Binding("l", "scroll_right", "scroll", show=False),
-        Binding("h", "scroll_left", "scroll", show=False),
-    ]
-
-    def compose(self) -> ComposeResult:
-        yield Static(Text(self.EMPTY_TEXT, style="dim"), id="machine-body")
-
-    def set_cluster(self, info: dict[str, Any]) -> None:
-        self.query_one("#machine-body", Static).update(self._machine_text(info))
-
-    @staticmethod
-    def _nothing_to_say(info: dict[str, Any]) -> str:
-        """What to show when there are no node facts to describe.
-
-        The reason when there is no cluster, and a plain statement when there
-        is one but its nodes could not be read — a panel that silently shows
-        nothing looks like a machine with no specifications.
-        """
-        if not info.get("running", True):
-            return str(info.get("error") or "not running")
-        return "no node facts"
 
     @staticmethod
     def _machine_text(info: dict[str, Any]) -> Text:
-        # The node's own facts come from the graph payload rather than the
-        # inventory: the inventory's node list is name/status/roles, and
-        # widening it for this panel would cost every caller the `nodeInfo`
-        # and capacity blocks it has no use for.
-        graph = info.get("graph") or {}
-        facts = graph.get("node_facts") or []
+        """The node's own figures, as a block under the cluster's.
+
+        Absent when there is nothing to say: no cluster, no node facts, or a
+        graph that could not be fetched. The last of those is deliberate —
+        the cluster panel says why it cannot draw, and the same sentence in
+        two places is worse than one.
+        """
+        facts = (info.get("graph") or {}).get("node_facts") or []
         if not facts:
-            return Text(MachinePanel._nothing_to_say(info), style="dim")
+            return Text()
 
         out = Text()
-        driver = str(graph.get("driver") or "")
-        head = " · ".join(
-            part
-            for part in (str(info.get("version") or ""), f"{driver} driver" if driver else "")
-            if part
-        )
-        if head:
-            out.append(head, style="cyan")
-
         for index, fact in enumerate(facts):
-            out.append("\n")
+            # A blank line off the cluster summary, so the machine reads as a
+            # separate thing and not as more of the same list.
+            out.append("\n\n" if index == 0 else "\n")
             ready = str(fact.get("status") or "") == "Ready"
+            identity = node_identity(fact)
             out.append("● " if ready else "○ ", style="green" if ready else "yellow")
-            out.append(str(fact.get("name") or "the machine"), style="bold")
+            out.append(identity[0], style="bold")
             roles = [str(r) for r in fact.get("roles") or []]
             if roles:
                 out.append(f"  {', '.join(roles)}", style="dim")
-            # `describe_node`'s first line is the name, already shown above
-            # beside its ready state.
-            for line in describe_node(fact)[1:]:
+            for line in identity[1:]:
                 out.append("\n")
                 out.append(line, style="dim")
-            if index < len(facts) - 1:
+            for share in resource_shares(fact):
                 out.append("\n")
+                # The label is padded so every bar starts in the same
+                # column, which is what lets the eye compare two bars. A bar
+                # with nothing in it is yellow: that is a node nothing can
+                # be scheduled on.
+                out.append(f"{share.label:<7}", style="dim")
+                out.append(share.bar, style="green" if "▓" in share.bar else "yellow")
+                out.append(f"  {share.short}", style="dim")
+            for line in node_addressing(fact):
+                out.append("\n")
+                out.append(line, style="dim")
         return out
 
 
