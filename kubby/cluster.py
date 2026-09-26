@@ -20,6 +20,8 @@ reachability is not shown.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import re
 from typing import Any
 
@@ -58,6 +60,13 @@ def _int_or(value: Any, default: int = 0) -> int:
         return default
 
 
+#: The binary suffixes Kubernetes reports memory in, and what each is worth
+#: in bytes. One table, because two copies is one too many: a formatter that
+#: knew a unit the ratio did not is how a memory bar comes out empty beside a
+#: perfectly correct "3.8Gi of 15.6Gi".
+MEMORY_SCALES = {"Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4}
+
+
 def human_memory(quantity: str) -> str:
     """``16313348Ki`` -> ``15.6Gi``.
 
@@ -70,8 +79,7 @@ def human_memory(quantity: str) -> str:
     text = str(quantity or "").strip()
     if not text:
         return ""
-    scales = {"Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4}
-    for suffix, scale in scales.items():
+    for suffix, scale in MEMORY_SCALES.items():
         if not text.endswith(suffix):
             continue
         try:
@@ -154,64 +162,197 @@ def parse_node_facts(payload: Any) -> list[dict[str, Any]]:
     return facts
 
 
-def node_share(fact: dict[str, Any]) -> str:
-    """``2 of 16 cpu, 2Gi of 15.6Gi`` — the share, and the whole.
+#: How wide a share bar is drawn. Fixed, not derived from the panel: the
+#: sidebar is a fixed 34 columns, so a bar that reflows with the terminal
+#: would be the one line in the panel whose meaning changed on a resize.
+#:
+#: Twelve cells, not sixteen, because the line has to hold a label, the bar
+#: and both figures inside the sidebar's 32 usable columns:
+#: `memory ` + twelve + ` ` + `3.8/15.6Gi` is 30, and sixteen is 34. Twelve
+#: still divides 1/8 into one cell and a half, which is all the precision
+#: the comparison needs.
+BAR_CELLS = 12
+
+_BAR_FILLED = "\u2593"   # ▓
+_BAR_EMPTY = "\u2591"    # ░
+
+
+@dataclass(frozen=True)
+class ResourceShare:
+    """How much of one resource a Pod may ask for, as a bar and as figures.
+
+    The bar and the figures say the same thing, and both are wanted: the
+    figures are what you read when you want the number, and the bar is what
+    makes the *proportion* land without arithmetic. On a 2-CPU minikube on a
+    16-CPU laptop, `2 of 16 cpu` is a fact and `\u2593\u2593\u2591\u2591\u2591\u2591...` is the
+    point.
+    """
+
+    label: str
+    bar: str
+    #: Both figures, spelled out: ``2 of 16``, ``3.8Gi of 15.6Gi``. For a
+    #: graph box, which has room and wants to be read rather than scanned.
+    text: str
+    #: The same pair compressed: ``2/16``, ``3.8/15.6Gi``. For the sidebar,
+    #: where the bar is the message and the figures are the footnote, and
+    #: the two together have to fit beside a seven-character label.
+    short: str
+
+
+def quantity(value: Any) -> float | None:
+    """One Kubernetes quantity as a number, in its own base unit.
+
+    `16313348Ki` is 16704868352 (bytes) and `3900m` is 3.9 (cores). The unit
+    is the resource's own, so dividing two quantities of the same resource
+    gives the ratio whatever unit they arrived in.
+
+    Deliberately not from the display strings: `human_memory` turns
+    `16313348Ki` into `15.6Gi`, and `float("15.6Gi")` is not a number, so a
+    ratio taken from there came out empty beside a perfectly correct
+    "3.8Gi of 15.6Gi".
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    scale = 1.0
+    for suffix, factor in MEMORY_SCALES.items():
+        if text.endswith(suffix):
+            scale = factor
+            text = text[: -len(suffix)]
+            break
+    else:
+        if text.endswith("m"):
+            # `m` is milli-units: 3900m of CPU is 3.9 cores.
+            scale = 0.001
+            text = text[:-1]
+    try:
+        return float(text) * scale
+    except ValueError:
+        return None
+
+
+def _ratio(allocatable: str, capacity: str) -> float | None:
+    """*allocatable* as a fraction of *capacity*, or None if either is not a
+    quantity the API should have produced."""
+    left, right = quantity(allocatable), quantity(capacity)
+    if left is None or right is None or right == 0:
+        return None
+    return left / right
+
+
+def resource_shares(fact: dict[str, Any]) -> list[ResourceShare]:
+    """The node's share of CPU and memory, one bar each.
 
     Only the share is what a Pod may ask for, and on a 2-CPU minikube on a
     16-CPU laptop the two differ sharply. Showing the host's figure alone is
-    how someone concludes the cluster is starved when it is not. Equal
-    values collapse rather than repeat.
+    how someone concludes the cluster is starved when it is not.
 
     Lives here, beside the parser that produces the fields, because two
-    places now describe a node — the graph's box and the sidebar readout —
-    and two copies of "the share and the whole" is two chances to report
-    only the whole.
+    places describe a node — the graph's box and the sidebar readout — and
+    two copies of "the share and the whole" is two chances to report only
+    the whole.
     """
-    def pair(allocatable: str, capacity: str, suffix: str = "") -> str:
-        if not allocatable and not capacity:
-            return ""
-        if allocatable == capacity:
-            return f"{allocatable}{suffix}"
-        return f"{allocatable or '?'} of {capacity or '?'}{suffix}"
-
-    parts = [
-        text
-        for text in (
-            pair(
-                str(fact.get("allocatable_cpu") or ""),
-                str(fact.get("capacity_cpu") or ""),
-                " cpu",
-            ),
-            pair(
-                human_memory(fact.get("allocatable_memory") or ""),
-                human_memory(fact.get("capacity_memory") or ""),
-            ),
+    out: list[ResourceShare] = []
+    for label, raw_alloc, raw_cap, shown_alloc, shown_cap in (
+        (
+            "cpu",
+            str(fact.get("allocatable_cpu") or ""),
+            str(fact.get("capacity_cpu") or ""),
+            str(fact.get("allocatable_cpu") or ""),
+            str(fact.get("capacity_cpu") or ""),
+        ),
+        (
+            "memory",
+            str(fact.get("allocatable_memory") or ""),
+            str(fact.get("capacity_memory") or ""),
+            human_memory(fact.get("allocatable_memory") or ""),
+            human_memory(fact.get("capacity_memory") or ""),
+        ),
+    ):
+        if not shown_alloc and not shown_cap:
+            continue
+        # A shared unit belongs to the pair, not to each figure: `3.8` and
+        # `15.6` with the label saying `memory` is enough, and printing `Gi`
+        # twice is 3 columns the sidebar does not have.
+        unit = ""
+        for suffix in MEMORY_SCALES:
+            if shown_alloc.endswith(suffix) or shown_cap.endswith(suffix):
+                unit = suffix
+                break
+        bare = (shown_alloc[: -len(unit)] if unit and shown_alloc.endswith(unit)
+                else shown_alloc)
+        bare_cap = (shown_cap[: -len(unit)] if unit and shown_cap.endswith(unit)
+                    else shown_cap)
+        short = f"{bare}/{bare_cap}{unit}"
+        if shown_alloc == shown_cap:
+            # Equal values collapse rather than repeat. On a node that can
+            # hand out everything it has, a bar of "2 of 16" would be a lie
+            # and a bar of "16 of 16" is the same length as the text.
+            ratio, text = 1.0, shown_alloc
+            short = bare + unit
+        else:
+            ratio = _ratio(raw_alloc, raw_cap)
+            # A node reporting only one of the two still says something
+            # worth showing — the share is the number that matters — so the
+            # figure goes in and the bar comes out empty, which reads as
+            # "we cannot draw this" rather than as "there is none".
+            text = f"{shown_alloc or '?'} of {shown_cap or '?'}"
+            short = f"{bare or '?'}/{bare_cap or '?'}{unit}"
+        ratio = min(max(ratio or 0.0, 0.0), 1.0)
+        filled = round(ratio * BAR_CELLS)
+        out.append(
+            ResourceShare(
+                label=label,
+                bar=_BAR_FILLED * filled + _BAR_EMPTY * (BAR_CELLS - filled),
+                text=text,
+                short=short,
+            )
         )
-        if text
-    ]
-    return ", ".join(parts)
+    return out
 
 
-def describe_node(fact: dict[str, Any]) -> list[str]:
-    """The lines that say what a node *is*, rather than what runs on it.
+def node_identity(fact: dict[str, Any]) -> list[str]:
+    """What the machine is: its name, its OS, its container runtime.
 
-    Its own operating system, its own container runtime, the address the
-    host reaches it on, the range pod addresses come from, and the share of
-    CPU and memory a Pod can actually ask for. That is the explanation for a
-    Pod stuck ``Pending`` with "insufficient cpu", and it is invisible in a
-    list of pods.
+    Ends there, deliberately. A caller that also wants the share and the
+    addressing puts them *between* these and :func:`node_addressing` — the
+    share is the headline and the address is a footnote, and only the
+    renderer knows the width it has to fit them in. A helper that returned
+    all of it in one list would put the two figures in the wrong order for
+    every caller but one.
     """
     lines = [str(fact.get("name") or "the machine")]
-    for extra in (
-        fact.get("os_image"),
-        fact.get("runtime"),
-        node_share(fact),
-        f"pods from {fact['pod_cidr']}" if fact.get("pod_cidr") else "",
-        f"at {fact['internal_ip']}" if fact.get("internal_ip") else "",
-    ):
+    for extra in (fact.get("os_image"), fact.get("runtime")):
         if extra:
             lines.append(str(extra))
     return lines
+
+
+def node_addressing(fact: dict[str, Any]) -> list[str]:
+    """How you reach it, and where its pods' addresses come from."""
+    return [
+        str(extra)
+        for extra in (
+            f"pods from {fact['pod_cidr']}" if fact.get("pod_cidr") else "",
+            f"at {fact['internal_ip']}" if fact.get("internal_ip") else "",
+        )
+        if extra
+    ]
+
+
+def describe_node(fact: dict[str, Any]) -> list[str]:
+    """The whole machine in one list, for a caller with no opinion.
+
+    The graph's node box. The share goes in as figures rather than a bar:
+    the box already has three sides around the text, and a bar inside one
+    repeats the sidebar with more ink.
+    """
+    return (
+        node_identity(fact)
+        + [f"{s.text} {s.label}" for s in resource_shares(fact)]
+        + node_addressing(fact)
+    )
+
 
 
 def parse_pods(payload: Any) -> list[dict[str, Any]]:

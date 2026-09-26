@@ -46,7 +46,6 @@ from kubby.tui.panels import (
     MinikubePanel,
     PanelAction,
     PanelFocused,
-    MachinePanel,
 )
 from kubby.tui.popups import ConfirmModal, HelpScreen, PrereqModal, SettingsScreen
 
@@ -65,7 +64,6 @@ log = logging.getLogger("kubby")
 #: and an unmapped tab is available to whatever wants it next.
 APP_KEYS: tuple[tuple[str, str, str, bool], ...] = (
     ("1", "focus_panel('#minikube')", "minikube panel", False),
-    ("2", "focus_panel('#machine')", "machine panel", False),
     ("3", "focus_panel('#images')", "images panel", False),
     ("4", "focus_panel('#cluster')", "namespaces panel", False),
     ("R", "recheck", "re-check", True),
@@ -287,7 +285,6 @@ class KubbyApp(App[None]):
         with Horizontal(id="body"):
             with Vertical(id="sidebar"):
                 yield MinikubePanel(id="minikube")
-                yield MachinePanel(id="machine")
                 yield ImagesPanel(id="images")
             yield ClusterPanel(id="cluster")
         yield LogPanel()
@@ -385,7 +382,6 @@ class KubbyApp(App[None]):
 
         self._update_header()
         self.query_one(MinikubePanel).set_cluster(cluster)
-        self.query_one(MachinePanel).set_cluster(cluster)
         self.query_one(ClusterPanel).set_cluster(cluster)
         self._render_images()
         # Cluster state changed → start/stop/delete availability changed.
@@ -633,15 +629,6 @@ class KubbyApp(App[None]):
             ("enter", "apply filter and close"),
             ("esc", "clear filter"),
         ] + list_nav
-        # The machine panel is a readout with no keys of its own. j/k scroll
-        # it, but the help says so rather than listing an empty section,
-        # which would read as a panel that was never finished. Written as two
-        # rows rather than one "j/k" row, because j and k are opposites and
-        # a combined row reads as equals.
-        machine_rows: list[tuple[str, str]] = [
-            ("j", "scroll down"),
-            ("k", "scroll up"),
-        ]
         return [
             (
                 "global",
@@ -651,7 +638,6 @@ class KubbyApp(App[None]):
                 ],
             ),
             ("minikube panel", self._panel_rows(MinikubePanel)),
-            ("machine panel", machine_rows),
             ("images panel", images_rows),
             # The cluster panel is two views behind one pair of keys, so the
             # help says which is showing rather than listing two panels.

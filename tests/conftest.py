@@ -151,7 +151,7 @@ class FakeService:
             "version": info.get("version"),
             "driver": "docker",
             "nodes": [dict(n) for n in self.cluster["nodes"]],
-            # Read by the sidebar's machine panel, which is the only thing
+            # Read by the minikube panel, which is the only thing
             # describing the node now that the picture does not.
             "node_facts": [
                 {
