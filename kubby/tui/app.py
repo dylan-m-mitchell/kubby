@@ -3,7 +3,7 @@
 Layout (top → bottom):
 
     status line
-    ┌ sidebar (minikube / machine / images) ┐┌ cluster ┐
+    ┌ sidebar (minikube / images) ┐┌ cluster ┐
     └──────────────────────────────────────┘└────────────┘
     log panel
     [image filter bar — only while filtering]

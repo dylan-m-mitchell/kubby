@@ -3,8 +3,9 @@
 The layout mirrors the plan's sketch: a left sidebar (minikube, images)
 beside a right-hand cluster panel, a streaming log strip, and a keybar.  Every panel is bordered, focusable and lazygit-style, and the
 focused one gets a brighter border/title.  Each panel carries its jump key
-in its own title ("(1) minikube", "(2) machine", …), in brackets so the digit
-cannot be misread for part of the name.
+in its own title ("(1) minikube", "(3) images", …), in brackets so the digit
+cannot be misread for part of the name. (`2` is deliberately unassigned: it
+was the machine panel's, and the machine moved into the minikube panel.)
 
 Navigable panels also move with vim's ``j``/``k`` for down/up.  The
 namespaces tree additionally takes ``h``/``l`` to collapse/expand, the

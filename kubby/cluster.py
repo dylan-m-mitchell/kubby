@@ -283,7 +283,6 @@ def resource_shares(fact: dict[str, Any]) -> list[ResourceShare]:
                 else shown_alloc)
         bare_cap = (shown_cap[: -len(unit)] if unit and shown_cap.endswith(unit)
                     else shown_cap)
-        short = f"{bare}/{bare_cap}{unit}"
         if shown_alloc == shown_cap:
             # Equal values collapse rather than repeat. On a node that can
             # hand out everything it has, a bar of "2 of 16" would be a lie
