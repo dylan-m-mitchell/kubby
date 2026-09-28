@@ -24,6 +24,12 @@ jobs:
   lint:
     name: lint
     runs-on: ubuntu-latest
+    # GitHub's default job timeout is 360 minutes, so a job that hangs on a
+    # stuck subprocess or a wedged runner burns six hours of Actions minutes
+    # before anyone hears about it. The limits in this workflow are generous
+    # multiples of the measured durations (lint ~8s, test ~55s, build ~40s
+    # across recent runs) — headroom for a slow runner, not a budget.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
 
@@ -47,6 +53,9 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
+    # The suite finishes in well under a minute today; this only has to be
+    # long enough that a genuinely slow runner is not mistaken for a hang.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -76,6 +85,9 @@ jobs:
   build:
     name: build binary
     runs-on: ubuntu-latest
+    # PyInstaller is the slowest step here and the likeliest to wedge: it
+    # unpacks and re-links a onefile bundle on every run.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
