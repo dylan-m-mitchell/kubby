@@ -189,10 +189,13 @@ choose, a Secret's content must never reach the log panel or `history`.
 
 1. **Context guard (blocks Phase 1).** kubby targets minikube, but `kubectl`
    acts on whatever the *current context* is. If a kubeconfig points at
-   production, an `e` key is a footgun. Recommendation: allow mutations only
-   when the context is a minikube profile or the API server host is loopback,
-   and otherwise disable the keys with a visible reason. This must be settled
-   before any mutation lands.
+   production, an `e` key is a footgun. Neither a minikube context name nor a
+   loopback API server host is sufficient to authorize mutations: names can
+   be reused, and a local proxy can reach a remote cluster. Require a stronger
+   check that the actual target cluster is the intended local minikube
+   cluster, or explicit user approval for that target. Otherwise keep
+   mutations disabled with a visible reason. This must be settled before
+   any mutation lands.
 2. **Helm-managed objects.** `kubectl apply` reassigns the field manager, so
    editing a Helm-managed resource can make a later `helm upgrade` conflict or
    silently revert it. Detect `app.kubernetes.io/managed-by: Helm` (and

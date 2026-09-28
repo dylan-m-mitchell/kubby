@@ -480,6 +480,7 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
         if self.selected not in placement.boxes:
             self.selected = None
         self._repaint()
+        self._scroll_to_selection()
 
     def _repaint(self) -> None:
         """Draw the current placement, marking the selection.
