@@ -110,6 +110,117 @@ class Placement:
     width: int = 0
     height: int = 0
 
+    def box_at(self, x: int, y: int) -> PlacedBox | None:
+        """The box covering cell *(x, y)*, or None over empty space.
+
+        Cell coordinates, not terminal ones: the caller has already taken
+        off the panel's scroll offset and any centring pad.
+
+        Boxes never overlap — the layout reserves each one whole — so the
+        first hit is the only hit and the scan order does not matter.
+        """
+        for box in self.boxes.values():
+            if box.x <= x < box.x + box.width and box.y <= y < box.y + box.height:
+                return box
+        return None
+
+    def origin(self, box_id: str) -> tuple[int, int, int, int]:
+        """The rectangle of *box_id* as ``(x, y, width, height)``.
+
+        Raises ``KeyError`` for an unknown id rather than returning a
+        degenerate rectangle: a caller asking where a box is has a bug if
+        the box is not there, and a silent (0, 0, 0, 0) would scroll the
+        panel to the top-left corner instead of saying so.
+        """
+        box = self.boxes[box_id]
+        return (box.x, box.y, box.width, box.height)
+
+
+#: Unit steps for the four cursor directions, by the word a panel binds. y
+#: grows downwards, as it does everywhere in a terminal.
+_DIRECTIONS: dict[str, tuple[int, int]] = {
+    "up": (0, -1),
+    "down": (0, 1),
+    "left": (-1, 0),
+    "right": (1, 0),
+}
+
+#: How far a candidate may sit *beside* the direction asked for and still
+#: count as being in it. 1.0 is the diagonal: a box has to be further along
+#: the axis than off it. Without this, `j` from a lone box in a wide row
+#: leaps forty columns sideways to reach a box one row down, which does not
+#: read as moving down at all.
+_CONE = 1.0
+
+
+def _box_centre(box: PlacedBox) -> tuple[float, float]:
+    """The middle cell of *box*, as a fraction where the width is even."""
+    return (box.x + (box.width - 1) / 2, box.y + (box.height - 1) / 2)
+
+
+def nearest_box(
+    placement: Placement, current: str | None, direction: str
+) -> str | None:
+    """The box a cursor at *current* moves to, going *direction*.
+
+    Pure geometry over a laid-out picture, so it is tested directly instead
+    of by pressing keys at a running app.
+
+    Two passes. The first accepts only a candidate that is further along the
+    asked-for axis than off it (*_CONE*), which keeps `j` descending the
+    column you are in rather than leaping diagonally. When that finds
+    nothing — a picture that is one wide row, say — the second drops the
+    cone and takes the nearest box in that half-plane, so the key still does
+    something instead of silently refusing.
+
+    ``None`` means there is nowhere to go, which callers treat as "leave the
+    cursor where it is".
+    """
+    if not placement.boxes:
+        return None
+    if current is None or current not in placement.boxes:
+        # Nothing selected yet: the top-left-most box, so the first keypress
+        # lands somewhere the eye can predict. The id breaks ties, so the
+        # answer cannot depend on dict iteration order.
+        return min(
+            placement.boxes,
+            key=lambda box_id: (
+                placement.boxes[box_id].y,
+                placement.boxes[box_id].x,
+                box_id,
+            ),
+        )
+
+    step = _DIRECTIONS.get(direction)
+    if step is None:
+        return None
+    dx, dy = step
+    cx, cy = _box_centre(placement.boxes[current])
+
+    for relaxed in (False, True):
+        best: tuple[tuple[float, float, str], str] | None = None
+        for box_id, box in placement.boxes.items():
+            if box_id == current:
+                continue
+            bx, by = _box_centre(box)
+            # `along` is along the axis asked for, signed by the direction;
+            # `across` is the offset on the other axis, which only ever
+            # matters as a distance.
+            if dy:
+                along, across = (by - cy) * dy, bx - cx
+            else:
+                along, across = (bx - cx) * dx, by - cy
+            if along <= 0:
+                continue  # in the wrong half-plane
+            if not relaxed and abs(across) > along * _CONE:
+                continue
+            key = (abs(along), abs(across), box_id)
+            if best is None or key < best[0]:
+                best = (key, box_id)
+        if best is not None:
+            return best[1]
+    return None
+
 
 def place(diagram: Diagram, width: int) -> Placement:
     """Lay *diagram* out to fit *width* columns, wrapping where it must.

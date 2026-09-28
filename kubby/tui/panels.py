@@ -31,7 +31,14 @@ from textual.message import Message
 from textual.widgets import OptionList, RichLog, Static, Tree
 from textual.widgets.option_list import Option
 
-from kubby.cluster import node_addressing, node_identity, resource_shares
+from textual.geometry import Region
+
+from kubby.cluster import (
+    ResourceRef,
+    node_addressing,
+    node_identity,
+    resource_shares,
+)
 from kubby.tui import diagram as diagram_mod
 from kubby.tui import paint as paint_mod
 from kubby.tui import place as place_mod
@@ -339,19 +346,21 @@ class ImagesPanel(PanelBase, OptionList):
 
 
 class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
-    """A drawn picture of the cluster's wiring, scrollable.
+    """A drawn picture of the cluster's wiring, with a cursor on its boxes.
 
-    Read-only for now, which is a deliberate first step rather than a
-    limitation: the layout that positions the boxes already reports where
-    each one landed, so moving a cursor between them later is a search over
-    those rectangles and not a layout engine.
+    The layout already reports where each box landed, so moving between them
+    is a search over those rectangles and not a layout engine — which is why
+    the cursor is a geometry problem (`place.nearest_box`) and not a widget
+    tree. Each box carries the Kubernetes object it stands for, so the cursor
+    can name one and, in time, act on it.
 
     It scrolls because a real cluster does not fit a terminal panel. A
     13-workload cluster came out 72 columns by 63 lines against a panel of
     roughly 62 by 24, and no amount of compaction fixes that — the overflow
     is boxes side by side, not spacing. The layout wraps groups into bands
     to fit the panel width, so what does overflow is the axis that
-    scrolls the way a person expects.
+    scrolls the way a person expects. Scrolling follows the cursor now, and
+    only when the box it landed on is not already visible.
     """
 
     BORDER_TITLE = "cluster graph"
@@ -378,15 +387,21 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
     #: Listed explicitly rather than mixed in, because Textual *replaces*
     #: BINDINGS along the MRO instead of merging them, and ScrollableWidget
     #: has its own. j/k are the movement keys of record everywhere in this
-    #: app; on a picture they scroll it — the same gesture as moving a
-    #: cursor, over a canvas instead of a list.
+    #: app, and on a picture they move the cursor between boxes — the same
+    #: gesture as a list, over a canvas instead of a row.
     BINDINGS = [
-        Binding("j", "scroll_down", "scroll", show=False),
-        Binding("k", "scroll_up", "scroll", show=False),
-        # The picture scrolls sideways when it is wider than the panel, and
-        # h/l are the horizontal half of the same gesture j/k already is.
-        Binding("l", "scroll_right", "scroll", show=False),
-        Binding("h", "scroll_left", "scroll", show=False),
+        Binding("j", "move('down')", "down", show=False),
+        Binding("k", "move('up')", "up", show=False),
+        Binding("h", "move('left')", "left", show=False),
+        Binding("l", "move('right')", "right", show=False),
+        # The arrows are the *same* gesture, not a second one. Every other
+        # panel here moves its cursor with either, so a picture where the
+        # arrows panned while hjkl selected would be the one place the two
+        # disagreed. Panning now follows the cursor instead.
+        Binding("down", "move('down')", "down", show=False),
+        Binding("up", "move('up')", "up", show=False),
+        Binding("left", "move('left')", "left", show=False),
+        Binding("right", "move('right')", "right", show=False),
     ]
 
     def __init__(self, **kwargs: Any) -> None:
@@ -396,6 +411,14 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
         #: The last placement, kept so the `hjkl` cursor can move between
         #: boxes without re-laying the picture out on every keypress.
         self.placement: place_mod.Placement | None = None
+        #: The box the cursor is on, by diagram id, or None for no cursor.
+        #: Deliberately empty on a fresh picture: the default view is then
+        #: exactly what it always was, and the cursor appears on the first
+        #: movement key rather than on load.
+        self.selected: str | None = None
+        #: Columns `paint.centre` indents the picture by. Needed to turn a
+        #: box's cell in the diagram into its column inside the Static.
+        self._pad = 0
 
     def compose(self) -> ComposeResult:
         yield self._picture
@@ -409,6 +432,8 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
         width of the picture it was showing a moment ago, and a `placement`
         pointing at boxes that are not there."""
         self.placement = None
+        self.selected = None
+        self._pad = 0
         self.border_subtitle = None
         self._picture.styles.width = None
 
@@ -446,19 +471,91 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
             self._picture.update(body)
             return
 
-        self.border_subtitle = f"{cluster.get('pod_count') or 0} pods"
         width = max(20, self.size.width)
         placement = place_mod.place(diagram_mod.build_diagram(cluster), width)
+        self.placement = placement
+        # A box the cluster no longer has takes the selection with it: a
+        # cursor left behind on a box that is gone would have the subtitle
+        # naming an object that is not on screen.
+        if self.selected not in placement.boxes:
+            self.selected = None
+        self._repaint()
+
+    def _repaint(self) -> None:
+        """Draw the current placement, marking the selection.
+
+        Split from `render_picture` because the layout only changes when the
+        cluster or the panel size does. A cursor move must not re-place the
+        diagram — not re-laying it out on every keypress is the reason
+        `placement` is kept at all.
+        """
+        placement = self.placement
+        if placement is None:
+            return
+        width = max(20, self.size.width)
+        picture = paint_mod.render(placement, self.selected)
         # Centred rather than left-aligned, which is what the tree looks like
         # because a tree is a list. A picture with a shape wants the space
         # either side of it. Only applied when it fits — see `centre`.
-        self.placement = placement
-        self._picture.update(paint_mod.centre(paint_mod.render(placement), width))
+        self._picture.update(paint_mod.centre(picture, width))
+        self._pad = paint_mod.centre_pad(picture, width)
         # The Static is shrunk to the panel by default, so the panel's own
         # horizontal scrollbar has nothing to scroll: the virtual size stays
         # the panel's width and the columns past it are simply gone. Stating
         # the width is what makes them reachable.
         self._picture.styles.width = max(placement.width + 1, width)
+        self._update_subtitle()
+
+    # ----- cursor -------------------------------------------------------
+
+    def action_move(self, direction: str) -> None:
+        """Move the selection one box in *direction*.
+
+        The first press selects the top-left-most box rather than doing
+        nothing, so a picture that has never had a cursor is one keypress
+        from one instead of needing to be found.
+        """
+        if self.placement is None:
+            return
+        target = place_mod.nearest_box(self.placement, self.selected, direction)
+        if target is None or target == self.selected:
+            return
+        self.selected = target
+        self._repaint()
+        self._scroll_to_selection()
+
+    def _scroll_to_selection(self) -> None:
+        """Bring the selected box into view, and leave a visible one alone.
+
+        `force=False` is the default and the point: a picture that already
+        fits the panel does not jump about as the cursor moves through it.
+        """
+        if self.placement is None or self.selected is None:
+            return
+        x, y, width, height = self.placement.origin(self.selected)
+        self.scroll_to_region(
+            Region(self._pad + x, y, width, height), animate=False
+        )
+
+    def _selected_ref(self) -> ResourceRef | None:
+        """Which Kubernetes object the cursor is on, or None with no cursor."""
+        if self.placement is None or self.selected is None:
+            return None
+        box = self.placement.boxes.get(self.selected)
+        return box.node.resource if box is not None else None
+
+    def _update_subtitle(self) -> None:
+        """Pod count, and which object the cursor is on.
+
+        The identity goes here rather than into the picture: a box is
+        already as narrow as its label, and `deployment/nginx in default` is
+        another thirty columns the layout would have to find room for.
+        """
+        parts = [f"{self._cluster.get('pod_count') or 0} pods"]
+        ref = self._selected_ref()
+        if ref is not None:
+            parts.append(str(ref))
+        self.border_subtitle = " · ".join(parts)
 
 
 class ClusterPanel(PanelBase, Vertical, can_focus=True):

@@ -29,6 +29,15 @@ EDGE_STYLE = "#3d444d"
 #: Style for a component's heading.
 HEADING_STYLE = "bold"
 
+#: The border of the box the cursor is on. The same colour the app uses for
+#: a focused panel (`$border-focus` in styles.tcss), because that is already
+#: kubby's word for "this one is selected".
+#:
+#: Only the *border* is recoloured — the label keeps its role/health colour.
+#: Repainting the whole box would hide a broken one behind its own
+#: highlight, and health is the thing the picture must never misreport.
+SELECTED_STYLE = "bold #58a6ff"
+
 #: Style for a box's border, by what the box is.
 ROLE_STYLE = {
     "host": "#d2a8ff",
@@ -46,6 +55,11 @@ def shape_for(box: PlacedBox) -> str:
     corners. Rather than hand-maintaining which box is an ellipse, the rule
     is a predicate on the content, so it cannot be forgotten when a node is
     added.
+
+    No box shape is free for the selection to claim: "double" already means
+    *containment* (see `Canvas.container`), so a selected box drawn double
+    would read as a namespace frame one level too deep. The selection is
+    carried by `_border_style` instead.
     """
     if box.node.role in ("infra", "node", "host"):
         return "heavy"
@@ -55,12 +69,14 @@ def shape_for(box: PlacedBox) -> str:
     return "round"
 
 
-def render(placement: Placement) -> Text:
-    """Draw *placement*."""
-    return render_checked(placement)[0]
+def render(placement: Placement, selected: str | None = None) -> Text:
+    """Draw *placement*, marking the box named by *selected*."""
+    return render_checked(placement, selected)[0]
 
 
-def render_checked(placement: Placement) -> tuple[Text, int]:
+def render_checked(
+    placement: Placement, selected: str | None = None
+) -> tuple[Text, int]:
     """The picture, and how many cells an edge could not draw.
 
     Order matters and is the reason the arrows are consistent: containers go
@@ -102,13 +118,20 @@ def render_checked(placement: Placement) -> tuple[Text, int]:
     for box in placement.boxes.values():
         rect = Rect(box.x, box.y, box.width, box.height)
         style = _style(box)
-        canvas.box(rect, shape_for(box), style)
+        canvas.box(rect, shape_for(box), _border_style(box, selected))
         canvas.label(rect, box.node.lines, style)
 
     for source, target in placement.edges:
         _route(canvas, placement, source, target)
 
     return canvas.to_text(), canvas.skipped
+
+
+def _border_style(box: PlacedBox, selected: str | None = None) -> str | None:
+    """A box's border style: the selection highlight, else its own colour."""
+    if selected is not None and box.id == selected:
+        return SELECTED_STYLE
+    return _style(box)
 
 
 def _style(box: PlacedBox) -> str | None:
@@ -729,20 +752,32 @@ def _free_lane(canvas: Canvas, preferred: int, y1: int, y2: int) -> int:
     return min(x, canvas.width - 1)
 
 
+def centre_pad(picture: Text, width: int) -> int:
+    """How far ``centre`` will indent *picture*, or 0 when it will not.
+
+    Exposed because the picture scrolls: a box's column in the laid-out
+    diagram stops being its column inside the Static once the picture has
+    been centred, and bringing a box into view needs the difference. Kept
+    here rather than recomputed by the caller so one rule decides it.
+    """
+    widest = max((len(line) for line in picture.plain.splitlines()), default=0)
+    return (width - widest) // 2 if widest < width else 0
+
+
 def centre(picture: Text, width: int) -> Text:
     """Centre a picture narrower than the space it has.
 
     Only when it fits: centring an over-wide picture would push its left edge
     off the scroll origin, where it cannot be scrolled back to.
     """
-    widest = max((len(line) for line in picture.plain.splitlines()), default=0)
-    if widest >= width:
+    pad = centre_pad(picture, width)
+    if not pad:
         return picture
-    pad = " " * ((width - widest) // 2)
+    spaces = " " * pad
     out = Text()
     for index, line in enumerate(picture.split(allow_blank=True)):
         if index:
             out.append("\n")
-        out.append(pad)
+        out.append(spaces)
         out.append_text(line)
     return out
