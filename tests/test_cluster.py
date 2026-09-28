@@ -502,6 +502,117 @@ class TestHumanMemory:
         assert cluster.human_memory(raw) == expected
 
 
+class TestResourceShares:
+    """The share of CPU and memory a Pod may ask for, as a bar and as figures.
+
+    Both, because they answer different questions. The bar is the
+    proportion — that the cluster is an eighth of the laptop — and the
+    figures are what you read when you want the number.
+    """
+
+    @staticmethod
+    def _shares(fact: dict) -> list[cluster.ResourceShare]:
+        return cluster.resource_shares(fact)
+
+    def test_a_small_share_is_a_short_bar(self):
+        (cpu, memory) = self._shares(
+            {"allocatable_cpu": "2", "capacity_cpu": "16",
+             "allocatable_memory": "3900Mi", "capacity_memory": "16313348Ki"}
+        )
+        # An eighth. Two cells of twelve, and both figures spelled out.
+        assert cpu.bar == "▓▓" + "░" * 10
+        assert cpu.text == "2 of 16"
+        assert cpu.short == "2/16"
+        assert memory.short == "3.8/15.6Gi"
+
+    def test_the_bar_is_always_the_same_width(self):
+        """Otherwise two bars in the same panel are not comparable, which is
+        the only reason to draw them."""
+        for fact in (
+            {"allocatable_cpu": "0", "capacity_cpu": "16"},
+            {"allocatable_cpu": "2", "capacity_cpu": "16"},
+            {"allocatable_cpu": "8", "capacity_cpu": "16"},
+            {"allocatable_cpu": "16", "capacity_cpu": "16"},
+        ):
+            (cpu,) = self._shares(fact)
+            assert len(cpu.bar) == cluster.BAR_CELLS, fact
+
+    def test_nothing_allocatable_is_an_empty_bar(self):
+        """Not a full one and not an error: a node nothing can be scheduled
+        on, which is a real state and worth seeing as itself."""
+        (cpu,) = self._shares(
+            {"allocatable_cpu": "0", "capacity_cpu": "16"}
+        )
+        assert cpu.bar == "░" * cluster.BAR_CELLS
+        assert cpu.text == "0 of 16"
+
+    def test_equal_values_collapse_rather_than_repeat(self):
+        """`8 of 8` is noise, and a bar beside it says nothing the bar alone
+        does not."""
+        shares = self._shares(
+            {"allocatable_cpu": "8", "capacity_cpu": "8",
+             "allocatable_memory": "3900Mi", "capacity_memory": "3900Mi"}
+        )
+        assert [s.text for s in shares] == ["8", "3.8Gi"]
+        assert all(s.bar == "▓" * cluster.BAR_CELLS for s in shares)
+
+    def test_a_share_larger_than_the_whole_clamps_rather_than_overflows(self):
+        """A bar longer than its own track would be a lie about scale. The
+        figures still show both numbers, so nothing is hidden."""
+        (cpu,) = self._shares(
+            {"allocatable_cpu": "32", "capacity_cpu": "16"}
+        )
+        assert cpu.bar == "▓" * cluster.BAR_CELLS
+        assert cpu.text == "32 of 16"
+
+    def test_milli_units_divide_by_a_thousand(self):
+        """`3900m` of CPU is 3.9 cores, not 3900. Dividing the two figures as
+        written gives 244, and the bar comes out full."""
+        (cpu,) = self._shares(
+            {"allocatable_cpu": "3900m", "capacity_cpu": "16"}
+        )
+        assert cpu.bar.count("▓") == 3
+        assert cpu.text == "3900m of 16"
+
+    def test_memory_is_rated_from_the_raw_quantities(self):
+        """`human_memory` turns `16313348Ki` into `15.6Gi`, and
+        `float("15.6Gi")` is not a number — so a bar rated from the display
+        strings comes out empty beside a perfectly correct figure."""
+        (memory,) = self._shares(
+            {"allocatable_memory": "3900Mi", "capacity_memory": "16313348Ki"}
+        )
+        assert memory.bar.count("▓") == 3
+        assert memory.text == "3.8Gi of 15.6Gi"
+        # The unit belongs to the pair, not to each figure.
+        assert memory.short == "3.8/15.6Gi"
+
+    def test_one_figure_without_the_other_still_shows(self):
+        """The share is the number that matters, so it goes in; the bar comes
+        out empty, which reads as "cannot draw this" rather than "there is
+        none"."""
+        (cpu,) = self._shares({"allocatable_cpu": "2"})
+        assert cpu.text == "2 of ?"
+        assert cpu.short == "2/?"
+        assert cpu.bar == "░" * cluster.BAR_CELLS
+
+    @pytest.mark.parametrize("fact", [{}, {"allocatable_cpu": "", "capacity_cpu": ""},
+                                      {"allocatable_memory": "", "capacity_memory": ""}])
+    def test_a_resource_the_api_never_reported_is_left_out(self, fact):
+        """Not a bar of nothing. A capacity on its own is a different case —
+        that is the whole reported and the share unknown, which is worth
+        showing as `? of 16`."""
+        assert not [s for s in self._shares(fact) if s.label == "cpu"]
+
+    def test_a_figure_that_is_not_a_number_does_not_raise(self):
+        """kubectl output is not trusted anywhere else in this file; it is not
+        trusted here either."""
+        (cpu,) = self._shares(
+            {"allocatable_cpu": "plenty", "capacity_cpu": "16"}
+        )
+        assert cpu.bar == "░" * cluster.BAR_CELLS
+        assert cpu.text == "plenty of 16"
+
+
 # ---------------------------------------------------------------------------
 # the assembled model
 # ---------------------------------------------------------------------------

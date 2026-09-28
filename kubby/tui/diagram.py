@@ -214,9 +214,9 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
 
     # --- the nodes, only when there is more than one --------------------
     # A single-node cluster's node *is* the machine minikube made, and the
-    # sidebar's machine panel already describes it — its OS, its runtime, the
-    # share of CPU and memory a Pod can ask for. Drawing it as a box as well
-    # said the same thing twice and cost a frame.
+    # minikube panel already describes it — its OS, its runtime, the share of
+    # CPU and memory a Pod can ask for, with a bar for the share. Drawing it
+    # as a box as well said the same thing twice and cost a frame.
     #
     # With several nodes the boxes are needed and the frame is needed to hold
     # them: node boxes beside the namespace frames would read as peers of

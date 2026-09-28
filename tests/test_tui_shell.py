@@ -18,14 +18,13 @@ from kubby.tui.panels import (
     ImagesPanel,
     LogPanel,
     MinikubePanel,
-    MachinePanel,
     format_size,
 )
 from kubby.tui.popups import HelpScreen
 from helpers import wait_until
 from conftest import FakeService
 
-PANEL_IDS = ("minikube", "machine", "images", "cluster")
+PANEL_IDS = ("minikube", "images", "cluster")
 
 
 class TestShell:
@@ -35,7 +34,7 @@ class TestShell:
             await wait_until(lambda: fake_service.calls.count("get_cluster_info") > 0)
             await wait_until(lambda: app.system)
 
-            for widget_id in ("status", "keybar", "minikube", "machine", "images", "cluster"):
+            for widget_id in ("status", "keybar", "minikube", "images", "cluster"):
                 assert app.query_one(f"#{widget_id}") is not None
             assert isinstance(app.query_one("#log"), LogPanel)
 
@@ -65,9 +64,18 @@ class TestShell:
                 await pilot.pause()
                 assert app.screen.focused.id == PANEL_IDS[0], key
 
-            # Numbers walk the panels in layout order instead.
+            # `2` moves nowhere, on purpose. It was the machine panel's jump
+            # key, and the machine moved into the minikube panel; renumbering
+            # would churn four titles and the help overlay for no gain, and
+            # nothing renders a `(2)` so there is no visible gap to explain.
+            # Pinned so that a future change to it is a deliberate one.
+            await pilot.press("2")
+            await pilot.pause()
+            assert app.screen.focused.id == PANEL_IDS[0]
+
+            # The rest walk the panels in layout order instead.
             visited = [app.screen.focused.id]
-            for number in ("2", "3", "4", "1"):
+            for number in ("3", "4", "1"):
                 await pilot.press(number)
                 await pilot.pause()
                 visited.append(app.screen.focused.id)
@@ -115,7 +123,7 @@ class TestShell:
         # one test above only reaches it by way of the help overlay: a panel
         # that swallowed the key (an OptionList or Tree claiming printable
         # characters) would leave that test green and the app unquittable.
-        for panel_cls in (MinikubePanel, MachinePanel, ImagesPanel, ClusterPanel):
+        for panel_cls in (MinikubePanel, ImagesPanel, ClusterPanel):
             app = KubbyApp(service=FakeService())
             async with app.run_test(size=(100, 40)) as pilot:
                 await wait_until(lambda: app.system)
@@ -159,8 +167,11 @@ class TestShell:
         async with app.run_test(size=(100, 40)):
             await wait_until(lambda: app.images and app.cluster)
 
-            machine = str(app.query_one(MachinePanel).query_one("#machine-body").content)
+            machine = str(
+                app.query_one(MinikubePanel).query_one("#minikube-body").content
+            )
             assert "minikube" in machine and "docker 27.1.1" in machine
+            assert "▓" in machine  # the share, as a bar
 
             cluster = app.query_one(ClusterTree)
             labels = [str(node.label) for node in cluster.root.children]
@@ -210,9 +221,11 @@ class TestShell:
             assert labels == ["no cluster"]
             # The reason, not just "nothing": a panel that shows an empty
             # box looks like a machine with no specifications.
-            assert "kubectl not found on PATH" in str(
-                app.query_one(MachinePanel).query_one("#machine-body").content
+            # The minikube panel says why, and says it once.
+            summary = str(
+                app.query_one(MinikubePanel).query_one("#minikube-body").content
             )
+            assert summary.count("kubectl not found on PATH") == 1
             assert "no local images" in str(
                 next(iter(app.query_one(ImagesPanel).options)).prompt
             )

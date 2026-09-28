@@ -11,6 +11,7 @@ from rich.text import Text
 from textual.widgets import Input, Static
 
 from conftest import FakeService
+from kubby.cluster import BAR_CELLS
 from helpers import wait_until
 from kubby.tui.app import KubbyApp
 from kubby.tui.panels import (
@@ -19,7 +20,6 @@ from kubby.tui.panels import (
     GraphPanel,
     ImagesPanel,
     LogPanel,
-    MachinePanel,
     MinikubePanel,
 )
 from kubby.tui.popups import ConfirmModal, HelpScreen, PrereqModal
@@ -204,36 +204,74 @@ class TestMinikubeActions:
             assert await wait_until(lambda: "delete_minikube" in fake_service.calls)
 
 
-class TestMachinePanel:
-    """The machine the cluster runs on, in words.
+class TestTheMinikubePanelCarriesTheMachine:
+    """One panel for the cluster and the machine under it.
 
-    It took the tools panel's place. What it has to carry is the node's own
-    figures — the share of CPU and memory a Pod may ask for above all,
-    because that is the explanation for a Pod stuck Pending that a list of
-    pods cannot give.
+    The machine's own figures used to have a panel of their own, which was
+    a panel with no keys: focusable, with an empty keybar, taking a third
+    of the sidebar to say four things. They are the same fact asked from two
+    ends — whether the cluster is up, and what the machine under it is — so
+    they are one panel now.
     """
 
     @staticmethod
     def _text(app) -> str:
-        return str(app.query_one(MachinePanel).query_one("#machine-body").content)
+        return str(
+            app.query_one(MinikubePanel).query_one("#minikube-body").content
+        )
+
+    async def test_it_still_answers_whether_the_cluster_is_up(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)):
+            await wait_until(lambda: app.cluster)
+            text = self._text(app)
+            assert "running" in text
+            assert "minikube" in text  # the context
+            assert "nodes ready" in text
+
+    async def test_it_names_the_driver_beside_the_context(self, fake_service):
+        """On the context line rather than a line of its own: the node's
+        runtime is three lines below and `docker 27.1.1` already says which
+        driver this is."""
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)):
+            await wait_until(lambda: app.cluster)
+            line = next(
+                l for l in self._text(app).splitlines() if l.startswith("ctx")
+            )
+            assert "minikube" in line and "docker" in line
 
     async def test_it_names_the_machine_and_what_it_is(self, fake_service):
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)):
             await wait_until(lambda: app.cluster)
             text = self._text(app)
-            assert "minikube" in text
             assert "Debian GNU/Linux 12 (bookworm)" in text
             assert "docker 27.1.1" in text
 
-    async def test_it_carries_the_share_not_only_the_whole(self, fake_service):
+    async def test_it_draws_the_share_as_a_bar(self, fake_service):
+        """The proportion is the point, and a number is not a proportion.
+        `2 of 16 cpu` has to be worked out; a bar with two cells in twelve
+        has been seen."""
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)):
             await wait_until(lambda: app.cluster)
-            assert any(
-                "cpu" in line and "memory" not in line
-                for line in self._text(app).splitlines()
-            )
+            lines = self._text(app).splitlines()
+            bars = [l for l in lines if "▓" in l or "░" in l]
+            assert {l.split()[0] for l in bars} == {"cpu", "memory"}
+            for line in bars:
+                assert len(line.split()[1]) == BAR_CELLS
+                # The figures are the footnote, beside the bar.
+                assert "/" in line or line.split()[2].isdigit()
+
+    async def test_every_line_fits_the_sidebar(self, fake_service):
+        """The sidebar is 34 columns and the panel 32 inside it. A longer line
+        wraps inside a fixed-height panel, and the tail of it is cut."""
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(110, 40)):
+            await wait_until(lambda: app.cluster)
+            for line in self._text(app).splitlines():
+                assert len(line) <= 32, repr(line)
 
     async def test_it_names_where_pod_addresses_come_from(self, fake_service):
         app = KubbyApp(service=fake_service)
@@ -249,39 +287,49 @@ class TestMachinePanel:
         async with app.run_test(size=(100, 40)):
             await wait_until(lambda: app.cluster)
             assert "●" in self._text(app)
-            panel = app.query_one(MachinePanel)
+            panel = app.query_one(MinikubePanel)
+            graph = app.cluster.get("graph") or {}
             panel.set_cluster(
-                {**app.cluster, "graph": {**(app.cluster.get("graph") or {}),
-                                          "node_facts": [
-                                              {**fact, "status": "NotReady"}
-                                              for fact in (app.cluster["graph"]
-                                                           or {}).get(
-                                                               "node_facts", [])
-                                          ]}}
+                {
+                    **app.cluster,
+                    "graph": {
+                        **graph,
+                        "node_facts": [
+                            {**fact, "status": "NotReady"}
+                            for fact in graph.get("node_facts", [])
+                        ],
+                    },
+                }
             )
             assert "○" in self._text(app)
 
-    async def test_no_cluster_says_why_rather_than_nothing(self, fake_service):
+    async def test_no_cluster_says_why_and_no_machine(self, fake_service):
+        """A node's figures only exist when there is a cluster, so the
+        machine block goes with it rather than showing a stale one."""
         app = KubbyApp(service=fake_service)
         async with app.run_test(size=(100, 40)):
             await wait_until(lambda: app.system)
-            app.query_one(MachinePanel).set_cluster(
+            app.query_one(MinikubePanel).set_cluster(
                 {"running": False, "error": "nope"}
             )
-            assert "nope" in self._text(app)
+            text = self._text(app)
+            assert "nope" in text
+            assert "not running" in text
+            assert "Debian" not in text
+            assert "▓" not in text
 
-    async def test_it_does_nothing_to_the_cluster(self, fake_service):
-        """A readout. Nothing it does may reach the service."""
+    async def test_a_graph_that_could_not_be_fetched_is_not_repeated(
+        self, fake_service
+    ):
+        """The cluster panel already says why it cannot draw. The same
+        sentence twice is worse than once."""
         app = KubbyApp(service=fake_service)
-        async with app.run_test(size=(100, 40)) as pilot:
+        async with app.run_test(size=(100, 40)):
             await wait_until(lambda: app.cluster)
-            app.query_one(MachinePanel).focus()
-            await pilot.pause()
-            before = list(fake_service.calls)
-            for key in ("j", "k", "i", "I", "enter", "space", "x"):
-                await pilot.press(key)
-            await pilot.pause()
-            assert fake_service.calls == before
+            app.query_one(MinikubePanel).set_cluster(
+                {**app.cluster, "graph": {"available": False, "error": "boom"}}
+            )
+            assert "boom" not in self._text(app)
 
 
 class TestLogDismissal:
@@ -411,7 +459,6 @@ class TestNumberKeyTabs:
             await wait_until(lambda: app.system)
             panels = {
                 "1": MinikubePanel,
-                "2": MachinePanel,
                 "3": ImagesPanel,
                 "4": ClusterPanel,
             }
@@ -467,7 +514,6 @@ class TestNumberKeyTabs:
             text = str(app.screen.query_one("#help-body", Static).content)
             for key, label in (
                 ('"1"', "minikube panel"),
-                ('"2"', "machine panel"),
                 ('"3"', "images panel"),
                 ('"4"', "namespaces panel"),
             ):
@@ -984,7 +1030,6 @@ class TestPanelTitles:
             bound = {b.key for b in app.BINDINGS}
             for panel_cls, expected in (
                 (MinikubePanel, "(1) minikube"),
-                (MachinePanel, "(2) machine"),
                 (ImagesPanel, "(3) images"),
                 (ClusterPanel, "(4) cluster"),
             ):
@@ -1053,7 +1098,7 @@ class TestKeybarAndHelp:
             # R is an action, not chrome: it belongs with the panel keys.
             assert '"R" re-check' not in glob
 
-            app.query_one(MachinePanel).focus()
+            app.query_one(ImagesPanel).focus()
             await pilot.pause()
             text = keybar(app)
             # Read-only panel: no action keys of its own (j/k are hidden
@@ -1083,7 +1128,7 @@ class TestKeybarAndHelp:
 
             seen = set()
             panel_keys = set()
-            for panel_cls in (MinikubePanel, MachinePanel, ImagesPanel, ClusterPanel):
+            for panel_cls in (MinikubePanel, ImagesPanel, ClusterPanel):
                 app.query_one(panel_cls).focus()
                 await pilot.pause()
                 await pilot.pause()
@@ -1139,12 +1184,17 @@ class TestKeybarAndHelp:
                 ('"q"', "quit"), ('"?"', "help"), ('"R"', "re-check"),
                 ('"x"', "hide log"),
                 ('"esc"', "close filter"),
-                # Numbers jump between panels; tab is deliberately unmapped.
-                ('"1"', "minikube panel"), ('"2"', "machine panel"),
+                # Numbers jump between panels. `2` is deliberately absent:
+                # it was the machine panel's, and the machine moved into the
+                # minikube panel, so renumbering would churn four titles and
+                # the help for no gain. Nothing renders a `(2)`, so there is
+                # no visible gap — the same treatment `tab` gets.
+                ('"1"', "minikube panel"),
                 ('"3"', "images panel"), ('"4"', "namespaces panel"),
             ):
                 assert key in text, key
                 assert label in text, label
+            assert '"2"' not in text
             # An unmapped tab leaves nothing behind in the reference.
             assert "tab" not in text
             await pilot.press("escape")

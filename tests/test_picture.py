@@ -339,8 +339,7 @@ class TestDiagram:
             assert not [e for e in built.edges if e[0] == container.id]
 
     def test_one_node_is_described_in_words_not_drawn_as_a_box(self):
-        """A single node's box said what the sidebar's machine panel says,
-        twice over. With several nodes the boxes are needed — and so is the
+        """A single node's box said what the minikube panel says, twice over. With several nodes the boxes are needed — and so is the
         frame, or node boxes beside the namespace frames would read as peers
         of them rather than as the machines they run on."""
         model = realistic()

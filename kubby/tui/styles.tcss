@@ -53,8 +53,13 @@ Screen {
     background: $panel-bg;
 }
 
+/* The machine's own figures live in here now, so this is the height of the
+   cluster summary *and* the node: three lines of cluster, a blank, then the
+   node's name, OS, runtime, two share bars, its pod range and its address.
+   Sized for the single-node case, which is what minikube makes by default;
+   a second node appends a block and overflows, as it always has. */
 #minikube {
-    height: 6;
+    height: 13;
 }
 
 /* log --------------------------------------------------------------- */
