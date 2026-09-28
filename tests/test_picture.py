@@ -25,6 +25,7 @@ from fixtures_cluster_graph import (  # noqa: E402
     cross_namespace,
     realistic,
 )
+from kubby.cluster import ResourceRef  # noqa: E402
 from kubby.tui import diagram, draw, paint, place  # noqa: E402
 
 #: Characters only an edge would draw. A box's own borders come from its
@@ -902,3 +903,247 @@ class TestPaint:
         assert paint.centre(Text("hi"), 20).plain.startswith(" ")
         wide = Text("x" * 40)
         assert paint.centre(wide, 20) is wide
+
+
+# ---------------------------------------------------------------------------
+# the identity behind each box
+# ---------------------------------------------------------------------------
+
+
+def _styles(rendered) -> set[str]:
+    return {str(span.style) for span in rendered.spans}
+
+
+def _style_at(rendered, x: int, y: int) -> str:
+    """The style of one cell of a rendered picture, by its coordinates.
+
+    Turns the span list back into cell coordinates, so a test can ask about
+    a specific box's border instead of about the picture's colours as a
+    whole. Coordinates are the diagram's own, which is why callers pass the
+    un-centred `paint.render` output.
+    """
+    lines = rendered.plain.split("\n")
+    offset = sum(len(line) + 1 for line in lines[:y]) + x
+    for span in rendered.spans:
+        if span.start <= offset < span.end:
+            return str(span.style)
+    return ""
+
+
+def _centre_of(box) -> tuple[float, float]:
+    return (box.x + (box.width - 1) / 2, box.y + (box.height - 1) / 2)
+
+
+class TestBoxIdentity:
+    """Every box names the Kubernetes object it stands for.
+
+    A cursor can only act on a box whose object is known, so a box carrying
+    no identity is a box the picture is lying about.
+    """
+
+    def test_every_box_names_an_object(self):
+        built = diagram.build_diagram(realistic())
+        assert built.nodes
+        for node in built.nodes.values():
+            assert node.resource is not None, node.lines
+
+    def test_a_workload_box_names_the_workload_not_the_replicaset(self):
+        """Replicas collapse into one box, and the Deployment is the thing
+        worth acting on — the ReplicaSet is an implementation detail the
+        picture exists to hide."""
+        built = diagram.build_diagram(realistic())
+        assert _box(built, "web").resource == ResourceRef("Deployment", "web", "default")
+
+    def test_a_statefulset_box_keeps_its_own_kind(self):
+        built = diagram.build_diagram(realistic())
+        assert _box(built, "postgres").resource == ResourceRef(
+            "StatefulSet", "postgres", "data"
+        )
+
+    def test_a_service_and_an_ingress_name_themselves(self):
+        built = diagram.build_diagram(realistic())
+        assert _box(built, "web-svc").resource == ResourceRef(
+            "Service", "web-svc", "default"
+        )
+        assert _box(built, "shop").resource == ResourceRef("Ingress", "shop", "default")
+
+    def test_a_node_box_is_cluster_scoped(self):
+        built = diagram.build_diagram(realistic())
+        node = next(n for n in built.nodes.values() if n.role == "node")
+        assert node.resource.kind == "Node"
+        assert node.resource.namespace == ""
+        assert node.resource.name == node.lines[0]
+
+    def test_a_static_control_plane_pod_is_named_by_its_own_name(self):
+        """`etcd-node` is owned by the *Node*, so its owner says "minikube"
+        about every static pod. Naming the owner would have four unrelated
+        control-plane boxes all claiming to be the node."""
+        built = diagram.build_diagram(realistic())
+        ref = _box(built, "etcd").resource
+        assert ref.kind == "Pod"
+        assert ref.name == "etcd-node"
+        assert ref.namespace == "kube-system"
+
+    def test_a_box_only_ever_names_an_object_in_its_own_namespace(self):
+        """The group a box is drawn in is its namespace, so an identity from
+        elsewhere would put the cursor on the wrong object."""
+        built = diagram.build_diagram(realistic())
+        for node in built.nodes.values():
+            if node.group == "nodes":
+                continue
+            assert node.resource.namespace == node.group
+
+
+# ---------------------------------------------------------------------------
+# which box the cursor moves to
+# ---------------------------------------------------------------------------
+
+
+class TestCursorGeometry:
+    """Movement between boxes, as pure geometry.
+
+    This is the whole reason the cursor is not a widget tree: the layout
+    already knows where every box is, so a move is a search over rectangles.
+    """
+
+    @staticmethod
+    def _placement(width: int = 72) -> place.Placement:
+        return place.place(diagram.build_diagram(realistic()), width)
+
+    @staticmethod
+    def _corner(p: place.Placement) -> str:
+        """The box the first keypress should land on."""
+        return min(p.boxes, key=lambda i: (p.boxes[i].y, p.boxes[i].x, i))
+
+    def test_the_first_press_lands_on_the_top_left_most_box(self):
+        """A picture that has never had a cursor is one keypress from one,
+        and it lands somewhere the eye can predict."""
+        p = self._placement()
+        assert place.nearest_box(p, None, "down") == self._corner(p)
+
+    def test_a_stale_selection_starts_again_from_the_corner(self):
+        """A refresh can drop the box the cursor was on. The next keypress
+        has to land somewhere rather than refusing forever."""
+        p = self._placement()
+        assert place.nearest_box(p, "w_gone_Deployment_web", "down") == self._corner(p)
+
+    @pytest.mark.parametrize(
+        "direction,dx,dy",
+        [("right", 1, 0), ("left", -1, 0), ("down", 0, 1), ("up", 0, -1)],
+    )
+    def test_a_move_never_goes_the_other_way(self, direction, dx, dy):
+        """A move may be refused when the corner box has nothing that way,
+        but it must never answer with a box behind it."""
+        p = self._placement()
+        start = self._corner(p)
+        got = place.nearest_box(p, start, direction)
+        if got is None:
+            return
+        sx, sy = _centre_of(p.boxes[start])
+        gx, gy = _centre_of(p.boxes[got])
+        assert (gx - sx) * dx + (gy - sy) * dy > 0
+
+    def test_moving_keeps_changing_box_while_boxes_remain(self):
+        """A key that does nothing is worse than one that refuses: walk right
+        along a row and the box has to change every time it can."""
+        p = self._placement()
+        current = self._corner(p)
+        seen = {current}
+        for _ in range(12):
+            nxt = place.nearest_box(p, current, "down")
+            if nxt is None or nxt == current:
+                break
+            assert nxt not in seen, f"revisited {nxt} on the way down"
+            seen.add(nxt)
+            current = nxt
+        assert len(seen) > 1, "no box was reachable going down"
+
+    def test_an_empty_picture_has_nowhere_to_move(self):
+        assert place.nearest_box(place.Placement(), None, "down") is None
+
+    def test_an_unknown_direction_is_refused_rather_than_guessed(self):
+        p = self._placement()
+        assert place.nearest_box(p, self._corner(p), "sideways") is None
+
+    def test_the_same_question_always_gets_the_same_answer(self):
+        """Determinism matters for a cursor: dict order must not decide where
+        a keypress lands."""
+        p = self._placement()
+        start = self._corner(p)
+        answers = {place.nearest_box(p, start, "down") for _ in range(5)}
+        assert len(answers) == 1
+
+
+class TestPlacementLookup:
+    """Turning a cell back into the box that occupies it."""
+
+    @staticmethod
+    def _placement() -> place.Placement:
+        return place.place(diagram.build_diagram(realistic()), 72)
+
+    def test_box_at_finds_the_box_covering_a_cell(self):
+        p = self._placement()
+        assert p.boxes
+        for box_id, box in p.boxes.items():
+            assert p.box_at(box.x, box.y).id == box_id
+            assert p.box_at(box.x + box.width - 1, box.y + box.height - 1).id == box_id
+
+    def test_box_at_returns_nothing_over_empty_space(self):
+        p = self._placement()
+        assert p.box_at(-1, -1) is None
+        assert p.box_at(p.width + 40, p.height + 40) is None
+
+    def test_origin_reports_the_rectangle(self):
+        p = self._placement()
+        box_id = next(iter(p.boxes))
+        box = p.boxes[box_id]
+        assert p.origin(box_id) == (box.x, box.y, box.width, box.height)
+
+    def test_origin_refuses_a_box_that_is_not_there(self):
+        """A silent (0, 0, 0, 0) would scroll the panel to the corner
+        instead of saying the box is gone."""
+        with pytest.raises(KeyError):
+            place.Placement().origin("not-a-box")
+
+
+class TestSelection:
+    """What the cursor looks like, and what it must not overwrite."""
+
+    @staticmethod
+    def _placement(model=None) -> place.Placement:
+        return place.place(diagram.build_diagram(model or realistic()), 72)
+
+    def test_the_cursor_is_on_the_border_and_not_the_whole_box(self):
+        p = self._placement()
+        box_id = next(iter(p.boxes))
+        assert paint.SELECTED_STYLE in _styles(paint.render(p, box_id))
+
+    def test_nothing_is_highlighted_when_nothing_is_selected(self):
+        p = self._placement()
+        assert paint.SELECTED_STYLE not in _styles(paint.render(p, None))
+
+    def test_the_highlight_lands_on_the_selected_border_and_nowhere_else(self):
+        """The cursor has to read as *one* box, so this is about the chosen
+        border being painted and a neighbour's being left alone."""
+        p = self._placement()
+        box_id = next(iter(p.boxes))
+        chosen = p.boxes[box_id]
+        rendered = paint.render(p, box_id)
+        assert _style_at(rendered, chosen.x, chosen.y) == paint.SELECTED_STYLE
+        other = p.boxes[next(i for i in p.boxes if i != box_id)]
+        assert _style_at(rendered, other.x, other.y) != paint.SELECTED_STYLE
+
+    def test_selecting_a_broken_box_does_not_hide_that_it_is_broken(self):
+        """Colour already means role and health. Recolouring the label for
+        the cursor would paint over the one signal the picture must never
+        get wrong."""
+        p = self._placement(broken())
+        box_id = next(iter(p.boxes))
+        rendered = paint.render(p, box_id)
+        styles = _styles(rendered)
+        assert paint.SELECTED_STYLE in styles
+        assert "red" in styles
+
+    def test_an_unknown_selection_highlights_nothing(self):
+        p = self._placement()
+        assert paint.SELECTED_STYLE not in _styles(paint.render(p, "not-a-box"))

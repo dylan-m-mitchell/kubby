@@ -8,6 +8,8 @@ Deployment above it) are pinned on purpose.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from kubby import cluster
@@ -779,3 +781,46 @@ class TestBuildModel:
             {"name": "kube-system", "pods": [], "workload_count": 0, "collapsed": True},
         ]
         assert model["pod_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# the identity a picture box carries
+# ---------------------------------------------------------------------------
+
+
+class TestResourceRef:
+    """What a diagram box knows about the object it stands for.
+
+    The box id cannot serve: `_workload_id` folds `-` and `_` together, so
+    two different objects can share one id and neither can be read back out
+    of it. Identity has to be carried, which is what this is.
+    """
+
+    def test_a_namespaced_ref_reads_the_way_kubectl_writes_one(self):
+        assert str(cluster.ResourceRef("Deployment", "web", "default")) == (
+            "deployment/web in default"
+        )
+
+    def test_a_cluster_scoped_ref_has_no_namespace_to_name(self):
+        """A Node is cluster-scoped. The empty namespace is also what keeps a
+        later `kubectl -n` off it, so it is load-bearing and not cosmetic."""
+        node = cluster.ResourceRef("Node", "minikube")
+        assert str(node) == "node/minikube"
+        assert node.namespace == ""
+
+    def test_the_kind_is_shown_lowercased(self):
+        assert str(cluster.ResourceRef("Service", "web", "default")).startswith(
+            "service/"
+        )
+
+    def test_a_ref_is_frozen_so_a_box_cannot_rewrite_its_identity(self):
+        ref = cluster.ResourceRef("Service", "web-svc", "default")
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            ref.name = "something-else"
+
+    def test_refs_compare_by_value(self):
+        """Equality is what the identity tests in the picture suite assert
+        on, so it has to be value equality and not identity."""
+        assert cluster.ResourceRef("Pod", "web-1", "default") == cluster.ResourceRef(
+            "Pod", "web-1", "default"
+        )

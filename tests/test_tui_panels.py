@@ -13,6 +13,7 @@ from textual.widgets import Input, Static
 from conftest import FakeService
 from kubby.cluster import BAR_CELLS
 from helpers import wait_until
+from kubby.tui import paint
 from kubby.tui.app import KubbyApp
 from kubby.tui.panels import (
     ClusterPanel,
@@ -1200,3 +1201,203 @@ class TestKeybarAndHelp:
             await pilot.press("escape")
             await pilot.pause()
             assert not isinstance(app.screen, HelpScreen)
+
+
+class TestGraphCursor:
+    """The picture's cursor: which object a box stands for, and moving it.
+
+    Driven through the real app because the thing being tested is partly the
+    *binding* — `hjkl` used to scroll this panel, and a panel whose keys do
+    the old thing still passes every geometry test in the picture suite.
+    """
+
+    @staticmethod
+    def _picture(app) -> str:
+        return str(app.query_one(GraphPanel).query_one("#graph-picture").content)
+
+    @staticmethod
+    def _ready(app) -> "GraphPanel":
+        return app.query_one(GraphPanel)
+
+    async def test_the_default_view_is_unchanged_by_having_a_cursor(
+        self, fake_service
+    ):
+        """Nothing is selected on load, so a reader who never presses a
+        movement key sees exactly the picture they saw before."""
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)):
+            await wait_until(lambda: app.cluster)
+            panel = self._ready(app)
+            await wait_until(lambda: panel.placement is not None)
+            assert panel.selected is None
+            # Only the pod count: no object is named, because none is under
+            # a cursor that does not exist yet.
+            assert "·" not in str(panel.border_subtitle)
+            assert paint.SELECTED_STYLE not in {
+                str(span.style)
+                for span in panel.query_one("#graph-picture").content.spans
+            }
+
+    async def test_a_movement_key_puts_the_cursor_on_a_box(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.cluster)
+            panel = self._ready(app)
+            await wait_until(lambda: panel.placement is not None)
+            panel.focus()
+            await pilot.pause()
+
+            assert panel.selected is None
+            await pilot.press("j")
+            await pilot.pause()
+            assert panel.selected in panel.placement.boxes
+
+    async def test_an_arrow_key_moves_the_cursor_too(self, fake_service):
+        """hjkl and the arrows are one gesture here, as in every other panel.
+        They used to be two: hjkl selected and the arrows panned."""
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.cluster)
+            panel = self._ready(app)
+            await wait_until(lambda: panel.placement is not None)
+            panel.focus()
+            await pilot.pause()
+
+            await pilot.press("j")
+            await pilot.pause()
+            first = panel.selected
+            await pilot.press("down")
+            await pilot.pause()
+            assert panel.selected is not None
+            # Either it moved, or the box it was on genuinely has nothing
+            # below it — but it must never have been reset to nothing.
+            assert panel.selected == first or panel.selected in panel.placement.boxes
+
+    async def test_the_selected_box_is_marked_in_the_picture(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.cluster)
+            panel = self._ready(app)
+            await wait_until(lambda: panel.placement is not None)
+            panel.focus()
+            await pilot.pause()
+
+            before = panel.query_one("#graph-picture").content
+            assert paint.SELECTED_STYLE not in {str(s.style) for s in before.spans}
+            await pilot.press("j")
+            await pilot.pause()
+            after = panel.query_one("#graph-picture").content
+            assert paint.SELECTED_STYLE in {str(s.style) for s in after.spans}
+
+    async def test_the_subtitle_names_the_object_under_the_cursor(self, fake_service):
+        """The identity goes in the subtitle rather than the picture, so the
+        layout does not have to find thirty more columns for it."""
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.cluster)
+            panel = self._ready(app)
+            await wait_until(lambda: panel.placement is not None)
+            panel.focus()
+            await pilot.pause()
+
+            await pilot.press("j")
+            await pilot.pause()
+            ref = panel.placement.boxes[panel.selected].node.resource
+            assert ref is not None
+            assert str(ref) in str(panel.border_subtitle)
+            # Still says how many pods are in the picture.
+            assert "pods" in str(panel.border_subtitle)
+
+    async def test_a_refresh_keeps_the_cursor_where_it_was(self, fake_service):
+        """`R` re-reads the cluster. A cursor that reset on every refresh
+        would make the picture impossible to work in."""
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.cluster)
+            panel = self._ready(app)
+            await wait_until(lambda: panel.placement is not None)
+            panel.focus()
+            await pilot.pause()
+
+            await pilot.press("j")
+            await pilot.pause()
+            chosen = panel.selected
+            assert chosen is not None
+
+            await pilot.press("R")
+            assert await wait_until(
+                lambda: fake_service.calls.count("get_cluster_info") >= 2
+            )
+            for _ in range(5):
+                await pilot.pause()
+            assert panel.selected == chosen
+
+    async def test_a_cluster_that_loses_the_box_drops_the_cursor(self, fake_service):
+        """Otherwise the subtitle keeps naming an object that is not on
+        screen, and the cursor points at a box that no longer exists."""
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.cluster)
+            panel = self._ready(app)
+            await wait_until(lambda: panel.placement is not None)
+            panel.focus()
+            await pilot.pause()
+
+            await pilot.press("j")
+            await pilot.pause()
+            assert panel.selected is not None
+
+            app.query_one(ClusterPanel).set_cluster(
+                {**app.cluster, "graph": {"available": False, "error": "nope"}}
+            )
+            for _ in range(3):
+                await pilot.pause()
+            assert panel.selected is None
+            assert "·" not in str(panel.border_subtitle)
+
+    async def test_the_cursor_brings_an_off_screen_box_into_view(self, fake_service):
+        """The picture is wider than a narrow panel, so on a 50-column
+        terminal boxes past the right edge are unreachable by eye. Following
+        the cursor is what makes them reachable without a separate pan key."""
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(50, 40)) as pilot:
+            await wait_until(lambda: app.cluster)
+            panel = self._ready(app)
+            await wait_until(lambda: panel.placement is not None)
+            # The Static only knows how far it can scroll once its width has
+            # been applied, which is not the moment the data lands.
+            for _ in range(5):
+                await pilot.pause()
+            panel.focus()
+            await pilot.pause()
+
+            if panel.max_scroll_x == 0:
+                pytest.skip("this cluster fits the panel at this width")
+
+            for _ in range(20):
+                await pilot.press("l")
+                await pilot.pause()
+                if panel.scroll_x > 0:
+                    break
+            assert panel.scroll_x > 0
+
+    async def test_the_cursor_does_not_move_on_a_picture_with_no_boxes(
+        self, fake_service
+    ):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_until(lambda: app.cluster)
+            panel = self._ready(app)
+            await wait_until(lambda: panel.placement is not None)
+            panel.focus()
+            await pilot.pause()
+
+            app.query_one(ClusterPanel).set_cluster(
+                {**app.cluster, "graph": {"available": False, "error": "nope"}}
+            )
+            for _ in range(3):
+                await pilot.pause()
+
+            await pilot.press("j")
+            await pilot.pause()
+            assert panel.selected is None

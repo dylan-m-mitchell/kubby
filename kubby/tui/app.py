@@ -649,8 +649,19 @@ class KubbyApp(App[None]):
                 ]
                 + move_rows
                 + [
-                    ("h", "collapse, out to the parent, or scroll left (graph)"),
-                    ("l", "expand, in to the first pod, or scroll right (graph)"),
+                    # h/l stay one row each rather than merging into "h/l":
+                    # left and right are different directions in the graph,
+                    # so one label could not describe both.
+                    (
+                        "h",
+                        "collapse, out to the parent (tree) — or move the "
+                        "cursor left (graph)",
+                    ),
+                    (
+                        "l",
+                        "expand, in to the first pod (tree) — or move the "
+                        "cursor right (graph)",
+                    ),
                     ("enter/space", "expand / collapse (tree)"),
                 ],
             ),

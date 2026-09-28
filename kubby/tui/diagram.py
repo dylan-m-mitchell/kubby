@@ -18,7 +18,13 @@ really a handful of small groups.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Type-only: `build_diagram` imports from kubby.cluster lazily at call
+    # time, and an annotation is the one place this module needs the name
+    # earlier than that.
+    from kubby.cluster import ResourceRef
 
 #: What a box *is*, which decides its colour and its border weight. Ordered
 #: by how early it should appear in the picture: the reader should meet the
@@ -86,6 +92,12 @@ class Node:
     #: Set for a Service whose selector matched nothing — the single most
     #: common beginner mistake, and the one worth colouring red.
     broken_service: bool = False
+    #: Which Kubernetes object this box stands for. Carried as data rather
+    #: than recovered from ``id``, which is lossy: ``_workload_id`` folds
+    #: ``-`` and ``_`` together, so ``my-app`` and ``my_app`` share an id and
+    #: neither can be read back out of it. ``None`` for a box that is only a
+    #: label, so a cursor can never land on something it cannot act on.
+    resource: ResourceRef | None = None
 
 
 @dataclass
@@ -192,7 +204,7 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
     panel's own border is, and the sidebar describes it in words; drawing it
     as well said the same thing three times over.
     """
-    from kubby.cluster import describe_node
+    from kubby.cluster import ResourceRef, describe_node
 
     diagram = Diagram()
     if not cluster.get("available", True):
@@ -225,8 +237,19 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
     if len(facts) > 1:
         machine: list[str] = []
         for fact in facts:
-            node_id = _node_id(str(fact.get("name") or "?"))
-            diagram.add(Node(node_id, describe_node(fact), "node", "nodes"))
+            node_name = str(fact.get("name") or "?")
+            node_id = _node_id(node_name)
+            diagram.add(
+                Node(
+                    node_id,
+                    describe_node(fact),
+                    "node",
+                    "nodes",
+                    # Cluster-scoped: the empty namespace is what keeps a
+                    # later `kubectl -n` off it.
+                    resource=ResourceRef("Node", node_name),
+                )
+            )
             machine.append(node_id)
         diagram.contain(
             Container(id="nodes", label="the nodes", members=machine, rank=0)
@@ -267,6 +290,10 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
                 role,
                 namespace,
                 healthy=all(_ready(p) for p in pods_in),
+                # The workload, not the pod: the layout above collapsed this
+                # namespace's replicas of it into one box, and a Deployment
+                # is the thing worth editing when a workload is wrong.
+                resource=ResourceRef(kind, name, namespace),
             )
         )
         # No edge from the node to the control plane, even though the
@@ -305,15 +332,17 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
             # No selector is not broken: the API server's own Service has
             # none, and so does one fronting hand-managed Endpoints.
             detail, healthy = (", ".join(ports) if ports else "no ports"), True
-        svc_id = _service_id(namespace, str(svc.get("name") or "?"))
+        svc_name = str(svc.get("name") or "?")
+        svc_id = _service_id(namespace, svc_name)
         diagram.add(
             Node(
                 svc_id,
-                [str(svc.get("name") or "?"), detail],
+                [svc_name, detail],
                 "infra" if namespace in INFRA_NAMESPACES else "app",
                 namespace,
                 healthy=healthy,
                 broken_service=not backing and bool(svc.get("has_selector")),
+                resource=ResourceRef("Service", svc_name, namespace),
             )
         )
         for pod_ref in backing:
@@ -356,13 +385,15 @@ def build_diagram(cluster: dict[str, Any]) -> Diagram:
             continue
         rules = [r for r in ing.get("rules") or [] if isinstance(r, dict)]
         hosts = ", ".join(sorted({str(r.get("host") or "*") for r in rules})) or "*"
-        ing_id = _ingress_id(namespace, str(ing.get("name") or "?"))
+        ing_name = str(ing.get("name") or "?")
+        ing_id = _ingress_id(namespace, ing_name)
         diagram.add(
             Node(
                 ing_id,
-                [str(ing.get("name") or "?"), hosts],
+                [ing_name, hosts],
                 "infra" if namespace in INFRA_NAMESPACES else "app",
                 namespace,
+                resource=ResourceRef("Ingress", ing_name, namespace),
             )
         )
         for backend in ing.get("backends") or []:

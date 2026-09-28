@@ -178,6 +178,41 @@ _BAR_EMPTY = "\u2591"    # ░
 
 
 @dataclass(frozen=True)
+class ResourceRef:
+    """What a Kubernetes object *is*, as far as naming it goes.
+
+    Built alongside the diagram boxes so the picture can say which object a
+    box stands for and not merely what to print inside it. The id on the box
+    is not a substitute: ``_workload_id`` folds ``-`` and ``_`` together, so
+    ``my-app`` and ``my_app`` produce the same id and neither can be
+    recovered from it.
+
+    ``namespace`` is empty for a cluster-scoped object (a Node), which is
+    also how ``kubectl`` distinguishes the two: no ``-n`` is passed.
+
+    The name is a **display** name, not a verified one. Most boxes stand for
+    an object by its real name, but the picture falls back to stripping a
+    generated hash suffix when it cannot resolve an owner — so an edit path
+    must confirm the object exists rather than trusting this blindly.
+    """
+
+    kind: str
+    name: str
+    namespace: str = ""
+
+    def __str__(self) -> str:
+        """The ``kind/name`` form ``kubectl`` itself prints, plus namespace.
+
+        The separator is a word and not a dot on purpose: a caller joins
+        these into a line with other ``·``-separated facts, and
+        ``3 pods · deployment/web · default`` reads as three peers when the
+        last two are one object.
+        """
+        ref = f"{self.kind.lower()}/{self.name}"
+        return f"{ref} in {self.namespace}" if self.namespace else ref
+
+
+@dataclass(frozen=True)
 class ResourceShare:
     """How much of one resource a Pod may ask for, as a bar and as figures.
 
