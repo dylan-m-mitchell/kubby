@@ -8,6 +8,24 @@ from __future__ import annotations
 
 from typing import Any
 
+#: Runtime kubby asks for when the field is left blank *and* rootless is on.
+#: minikube's own pick there is Docker, which cannot start a daemon inside a
+#: rootless user namespace; containerd runs in both rootless and rootful mode.
+ROOTLESS_RUNTIME = "containerd"
+
+
+def effective_runtime(settings: dict[str, Any]) -> str:
+    """The runtime kubby will ask minikube for; ``""`` means minikube's pick.
+
+    Kept as a function because preflight has to reason about the same value
+    the start command will send — otherwise the check and the run can
+    disagree about what "automatic" means.
+    """
+    requested = (settings.get("container_runtime") or "").strip()
+    if requested:
+        return requested
+    return ROOTLESS_RUNTIME if settings.get("rootless") else ""
+
 
 def start_args(settings: dict[str, Any]) -> list[str]:
     """Return argv for ``minikube start`` reflecting ``settings``.
@@ -20,6 +38,13 @@ def start_args(settings: dict[str, Any]) -> list[str]:
     driver = (settings.get("driver") or "").strip()
     if driver:
         args.append(f"--driver={driver}")
+
+    # The runtime inside the node. Kept next to the driver because the two
+    # are unrelated: the driver chooses how the node is hosted, the runtime
+    # chooses what runs containers inside it.
+    container_runtime = effective_runtime(settings)
+    if container_runtime:
+        args.append(f"--container-runtime={container_runtime}")
 
     if settings.get("rootless"):
         args.append("--rootless")

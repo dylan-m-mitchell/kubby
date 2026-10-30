@@ -42,12 +42,35 @@ DRIVER_OPTIONS: tuple[tuple[str, str], ...] = (
     ("none", "none (Linux only)"),
 )
 
+#: (stored value, label) — the runtime *inside* the node. `""` leaves the
+#: choice to minikube, except that rootless mode cannot run Docker and kubby
+#: asks for containerd instead. Unlike the driver, an existing profile's
+#: runtime can be switched by the next start.
+RUNTIME_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("", "automatic (containerd when rootless)"),
+    ("containerd", "containerd"),
+    ("docker", "docker"),
+    ("cri-o", "cri-o"),
+)
+
 #: (stored value, label) — mirrors the GUI's addon checkboxes.
 ADDON_OPTIONS: tuple[tuple[str, str], ...] = (
     ("default", "default (storage, dashboard)"),
     ("ingress", "ingress (NGINX controller)"),
     ("metrics-server", "metrics-server"),
 )
+
+
+def _option_value(stored: Any, options: Rows) -> str:
+    """The ``Select`` value for ``stored``, or ``""`` if it is not offered.
+
+    Settings are hand-editable JSON and coercion only checks types, so an
+    unknown runtime (say ``"gvisor"``) must open the form on the automatic
+    option rather than raise ``InvalidSelectValueError``.
+    """
+    value = str(stored or "")
+    return value if any(value == option for option, _label in options) else ""
+
 
 #: ``SettingsScreen``'s save hook: hand it the settings dict and a callback
 #: that will receive the service's ``{"ok": ...}`` result on the UI thread.
@@ -105,9 +128,21 @@ class SettingsScreen(ModalScreen[None]):
                 "driver",
                 Select(
                     [(label, value) for value, label in DRIVER_OPTIONS],
-                    value=str(base.get("driver") or ""),
+                    value=_option_value(base.get("driver"), DRIVER_OPTIONS),
                     allow_blank=False,
                     id="set-driver",
+                    compact=True,
+                ),
+            )
+            yield self._row(
+                "runtime",
+                Select(
+                    [(label, value) for value, label in RUNTIME_OPTIONS],
+                    value=_option_value(
+                        base.get("container_runtime"), RUNTIME_OPTIONS
+                    ),
+                    allow_blank=False,
+                    id="set-runtime",
                     compact=True,
                 ),
             )
@@ -196,6 +231,9 @@ class SettingsScreen(ModalScreen[None]):
             "minikube": {
                 **self._base,
                 "driver": str(self.query_one("#set-driver", Select).value or ""),
+                "container_runtime": str(
+                    self.query_one("#set-runtime", Select).value or ""
+                ),
                 "cpus": cpus,
                 "memory": memory,
                 "kubernetes_version": self.query_one("#set-k8s", Input).value.strip(),

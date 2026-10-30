@@ -194,6 +194,25 @@ class TestMinikubeJobs:
         ), lines
         assert any("try: minikube delete, then start again" in line for line in lines)
 
+    def test_docker_not_running_points_at_the_runtime_and_containerd(
+        self, monkeypatch
+    ):
+        stderr = "X Exiting due to RUNTIME_ENABLE: Failed to enable container runtime: docker not running\n"
+        lines, _payloads, on_log, on_done = collect()
+        monkeypatch.setattr(
+            service_mod.subprocess, "Popen",
+            lambda *a, **k: FakeProc(stderr=stderr, rc=80),
+        )
+        svc = KubbyService(on_log=on_log, on_job_done=on_done)
+        svc.start_minikube()
+        assert wait_until(lambda: not svc.is_job_running())
+
+        assert any("failed at: RUNTIME_ENABLE" in line for line in lines), lines
+        assert any(
+            "containerd" in line and "switch the runtime" in line
+            for line in lines
+        ), lines
+
     def test_failure_summary_is_omitted_when_minikube_says_nothing_useful(
         self, monkeypatch
     ):
@@ -267,6 +286,177 @@ class TestMinikubeJobs:
         release.set()
         assert wait_until(lambda: not svc.is_job_running())
         assert payloads and payloads[0]["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# preflight
+# ---------------------------------------------------------------------------
+
+
+class TestPreflight:
+    """`get_minikube_prerequisites()` — what blocks a start, and why."""
+
+    @staticmethod
+    def _settings(**overrides):
+        settings = {
+            "driver": "podman",
+            "container_runtime": "",
+            "rootless": True,
+            "cpus": "2",
+            "memory": "2g",
+            "kubernetes_version": "",
+            "addons": ["default"],
+        }
+        settings.update(overrides)
+        return {"minikube": settings}
+
+    @staticmethod
+    def _profile(driver="podman", runtime="containerd", name="minikube", rc=0):
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=rc,
+            stdout=json.dumps({
+                "valid": [{
+                    "Name": name,
+                    "Config": {
+                        "Driver": driver,
+                        "KubernetesConfig": {"ContainerRuntime": runtime},
+                    },
+                }],
+            }),
+            stderr="",
+        )
+
+    @pytest.fixture
+    def host(self, monkeypatch):
+        """A host with all four binaries, and a profile answer per test."""
+        monkeypatch.setattr(service_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(service_mod.settings_mod, "load", lambda: self._settings())
+        answers: list[subprocess.CompletedProcess] = [self._profile()]
+
+        def fake_run(args, **kwargs):
+            assert args[:3] == ["minikube", "profile", "list"]
+            return answers[-1]
+
+        monkeypatch.setattr(service_mod.subprocess, "run", fake_run)
+        return answers
+
+    def test_healthy_existing_profile_passes(self, host):
+        result = KubbyService().get_minikube_prerequisites()
+        assert result["ok"] is True, result["issues"]
+
+    def test_no_existing_profile_passes(self, host):
+        host[-1] = self._profile(name="other")
+        assert KubbyService().get_minikube_prerequisites()["ok"] is True
+
+    def test_rootless_docker_runtime_on_an_existing_profile_is_repaired(self, host):
+        # The reported failure used to be permanent: the profile had Docker
+        # stored, and minikube cannot run Docker inside rootless podman.
+        # `start` *can* switch the runtime, and automatic mode now asks for
+        # containerd whenever rootless is on, so this is a valid start.
+        host[-1] = self._profile(driver="podman", runtime="docker")
+        result = KubbyService().get_minikube_prerequisites()
+        assert result["ok"] is True, result["issues"]
+
+    def test_explicit_docker_runtime_under_rootless_podman_is_blocked(
+        self, host, monkeypatch
+    ):
+        # Only a deliberate choice can still reach the broken combination.
+        monkeypatch.setattr(
+            service_mod.settings_mod, "load",
+            lambda: self._settings(container_runtime="docker"),
+        )
+        host[-1] = self._profile(driver="podman", runtime="docker")
+        result = KubbyService().get_minikube_prerequisites()
+
+        assert result["ok"] is False
+        text = " ".join(result["issues"])
+        assert "Docker cannot start inside a rootless Podman node" in text
+        assert "containerd" in text
+
+    def test_fresh_rootless_podman_with_docker_runtime_is_blocked(self, host, monkeypatch):
+        # No profile yet, so minikube would try it for the first time and
+        # fail only after pulling images.
+        monkeypatch.setattr(
+            service_mod.settings_mod, "load",
+            lambda: self._settings(container_runtime="docker"),
+        )
+        host[-1] = self._profile(name="other")
+        result = KubbyService().get_minikube_prerequisites()
+        assert result["ok"] is False
+        assert any("rootless Podman" in issue for issue in result["issues"])
+
+    def test_changed_driver_is_reported(self, host, monkeypatch):
+        # minikube exits GUEST_DRIVER_MISMATCH here; say it up front.
+        monkeypatch.setattr(
+            service_mod.settings_mod, "load",
+            lambda: self._settings(driver="docker"),
+        )
+        host[-1] = self._profile(driver="podman", runtime="containerd")
+        result = KubbyService().get_minikube_prerequisites()
+
+        assert result["ok"] is False
+        assert any(
+            "driver" in issue and "Delete the cluster" in issue
+            for issue in result["issues"]
+        )
+
+    def test_changed_runtime_is_left_to_minikube(self, host, monkeypatch):
+        # Unlike the driver, the runtime is switchable on start, so drift is
+        # not an issue — the next start applies it.
+        monkeypatch.setattr(
+            service_mod.settings_mod, "load",
+            lambda: self._settings(container_runtime="cri-o"),
+        )
+        host[-1] = self._profile(driver="podman", runtime="containerd")
+        assert KubbyService().get_minikube_prerequisites()["ok"] is True
+
+    def test_profile_query_failure_is_not_a_preflight_failure(self, host):
+        host[-1] = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="minikube is old"
+        )
+        assert KubbyService().get_minikube_prerequisites()["ok"] is True
+
+    def test_unparsable_profile_json_is_not_a_preflight_failure(self, host):
+        host[-1] = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="not json", stderr=""
+        )
+        assert KubbyService().get_minikube_prerequisites()["ok"] is True
+
+    def test_profile_query_timeout_is_not_a_preflight_failure(self, host, monkeypatch):
+        def timeout(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="minikube", timeout=10)
+
+        monkeypatch.setattr(service_mod.subprocess, "run", timeout)
+        assert KubbyService().get_minikube_prerequisites()["ok"] is True
+
+    def test_profile_query_oserror_is_not_a_preflight_failure(self, host, monkeypatch):
+        def missing(*args, **kwargs):
+            raise OSError("no such file")
+
+        monkeypatch.setattr(service_mod.subprocess, "run", missing)
+        assert KubbyService().get_minikube_prerequisites()["ok"] is True
+
+    def test_profile_is_not_queried_when_minikube_is_missing(self, monkeypatch):
+        monkeypatch.setattr(service_mod.shutil, "which", lambda name: None)
+        monkeypatch.setattr(service_mod.settings_mod, "load", lambda: self._settings())
+
+        def must_not_run(*args, **kwargs):
+            raise AssertionError("profile list should not run without minikube")
+
+        monkeypatch.setattr(service_mod.subprocess, "run", must_not_run)
+        result = KubbyService().get_minikube_prerequisites()
+        assert result["ok"] is False
+        assert any("minikube is not installed" in issue for issue in result["issues"])
+
+    def test_missing_driver_binary_still_blocks(self, host, monkeypatch):
+        monkeypatch.setattr(
+            service_mod.shutil, "which",
+            lambda name: None if name == "podman" else f"/usr/bin/{name}",
+        )
+        result = KubbyService().get_minikube_prerequisites()
+        assert result["ok"] is False
+        assert any("'podman' on PATH" in issue for issue in result["issues"])
 
 
 # ---------------------------------------------------------------------------

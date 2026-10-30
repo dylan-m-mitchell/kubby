@@ -108,8 +108,9 @@ class FakeService:
         self.prerequisites: dict[str, Any] = {"ok": True, "issues": [],
                                               "settings_path": "/tmp/settings.json"}
         self.settings: dict[str, Any] = {"minikube": {
-            "driver": "podman", "rootless": False, "cpus": "4",
-            "memory": "4000", "kubernetes_version": "", "addons": [],
+            "driver": "podman", "container_runtime": "containerd",
+            "rootless": False, "cpus": "4", "memory": "4000",
+            "kubernetes_version": "", "addons": [],
         }}
         self.settings_saved: list[dict[str, Any]] = []
         #: flip to True to make a fetch raise, as a real service might

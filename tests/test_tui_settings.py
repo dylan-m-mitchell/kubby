@@ -45,12 +45,26 @@ class TestOpenAndCancel:
             assert "get_minikube_settings" in fake_service.calls
             # Prefilled from FakeService's persisted settings.
             assert app.screen.query_one("#set-driver", Select).value == "podman"
+            assert app.screen.query_one("#set-runtime", Select).value == "containerd"
             assert app.screen.query_one("#set-cpus", Input).value == "4"
             assert app.screen.query_one("#set-memory", Input).value == "4000"
             assert app.screen.query_one("#set-rootless", Checkbox).value is False
             assert app.screen.query_one("#set-addon-default", Checkbox).value is False
             # The form says where it writes, like the GUI's modal does.
             assert "settings.json" in str(app.screen.query_one("#settings-path", Static).content)
+
+    async def test_unknown_stored_values_fall_back_to_automatic(self, fake_service):
+        # Settings are hand-editable JSON; an unknown runtime must not make
+        # the form raise InvalidSelectValueError when it opens.
+        fake_service.settings["minikube"]["container_runtime"] = "gvisor"
+        fake_service.settings["minikube"]["driver"] = "firecracker"
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(110, 44)) as pilot:
+            await wait_until(lambda: app.system)
+            await open_settings(app, pilot)
+            assert app.screen.query_one("#set-runtime", Select).value == ""
+            assert app.screen.query_one("#set-driver", Select).value == ""
+            assert fake_service.settings_saved == []  # merely opening writes nothing
 
     async def test_escape_writes_nothing(self, fake_service):
         app = KubbyApp(service=fake_service)
@@ -145,6 +159,7 @@ class TestSave:
             assert saved["addons"] == ["ingress"]
             # Untouched fields survive the round trip.
             assert saved["driver"] == "podman"
+            assert saved["container_runtime"] == "containerd"
             assert saved["memory"] == "4000"
             assert saved["rootless"] is False
             assert saved["kubernetes_version"] == ""
@@ -154,6 +169,32 @@ class TestSave:
             )
             # …and the world is re-read like any other job-ish change.
             assert fake_service.calls.count("get_minikube_settings") >= 1
+
+    async def test_saves_a_changed_runtime(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(110, 44)) as pilot:
+            await wait_until(lambda: app.system)
+            await open_settings(app, pilot)
+            app.screen.query_one("#set-runtime", Select).value = "docker"
+
+            await pilot.press("ctrl+s")
+            assert await wait_until(lambda: fake_service.settings_saved)
+            assert fake_service.settings_saved[-1]["minikube"][
+                "container_runtime"
+            ] == "docker"
+
+    async def test_automatic_runtime_saves_blank(self, fake_service):
+        app = KubbyApp(service=fake_service)
+        async with app.run_test(size=(110, 44)) as pilot:
+            await wait_until(lambda: app.system)
+            await open_settings(app, pilot)
+            app.screen.query_one("#set-runtime", Select).value = ""
+
+            await pilot.press("ctrl+s")
+            assert await wait_until(lambda: fake_service.settings_saved)
+            assert fake_service.settings_saved[-1]["minikube"][
+                "container_runtime"
+            ] == ""
 
     async def test_enter_in_a_text_field_saves_too(self, fake_service):
         app = KubbyApp(service=fake_service)
