@@ -62,6 +62,7 @@ from typing import Any, Callable
 
 from kubby import cluster as cluster_mod
 from kubby import images as images_mod
+from kubby import resources as resources_mod
 from kubby import settings as settings_mod
 from kubby.installer import (
     detector,
@@ -74,6 +75,12 @@ log = logging.getLogger("kubby")
 
 _NOOP_LOG: Callable[[str], None] = lambda line: None
 _NOOP_DONE: Callable[[dict], None] = lambda payload: None
+
+#: kubectl is a request/response tool, not a VM provisioner. These are short
+#: on purpose: a read that hangs is better reported than left to block the
+#: single job slot for minikube's 15-minute budget.
+_KUBECTL_READ_TIMEOUT = 30
+_KUBECTL_WRITE_TIMEOUT = 60
 
 
 class KubbyService:
@@ -93,6 +100,10 @@ class KubbyService:
         self._job_lock = threading.Lock()
         self._job_thread: threading.Thread | None = None
         self._job_kind: str | None = None
+        #: The kubectl mutation currently holding the single job slot, if any.
+        #: kubeconfig reads, diffs and applies share the slot with minikube
+        #: jobs: a mutation must not run beside one, and vice versa.
+        self._mutation_kind: str | None = None
 
     # ------------------------------------------------------------------
     # callbacks
@@ -303,6 +314,15 @@ class KubbyService:
                 return {
                     "ok": False,
                     "error": f"a {kind} is already in progress — wait for it to finish",
+                }
+            if self._mutation_kind is not None:
+                # The edit flow owns the slot while it diffs or applies.
+                return {
+                    "ok": False,
+                    "error": (
+                        f"a {self._mutation_kind} is already in progress — "
+                        "wait for it to finish"
+                    ),
                 }
             settings = settings_mod.load()["minikube"]
             if action == "start":
@@ -650,6 +670,154 @@ class KubbyService:
         }
 
     # ------------------------------------------------------------------
+    # one resource, for the editor
+    # ------------------------------------------------------------------
+
+    def get_current_context(self) -> dict[str, Any]:
+        """The kubeconfig context ``kubectl`` would act on right now.
+
+        The editor refuses to open without this. A context name is not proof
+        that the cluster is local — names can be reused and a local proxy can
+        reach a remote cluster — so the UI asks the user to approve this exact
+        context on every edit rather than inferring safety from it.
+        """
+        if not shutil.which("kubectl"):
+            return {"ok": False, "context": None, "error": "kubectl not found on PATH"}
+        proc, error = self._run_kubectl(
+            ["kubectl", "config", "current-context"], timeout=_KUBECTL_READ_TIMEOUT
+        )
+        if error is not None:
+            return {"ok": False, "context": None, "error": error}
+        context = proc.stdout.strip()
+        if proc.returncode != 0 or not context:
+            detail = proc.stderr.strip() or "no current context"
+            return {"ok": False, "context": None, "error": detail}
+        return {"ok": True, "context": context, "error": None}
+
+    def get_resource_yaml(self, ref: cluster_mod.ResourceRef) -> dict[str, Any]:
+        """Fetch one object as editable YAML, with server-owned fields removed.
+
+        Deliberately not ``-A``: that wraps objects in a ``kind: List``, which
+        is not something an editor can apply back as one object. The fetch is
+        also the existence check — ``ResourceRef.name`` is sometimes a display
+        name recovered by stripping a hash, so a failed get is the honest
+        outcome rather than editing a guess.
+        """
+        if not shutil.which("kubectl"):
+            return {"ok": False, "yaml": "", "error": "kubectl not found on PATH"}
+        proc, error = self._run_kubectl(
+            resources_mod.get_yaml_args(ref), timeout=_KUBECTL_READ_TIMEOUT
+        )
+        if error is not None:
+            return {"ok": False, "yaml": "", "error": error}
+        if proc.returncode != 0:
+            detail = proc.stderr.strip() or f"kubectl exited {proc.returncode}"
+            return {"ok": False, "yaml": "", "error": detail}
+        text = resources_mod.sanitize(proc.stdout)
+        if not text.strip():
+            return {"ok": False, "yaml": "", "error": "kubectl returned no YAML"}
+        return {"ok": True, "yaml": text, "error": None}
+
+    def diff_resource(self, yaml_text: str) -> dict[str, Any]:
+        """Server-side dry run plus diff, without persisting anything.
+
+        Exit code 1 means "there are differences" and is a success. Only a
+        code above 1 is a failure; see :func:`kubby.resources.diff_outcome`.
+        Output is captured and returned, never streamed to ``on_log``: a diff
+        of a Secret contains the Secret.
+        """
+        claim_error = self._claim_mutation("diff")
+        if claim_error is not None:
+            return {
+                "ok": False,
+                "changed": False,
+                "diff": "",
+                "error": claim_error,
+            }
+        try:
+            proc, error = self._run_kubectl(
+                resources_mod.diff_args(),
+                stdin=yaml_text,
+                timeout=_KUBECTL_WRITE_TIMEOUT,
+            )
+            if error is not None:
+                return {"ok": False, "changed": False, "diff": "", "error": error}
+            outcome = resources_mod.diff_outcome(proc.returncode)
+            if outcome == resources_mod.DIFF_ERROR:
+                detail = (
+                    proc.stderr.strip()
+                    or proc.stdout.strip()
+                    or f"kubectl diff exited {proc.returncode}"
+                )
+                return {
+                    "ok": False,
+                    "changed": False,
+                    "diff": proc.stdout,
+                    "error": detail,
+                }
+            return {
+                "ok": True,
+                "changed": outcome == resources_mod.DIFF_CHANGED,
+                "diff": proc.stdout,
+                "error": None,
+            }
+        finally:
+            self._release_mutation()
+
+    def apply_resource(self, yaml_text: str) -> dict[str, Any]:
+        """Apply YAML from stdin, capturing output rather than streaming it.
+
+        Same single-job slot as a minikube job: if one is running, this is
+        refused instead of racing it. The YAML itself never appears in argv,
+        so it cannot leak into a command echo or a log history.
+        """
+        claim_error = self._claim_mutation("apply")
+        if claim_error is not None:
+            return {"ok": False, "output": "", "error": claim_error}
+        try:
+            proc, error = self._run_kubectl(
+                resources_mod.apply_args(),
+                stdin=yaml_text,
+                timeout=_KUBECTL_WRITE_TIMEOUT,
+            )
+            if error is not None:
+                return {"ok": False, "output": "", "error": error}
+            if proc.returncode != 0:
+                detail = (
+                    proc.stderr.strip()
+                    or proc.stdout.strip()
+                    or f"kubectl apply exited {proc.returncode}"
+                )
+                return {"ok": False, "output": proc.stdout, "error": detail}
+            return {"ok": True, "output": proc.stdout, "error": None}
+        finally:
+            self._release_mutation()
+
+    # ------------------------------------------------------------------
+    # single job slot
+    # ------------------------------------------------------------------
+
+    def _claim_mutation(self, kind: str) -> str | None:
+        """Take the one job slot for a kubectl mutation, or explain why not."""
+        with self._job_lock:
+            if self._job_thread is not None and self._job_thread.is_alive():
+                current = self._job_kind or "another command"
+                return (
+                    f"a {current} is already in progress — wait for it to finish"
+                )
+            if self._mutation_kind is not None:
+                return (
+                    f"a {self._mutation_kind} is already in progress — "
+                    "wait for it to finish"
+                )
+            self._mutation_kind = kind
+        return None
+
+    def _release_mutation(self) -> None:
+        with self._job_lock:
+            self._mutation_kind = None
+
+    # ------------------------------------------------------------------
     # local images (podman, no network)
     # ------------------------------------------------------------------
 
@@ -667,6 +835,36 @@ class KubbyService:
     # ------------------------------------------------------------------
     # subprocess helpers
     # ------------------------------------------------------------------
+
+    def _run_kubectl(
+        self,
+        argv: list[str],
+        *,
+        stdin: str | None = None,
+        timeout: int,
+    ) -> tuple[subprocess.CompletedProcess[str], None] | tuple[None, str]:
+        """Run kubectl and capture its output.
+
+        Returns ``(proc, None)`` or ``(None, error)``. Nothing here emits to
+        ``on_log``: the caller decides what is safe to show, and a Secret's
+        contents are never one of those things.
+        """
+        try:
+            proc = subprocess.run(
+                argv,
+                input=stdin,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=self._subprocess_env(),
+            )
+        except FileNotFoundError:
+            return None, "kubectl binary not found on PATH"
+        except subprocess.TimeoutExpired:
+            return None, f"kubectl {argv[1]} timed out after {timeout}s"
+        except OSError as e:
+            return None, str(e)
+        return proc, None
 
     @staticmethod
     def _subprocess_env() -> dict[str, str]:
