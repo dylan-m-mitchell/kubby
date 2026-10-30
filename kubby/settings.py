@@ -28,6 +28,14 @@ DEFAULT_MINIKUBE: dict[str, Any] = {
     # "" means "let minikube auto-detect". "docker"/"podman"/"kvm2"/"none"
     # force a driver. The UI offers a dropdown.
     "driver": "",
+    # `--container-runtime=<name>`. This is the runtime *inside* the node,
+    # not the driver that runs the node. Empty means "let minikube pick",
+    # except when rootless is on: minikube 1.38 picks Docker for a podman
+    # driver, and Docker-in-Docker cannot start inside a rootless user
+    # namespace, so kubby asks for containerd there instead (see
+    # `installer.minikube.effective_runtime`). Unlike the driver, minikube
+    # will switch an existing profile's runtime on the next start.
+    "container_runtime": "",
     # `--rootless`. Only meaningful with drivers that support it (podman,
     # kvm2 in some configs, minikube's built-in `rootless` driver). Inert
     # otherwise — the user just learns "it didn't help" if incompatible.

@@ -187,7 +187,9 @@ class KubbyService:
         """Pre-flight check for ``minikube start``.
 
         Returns ``{"ok", "issues", "settings_path"}``. Daemon-level health
-        (is docker actually running?) is left to minikube's own output.
+        (is docker actually running?) is left to minikube's own output, but
+        the existing profile is read (read-only, ``profile list -o json``)
+        so a driver change that minikube will reject is caught up front.
         """
         settings = settings_mod.load()["minikube"]
         issues: list[str] = []
@@ -217,6 +219,12 @@ class KubbyService:
                     "https://minikube.sigs.k8s.io/docs/drivers/."
                 )
 
+        # A profile keeps the driver it was created with and minikube exits
+        # with GUEST_DRIVER_MISMATCH if the requested one differs, so catch
+        # that before the start. The runtime is different: `start` can switch
+        # it, which is how an existing Docker-in-Podman profile gets repaired.
+        self._check_existing_profile(settings, driver, issues)
+
         return {
             "ok": not issues,
             "issues": issues,
@@ -238,6 +246,87 @@ class KubbyService:
             issues.append(
                 f"Driver '{driver}' needs '{binary}' on PATH so minikube "
                 f"can use it — see https://minikube.sigs.k8s.io/docs/drivers/."
+            )
+
+    #: The profile kubby starts. The app does not expose profiles, so this is
+    #: also the profile whose stored driver has to agree with settings.
+    PROFILE_NAME = "minikube"
+
+    def _existing_profile(self) -> dict[str, Any] | None:
+        """The default minikube profile's stored config, or None.
+
+        Read-only and failure-tolerant: no minikube, unparsable output or a
+        timeout all mean "nothing known", never a crashed preflight.
+        ``profile list -o json`` is the only CLI call that reports the
+        *stored* driver without starting anything.
+        """
+        if not shutil.which("minikube"):
+            return None
+        try:
+            proc = subprocess.run(
+                ["minikube", "profile", "list", "-o", "json"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=self._subprocess_env(),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return None
+        try:
+            payload = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        for profile in (payload.get("valid") or []):
+            if isinstance(profile, dict) and profile.get("Name") == self.PROFILE_NAME:
+                return profile
+        return None
+
+    @staticmethod
+    def _stored_driver(profile: dict[str, Any]) -> str:
+        """The driver a profile was created with, lowercased."""
+        config = profile.get("Config") or {}
+        return str(config.get("Driver") or "").strip().lower()
+
+    def _check_existing_profile(
+        self,
+        settings: dict[str, Any],
+        requested_driver: str,
+        issues: list[str],
+    ) -> None:
+        """Catch settings that an existing profile cannot honour.
+
+        The driver is fixed at creation: minikube exits with
+        ``GUEST_DRIVER_MISMATCH`` when asked to change it, so say so before a
+        start instead of after one. The runtime is *not* fixed — ``start``
+        switches it — but Docker still cannot run inside a rootless Podman
+        node, which is the failure that prompted this check.
+        """
+        profile = self._existing_profile()
+        existing_driver = self._stored_driver(profile) if profile else ""
+
+        requested_driver = (requested_driver or "").strip().lower()
+        if (
+            profile is not None
+            and requested_driver not in ("", "auto")
+            and existing_driver
+            and requested_driver != existing_driver
+        ):
+            issues.append(
+                f"The existing cluster was created with driver "
+                f"'{existing_driver}'; minikube cannot change it to "
+                f"'{requested_driver}'. Delete the cluster first (press 'd')."
+            )
+
+        runtime = minikube_mod.effective_runtime(settings).strip().lower()
+        podman_node = "podman" in (existing_driver, requested_driver)
+        if settings.get("rootless") and runtime == "docker" and podman_node:
+            issues.append(
+                "Docker cannot start inside a rootless Podman node. Choose "
+                "the containerd runtime, or turn rootless off."
             )
 
     # ------------------------------------------------------------------
@@ -270,6 +359,15 @@ class KubbyService:
                 reason = f"{match.group(1)}: {match.group(2)}"
             if self._DELETE_ADVICE in line:
                 advice = "minikube delete, then start again"
+            if "docker not running" in line.lower():
+                # The Docker daemon is *inside* the node. Under rootless
+                # Podman it can never start, and minikube's own advice does
+                # not say so; it only retries and then reports the runtime.
+                # Switching the runtime repairs an existing profile too.
+                advice = (
+                    "the node's Docker runtime is not available; switch the "
+                    "runtime to containerd and start again"
+                )
         if reason:
             self._emit(f"  failed at: {reason}")
         if advice:
