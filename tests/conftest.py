@@ -115,6 +115,34 @@ class FakeService:
         #: flip to True to make a fetch raise, as a real service might
         self.raise_on_cluster = False
 
+        # ----- resource editing ----------------------------------------
+        #: what `kubectl config current-context` would say
+        self.context_result: dict[str, Any] = {
+            "ok": True, "context": "minikube", "error": None,
+        }
+        self.resource_yaml = (
+            "apiVersion: apps/v1\n"
+            "kind: Deployment\n"
+            "metadata:\n"
+            "  name: web\n"
+            "  namespace: default\n"
+            "spec:\n"
+            "  replicas: 1\n"
+        )
+        #: every ResourceRef the editor asked to fetch
+        self.yaml_requests: list[Any] = []
+        #: what `diff_resource` reports; exit-code 1 is already decided here
+        self.diff_result: dict[str, Any] = {
+            "ok": True, "changed": False, "diff": "", "error": None,
+        }
+        self.diffed: list[str] = []
+        #: what `apply_resource` reports
+        self.apply_result: dict[str, Any] = {
+            "ok": True, "output": "deployment.apps/web configured", "error": None,
+        }
+        #: every payload the UI actually asked to apply — the mutation answer
+        self.applied: list[str] = []
+
     # ----- data -------------------------------------------------------
 
     def system_info(self) -> dict[str, Any]:
@@ -205,6 +233,31 @@ class FakeService:
     def get_minikube_prerequisites(self) -> dict[str, Any]:
         self.calls.append("get_minikube_prerequisites")
         return dict(self.prerequisites)
+
+    # ----- resource editing -------------------------------------------
+
+    def get_current_context(self) -> dict[str, Any]:
+        self.calls.append("get_current_context")
+        return dict(self.context_result)
+
+    def get_resource_yaml(self, ref: Any) -> dict[str, Any]:
+        self.calls.append("get_resource_yaml")
+        self.yaml_requests.append(ref)
+        return {
+            "ok": True,
+            "yaml": self.resource_yaml,
+            "error": None,
+        }
+
+    def diff_resource(self, yaml_text: str) -> dict[str, Any]:
+        self.calls.append("diff_resource")
+        self.diffed.append(yaml_text)
+        return dict(self.diff_result)
+
+    def apply_resource(self, yaml_text: str) -> dict[str, Any]:
+        self.calls.append("apply_resource")
+        self.applied.append(yaml_text)
+        return dict(self.apply_result)
 
     # ----- jobs --------------------------------------------------------
 

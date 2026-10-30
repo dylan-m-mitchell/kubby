@@ -89,7 +89,8 @@ Screen {
 }
 
 /* modal overlays ---------------------------------------------------- */
-HelpScreen, ConfirmModal, PrereqModal, SettingsScreen {
+HelpScreen, ConfirmModal, PrereqModal, SettingsScreen, EditorScreen,
+DiffConfirmModal {
     align: center middle;
     background: $bg 70%;
 }
@@ -120,6 +121,73 @@ HelpScreen, ConfirmModal, PrereqModal, SettingsScreen {
 }
 
 #confirm-message, #prereq-hints, #confirm-hints {
+    color: $dim;
+    padding-top: 1;
+}
+
+/* resource editor --------------------------------------------------- */
+#editor-box {
+    width: 100;
+    height: 90%;
+    border: round $border-focus;
+    background: $panel-bg;
+    padding: 1 2;
+}
+
+#editor-title {
+    color: $accent;
+    text-style: bold;
+}
+
+#editor-context {
+    padding-bottom: 1;
+}
+
+#editor-note {
+    padding-bottom: 1;
+}
+
+#editor-body {
+    height: 1fr;
+    background: $strip-bg;
+    color: $text;
+}
+
+#editor-error {
+    height: auto;
+    padding-top: 1;
+}
+
+#editor-hints {
+    color: $dim;
+    padding-top: 1;
+}
+
+/* diff confirmation -------------------------------------------------- */
+#diff-box {
+    width: 100;
+    height: 90%;
+    border: round $border-focus;
+    background: $panel-bg;
+    padding: 1 2;
+}
+
+#diff-title {
+    color: $accent;
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+#diff-scroll {
+    height: 1fr;
+    background: $strip-bg;
+}
+
+#diff-body {
+    padding: 0 1;
+}
+
+#diff-hints {
     color: $dim;
     padding-top: 1;
 }

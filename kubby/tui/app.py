@@ -38,6 +38,7 @@ from textual.screen import Screen
 from textual.widgets import Input, Static
 
 from kubby import settings as settings_mod
+from kubby.cluster import ResourceRef
 from kubby.service import KubbyService
 from kubby.tui.panels import (
     ClusterPanel,
@@ -47,7 +48,13 @@ from kubby.tui.panels import (
     PanelAction,
     PanelFocused,
 )
-from kubby.tui.popups import ConfirmModal, HelpScreen, PrereqModal, SettingsScreen
+from kubby.tui.popups import (
+    ConfirmModal,
+    EditorScreen,
+    HelpScreen,
+    PrereqModal,
+    SettingsScreen,
+)
 
 log = logging.getLogger("kubby")
 #: (key, action, description, show) — the single source of truth for
@@ -338,6 +345,7 @@ class KubbyApp(App[None]):
             "delete": self._confirm_delete,
             "filter": self._open_filter,
             "settings": self._open_settings,
+            "edit": self._edit_resource,
         }.get(message.action)
         if handler is None:
             log.warning("unhandled panel action %r", message.action)
@@ -524,6 +532,121 @@ class KubbyApp(App[None]):
         if accepted:
             self._kick_job("delete")
 
+    # ----- resource editing ----------------------------------------------
+    # The graph asks (PanelAction); the app does. Reading the context, fetching
+    # the object, diffing and applying all block, so each runs in a worker and
+    # reports back on the UI thread. Nothing here touches `on_log`: a Secret's
+    # diff contains its values, and the log panel keeps history all session.
+
+    def _edit_resource(self, ref: Any) -> None:
+        if not isinstance(ref, ResourceRef):
+            return
+        self._read_edit_context(ref)
+
+    @work(thread=True, exclusive=True, group="edit")
+    def _read_edit_context(self, ref: ResourceRef) -> None:
+        result = self.service.get_current_context()
+        self._call_on_ui(self._edit_context_read, ref, result)
+
+    def _edit_context_read(self, ref: ResourceRef, result: dict[str, Any]) -> None:
+        """Refuse to open the editor when the target context is unknown.
+
+        Approval is asked for on *every* edit. A context named "minikube" or a
+        loopback API server is not proof of a local cluster, so neither is
+        trusted as an implicit yes.
+        """
+        if not result.get("ok") or not result.get("context"):
+            self.notify(
+                str(result.get("error") or "cannot read the kubectl context"),
+                severity="error",
+                title="cannot edit",
+            )
+            return
+        context = str(result["context"])
+        where = ref.namespace or "(cluster-scoped)"
+        self.push_screen(
+            ConfirmModal(
+                title="edit on this context?",
+                message=(
+                    f"{ref.kind.lower()}/{ref.name} in {where}\n\n"
+                    f"kubectl will act on context: {context}\n"
+                    "Check this is the cluster you mean."
+                ),
+                confirm_label="edit",
+            ),
+            lambda accepted: self._edit_context_confirmed(ref, context, accepted),
+        )
+
+    def _edit_context_confirmed(
+        self, ref: ResourceRef, context: str, accepted: bool | None
+    ) -> None:
+        if not accepted:
+            return
+        self._fetch_resource_yaml(ref, context)
+
+    @work(thread=True, exclusive=True, group="edit")
+    def _fetch_resource_yaml(self, ref: ResourceRef, context: str) -> None:
+        result = self.service.get_resource_yaml(ref)
+        self._call_on_ui(self._open_editor, ref, context, result)
+
+    def _open_editor(
+        self,
+        ref: ResourceRef,
+        context: str,
+        result: dict[str, Any],
+    ) -> None:
+        if not result.get("ok"):
+            self.notify(
+                str(result.get("error") or "could not fetch the resource"),
+                severity="error",
+                title="cannot edit",
+            )
+            return
+        self.push_screen(
+            EditorScreen(
+                ref=ref,
+                context=context,
+                yaml_text=str(result.get("yaml") or ""),
+                diff=self._diff_resource,
+                apply=self._apply_resource,
+                applied=self.refresh_data,
+            )
+        )
+
+    def _diff_resource(
+        self,
+        yaml_text: str,
+        done: Callable[[dict[str, Any]], None],
+    ) -> None:
+        """Editor's diff hook — the blocking call happens in a worker."""
+        self._diff_resource_worker(yaml_text, done)
+
+    @work(thread=True, exclusive=True, group="edit")
+    def _diff_resource_worker(
+        self,
+        yaml_text: str,
+        done: Callable[[dict[str, Any]], None],
+    ) -> None:
+        result = self.service.diff_resource(yaml_text)
+        self._call_on_ui(done, result)
+
+    def _apply_resource(
+        self,
+        yaml_text: str,
+        done: Callable[[dict[str, Any]], None],
+    ) -> None:
+        """Editor's apply hook — the blocking call happens in a worker."""
+        self._apply_resource_worker(yaml_text, done)
+
+    @work(thread=True, exclusive=True, group="edit")
+    def _apply_resource_worker(
+        self,
+        yaml_text: str,
+        done: Callable[[dict[str, Any]], None],
+    ) -> None:
+        result = self.service.apply_resource(yaml_text)
+        self._call_on_ui(done, result)
+
     # ----- image filter --------------------------------------------------
 
     def _open_filter(self, _payload: Any) -> None:
@@ -663,6 +786,7 @@ class KubbyApp(App[None]):
                         "cursor right (graph)",
                     ),
                     ("enter/space", "expand / collapse (tree)"),
+                    ("e", "edit the object under the cursor (graph)"),
                 ],
             ),
         ]

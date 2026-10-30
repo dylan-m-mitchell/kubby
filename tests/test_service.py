@@ -15,6 +15,7 @@ import threading
 import pytest
 
 from kubby import service as service_mod
+from kubby.cluster import ResourceRef
 from kubby.service import KubbyService
 
 
@@ -531,6 +532,218 @@ class TestClusterGraph:
         graph = KubbyService().get_cluster_graph()
         assert graph["available"] is False
         assert graph["error"] == "connection refused"
+
+
+# ---------------------------------------------------------------------------
+# resource editing
+# ---------------------------------------------------------------------------
+
+
+class TestResourceEditing:
+    """The edit path's I/O: one object in, diff/apply from stdin, no log echo."""
+
+    @staticmethod
+    def _cp(stdout="", stderr="", rc=0):
+        return subprocess.CompletedProcess(args=[], returncode=rc,
+                                           stdout=stdout, stderr=stderr)
+
+    @pytest.fixture(autouse=True)
+    def kubectl(self, monkeypatch):
+        monkeypatch.setattr(service_mod.shutil, "which",
+                            lambda name: "/usr/bin/kubectl" if name == "kubectl" else None)
+
+    def test_get_fetches_one_object_and_sanitises_it(self, monkeypatch):
+        seen: dict = {}
+        raw = (
+            "apiVersion: v1\n"
+            "kind: ConfigMap\n"
+            "metadata:\n"
+            "  name: settings\n"
+            "  namespace: default\n"
+            "  resourceVersion: \"12\"\n"
+            "  uid: abc\n"
+            "data:\n"
+            "  generation: user-value\n"
+            "status:\n"
+            "  ignored: true\n"
+        )
+
+        def fake_run(args, **kwargs):
+            seen["args"] = args
+            seen["input"] = kwargs.get("input")
+            return self._cp(stdout=raw)
+
+        monkeypatch.setattr(service_mod.subprocess, "run", fake_run)
+        result = KubbyService().get_resource_yaml(
+            ResourceRef("ConfigMap", "settings", "default")
+        )
+
+        assert result["ok"] is True
+        assert "resourceVersion" not in result["yaml"]
+        assert "uid:" not in result["yaml"]
+        assert "status:" not in result["yaml"]
+        assert "  generation: user-value\n" in result["yaml"]
+        assert "-A" not in seen["args"]
+        assert seen["args"][:5] == [
+            "kubectl", "get", "configmap", "settings", "-n",
+        ]
+        # A read has nothing to send.
+        assert seen["input"] is None
+
+    def test_get_failure_is_reported_not_raised(self, monkeypatch):
+        monkeypatch.setattr(
+            service_mod.subprocess, "run",
+            lambda *a, **k: self._cp(rc=1, stderr='Error from server (NotFound): "web" not found'),
+        )
+        result = KubbyService().get_resource_yaml(
+            ResourceRef("Deployment", "web", "default")
+        )
+        assert result["ok"] is False
+        assert "not found" in result["error"]
+        assert result["yaml"] == ""
+
+    @pytest.mark.parametrize(
+        ("returncode", "ok", "changed"),
+        [(0, True, False), (1, True, True), (2, False, False)],
+    )
+    def test_diff_exit_codes(self, monkeypatch, returncode, ok, changed):
+        """Exit 1 is differences, not a failure — the single most likely bug."""
+        monkeypatch.setattr(
+            service_mod.subprocess, "run",
+            lambda *a, **k: self._cp(
+                stdout="--- live\n+++ edited\n", stderr="", rc=returncode
+            ),
+        )
+        result = KubbyService().diff_resource("kind: Pod\n")
+        assert result["ok"] is ok
+        assert result["changed"] is changed
+        if ok:
+            assert result["error"] is None
+
+    def test_diff_sends_yaml_on_stdin_and_never_argv_or_the_log(self, monkeypatch):
+        seen: dict = {}
+        yaml_text = "kind: Secret\ndata:\n  password: c2VjcmV0\n"
+        lines: list[str] = []
+
+        def fake_run(args, **kwargs):
+            seen["args"] = args
+            seen["input"] = kwargs["input"]
+            return self._cp(stdout="--- live\n+++ edited\n", rc=1)
+
+        monkeypatch.setattr(service_mod.subprocess, "run", fake_run)
+        svc = KubbyService(on_log=lines.append)
+        result = svc.diff_resource(yaml_text)
+
+        assert result["changed"] is True
+        assert seen["args"] == ["kubectl", "diff", "-f", "-"]
+        assert seen["input"] == yaml_text
+        assert "password" not in " ".join(seen["args"])
+        # A Secret's diff contains its values; the log panel keeps history.
+        assert lines == []
+
+    def test_diff_error_includes_stderr(self, monkeypatch):
+        monkeypatch.setattr(
+            service_mod.subprocess, "run",
+            lambda *a, **k: self._cp(rc=3, stderr="error: no server"),
+        )
+        result = KubbyService().diff_resource("kind: Pod\n")
+        assert result == {
+            "ok": False,
+            "changed": False,
+            "diff": "",
+            "error": "error: no server",
+        }
+
+    def test_apply_sends_yaml_on_stdin_and_returns_output(self, monkeypatch):
+        seen: dict = {}
+
+        def fake_run(args, **kwargs):
+            seen["args"] = args
+            seen["input"] = kwargs["input"]
+            return self._cp(stdout="deployment.apps/web configured\n")
+
+        monkeypatch.setattr(service_mod.subprocess, "run", fake_run)
+        svc = KubbyService()
+        result = svc.apply_resource("kind: Pod\n")
+
+        assert result == {
+            "ok": True,
+            "output": "deployment.apps/web configured\n",
+            "error": None,
+        }
+        assert seen["args"] == ["kubectl", "apply", "-f", "-"]
+        assert seen["input"] == "kind: Pod\n"
+
+    def test_apply_failure_keeps_stderr(self, monkeypatch):
+        monkeypatch.setattr(
+            service_mod.subprocess, "run",
+            lambda *a, **k: self._cp(rc=1, stdout="", stderr="unknown field spec.foo"),
+        )
+        result = KubbyService().apply_resource("kind: Pod\n")
+        assert result["ok"] is False
+        assert result["error"] == "unknown field spec.foo"
+
+    def test_mutation_is_refused_while_a_minikube_job_holds_the_slot(
+        self, monkeypatch
+    ):
+        svc = KubbyService()
+        release = start_blocking_job(svc, monkeypatch)
+        try:
+            result = svc.apply_resource("kind: Pod\n")
+            assert result["ok"] is False
+            assert "start" in result["error"]
+            assert "already in progress" in result["error"]
+        finally:
+            release.set()
+            assert wait_until(lambda: not svc.is_job_running())
+
+    def test_minikube_job_is_refused_while_a_mutation_holds_the_slot(
+        self, monkeypatch
+    ):
+        started = threading.Event()
+        release = threading.Event()
+        result_holder: list[dict] = []
+
+        def fake_run(args, **kwargs):
+            started.set()
+            assert release.wait(30)
+            return self._cp(stdout="configured\n")
+
+        monkeypatch.setattr(service_mod.subprocess, "run", fake_run)
+        svc = KubbyService()
+        worker = threading.Thread(
+            target=lambda: result_holder.append(svc.apply_resource("kind: Pod\n")),
+            daemon=True,
+        )
+        worker.start()
+        try:
+            assert started.wait(5)
+            result = svc.start_minikube()
+            assert result["ok"] is False
+            assert "apply" in result["error"]
+            assert "already in progress" in result["error"]
+        finally:
+            release.set()
+            worker.join(timeout=5)
+        assert result_holder and result_holder[0]["ok"] is True
+
+    def test_current_context_is_read_from_kubectl(self, monkeypatch):
+        monkeypatch.setattr(
+            service_mod.subprocess, "run",
+            lambda *a, **k: self._cp(stdout="minikube\n"),
+        )
+        assert KubbyService().get_current_context() == {
+            "ok": True, "context": "minikube", "error": None,
+        }
+
+    def test_unreadable_context_is_an_error(self, monkeypatch):
+        monkeypatch.setattr(
+            service_mod.subprocess, "run",
+            lambda *a, **k: self._cp(rc=1, stderr="error: current-context is not set"),
+        )
+        result = KubbyService().get_current_context()
+        assert result["ok"] is False
+        assert "current-context" in result["error"]
 
 
 # ---------------------------------------------------------------------------

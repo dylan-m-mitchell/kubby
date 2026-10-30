@@ -402,6 +402,9 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
         Binding("up", "move('up')", "up", show=False),
         Binding("left", "move('left')", "left", show=False),
         Binding("right", "move('right')", "right", show=False),
+        # Hidden from the keybar like every other graph key (it has ~27
+        # characters of headroom); documented in the help overlay.
+        Binding("e", "request('edit')", "edit", show=False),
     ]
 
     def __init__(self, **kwargs: Any) -> None:
@@ -509,6 +512,24 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
 
     # ----- cursor -------------------------------------------------------
 
+    def action_request(self, action: str) -> None:
+        """Ask the app to act on the object under the cursor.
+
+        A box with no ``ResourceRef`` is only a label, so there is nothing to
+        ask for. Panels *ask* and the app *does* — the fetch never happens
+        from here.
+        """
+        ref = self.selected_ref()
+        if ref is not None:
+            self._request(action, ref)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "request" and parameters and parameters[0] == "edit":
+            # No cursor means no object; a busy job means the service would
+            # refuse the mutation anyway, so do not offer it.
+            return self.selected_ref() is not None and not self.app.is_busy
+        return super().check_action(action, parameters)
+
     def action_move(self, direction: str) -> None:
         """Move the selection one box in *direction*.
 
@@ -538,8 +559,13 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
             Region(self._pad + x, y, width, height), animate=False
         )
 
-    def _selected_ref(self) -> ResourceRef | None:
-        """Which Kubernetes object the cursor is on, or None with no cursor."""
+    def selected_ref(self) -> ResourceRef | None:
+        """Which Kubernetes object the cursor is on, or None with no cursor.
+
+        Public because the app (and the tests) need to ask the same question
+        without reaching for a private name. A box can be a pure label, so
+        ``None`` also covers "the cursor is on something not actable".
+        """
         if self.placement is None or self.selected is None:
             return None
         box = self.placement.boxes.get(self.selected)
@@ -553,7 +579,7 @@ class GraphPanel(PanelBase, VerticalScroll, can_focus=True):
         another thirty columns the layout would have to find room for.
         """
         parts = [f"{self._cluster.get('pod_count') or 0} pods"]
-        ref = self._selected_ref()
+        ref = self.selected_ref()
         if ref is not None:
             parts.append(str(ref))
         self.border_subtitle = " · ".join(parts)

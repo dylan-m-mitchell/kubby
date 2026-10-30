@@ -15,9 +15,11 @@ from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
+from textual.containers import Container, Horizontal, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Checkbox, Input, Select, Static
+from textual.widgets import Checkbox, Input, Select, Static, TextArea
+
+from kubby.cluster import ResourceRef
 
 Rows = Sequence[tuple[str, str]]
 Sections = Sequence[tuple[str, Rows]]
@@ -53,6 +55,12 @@ ADDON_OPTIONS: tuple[tuple[str, str], ...] = (
 #: that will receive the service's ``{"ok": ...}`` result on the UI thread.
 #: The app implements it as a worker so the disk write stays off the UI.
 SaveFn = Callable[[dict[str, Any], Callable[[dict[str, Any]], None]], None]
+
+#: The editor's two blocking calls. The app runs each in a worker and invokes
+#: the callback on the UI thread; the editor owns the diff → confirm → apply
+#: sequence and never touches the service itself.
+ResourceCallFn = Callable[[str, Callable[[dict[str, Any]], None]], None]
+AppliedFn = Callable[[], None]
 
 
 class SettingsScreen(ModalScreen[None]):
@@ -319,6 +327,226 @@ class ConfirmModal(ModalScreen[bool]):
 
     def action_cancel(self) -> None:
         self.dismiss(False)
+
+
+class DiffConfirmModal(ModalScreen[bool]):
+    """Show what will change before anything is applied.
+
+    The diff comes from the external ``diff`` binary and honours
+    ``KUBECTL_EXTERNAL_DIFF``, so it is rendered as text and never parsed.
+    ``y``/enter applies, ``n``/esc/q goes back to the editor.
+    """
+
+    BINDINGS = [
+        Binding("y", "accept", "apply"),
+        Binding("enter", "accept", "apply"),
+        Binding("n", "cancel", "cancel"),
+        Binding("escape", "cancel", "cancel"),
+        Binding("q", "cancel", "cancel"),
+    ]
+
+    def __init__(self, *, title: str, diff: str) -> None:
+        super().__init__()
+        self._title = title
+        self._diff = diff
+
+    def compose(self) -> ComposeResult:
+        with Container(id="diff-box"):
+            yield Static(self._title, id="diff-title")
+            with VerticalScroll(id="diff-scroll"):
+                yield Static(
+                    Text(self._diff or "(kubectl returned no diff text)"),
+                    id="diff-body",
+                )
+            yield Static(
+                Text()
+                .append('"y"', style="bold cyan")
+                .append(" apply   ", style="dim")
+                .append('"n"', style="bold cyan")
+                .append(" back to editor", style="dim"),
+                id="diff-hints",
+            )
+
+    def action_accept(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
+class EditorScreen(ModalScreen[None]):
+    """Raw-YAML editor for one object, with diff and confirm before apply.
+
+    ``ModalScreen`` suspends the app's binding chain, so this binds its own
+    ``esc`` and ``ctrl+s``. ``enter`` is deliberately unbound here: inside a
+    ``TextArea`` it inserts a newline, which is what an editor must do — a
+    save key that also breaks lines is a data-loss bug waiting to happen.
+
+    The app injects the two blocking calls (``diff`` and ``apply``) so this
+    screen never shells out, and neither call routes through ``on_log``: a
+    Secret's diff contains the Secret's values, and the log panel keeps its
+    history for the whole session.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "cancel"),
+        Binding("ctrl+s", "save", "save"),
+    ]
+
+    def __init__(
+        self,
+        *,
+        ref: ResourceRef,
+        context: str,
+        yaml_text: str,
+        diff: ResourceCallFn,
+        apply: ResourceCallFn,
+        applied: AppliedFn,
+    ) -> None:
+        super().__init__()
+        self._ref = ref
+        # Not `_context`: Textual's MessagePump already has a `_context()`
+        # method, and shadowing it with a string breaks the screen's own
+        # message loop the first time it runs.
+        self._context_name = context
+        self._yaml_text = yaml_text
+        self._diff_request = diff
+        self._apply_request = apply
+        self._applied = applied
+        self._busy = False
+
+    def compose(self) -> ComposeResult:
+        with Container(id="editor-box"):
+            yield Static(
+                f"edit {self._ref.kind.lower()}/{self._ref.name}",
+                id="editor-title",
+            )
+            yield Static(self._context_line(), id="editor-context")
+            if self._ref.kind == "Secret":
+                # The API only ever hands back base64 under `data`. Showing it
+                # decoded would mean re-encoding on save, and getting that
+                # wrong silently corrupts the Secret. Say so instead.
+                yield Static(
+                    Text(
+                        "Secret values are base64-encoded exactly as the API "
+                        "returns them.",
+                        style="yellow",
+                    ),
+                    id="editor-note",
+                )
+            yield TextArea(
+                self._yaml_text,
+                language="yaml",
+                show_line_numbers=True,
+                id="editor-body",
+            )
+            yield Static("", id="editor-error")
+            yield Static(self._hints(), id="editor-hints")
+
+    def on_mount(self) -> None:
+        self.query_one("#editor-body", TextArea).focus()
+
+    def _context_line(self) -> Text:
+        out = Text()
+        out.append(
+            f"namespace {self._ref.namespace or '(cluster-scoped)'}",
+            style="dim",
+        )
+        out.append(" · ", style="dim")
+        out.append(f"context {self._context_name}", style="bold yellow")
+        return out
+
+    @staticmethod
+    def _hints() -> Text:
+        return (
+            Text()
+            .append('"ctrl+s"', style="bold cyan")
+            .append(" save   ", style="dim")
+            .append('"esc"', style="bold cyan")
+            .append(" cancel   ", style="dim")
+            .append('"enter"', style="bold cyan")
+            .append(" newline", style="dim")
+        )
+
+    def _body_text(self) -> str:
+        return self.query_one("#editor-body", TextArea).text
+
+    def _set_status(self, message: str) -> None:
+        self.query_one("#editor-hints", Static).update(
+            Text(message, style="yellow")
+        )
+
+    def _clear_error(self) -> None:
+        self.query_one("#editor-error", Static).update("")
+
+    def _fail(self, message: str) -> None:
+        self.query_one("#editor-error", Static).update(
+            Text(message, style="red")
+        )
+
+    # ----- save flow ----------------------------------------------------
+
+    def action_save(self) -> None:
+        if self._busy:
+            return
+        self._busy = True
+        self._clear_error()
+        self._set_status("checking diff…")
+        self._diff_request(self._body_text(), self._diff_done)
+
+    def _diff_done(self, result: dict[str, Any]) -> None:
+        self._busy = False
+        if not self.is_attached:
+            return
+        self.query_one("#editor-hints", Static).update(self._hints())
+        if not result.get("ok"):
+            self._fail(str(result.get("error") or "kubectl diff failed"))
+            return
+        if not result.get("changed"):
+            # Nothing to write: a no-op apply would still reassign the field
+            # manager, so closing is the honest outcome.
+            self.app.notify(
+                "No changes to apply", severity="information", title="kubby"
+            )
+            self.dismiss(None)
+            return
+        self.app.push_screen(
+            DiffConfirmModal(
+                title=f"apply {self._ref.kind.lower()}/{self._ref.name}?",
+                diff=str(result.get("diff") or ""),
+            ),
+            self._confirm_done,
+        )
+
+    def _confirm_done(self, accepted: bool | None) -> None:
+        if not accepted or self._busy:
+            return
+        self._busy = True
+        self._clear_error()
+        self._set_status("applying…")
+        self._apply_request(self._body_text(), self._apply_done)
+
+    def _apply_done(self, result: dict[str, Any]) -> None:
+        self._busy = False
+        if result.get("ok"):
+            # Refresh even if the editor was closed mid-flight: the cluster
+            # really did change, and the picture must not keep saying otherwise.
+            self._applied()
+            if self.is_attached:
+                self.app.notify(
+                    f"Applied {self._ref.kind.lower()}/{self._ref.name}",
+                    severity="information",
+                    title="kubby",
+                )
+                self.dismiss(None)
+            return
+        if not self.is_attached:
+            return
+        self.query_one("#editor-hints", Static).update(self._hints())
+        self._fail(str(result.get("error") or "kubectl apply failed"))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class PrereqModal(ModalScreen[str | None]):
