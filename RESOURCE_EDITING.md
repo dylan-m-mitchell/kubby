@@ -20,8 +20,20 @@ picture a cursor`). It is read-only and ships on its own:
 * `kubby.tui.panels.GraphPanel` — `hjkl`/arrows move the cursor; the subtitle
   names the object under it.
 
-Phases 1–3 are **not started**. Phase 1 is where kubby first mutates a
-cluster, so it is the one that needs care.
+**Phase 1 is done** (`feat(tui): edit a resource from the cluster graph`).
+Pressing `e` on a graph box approves the active context, fetches one object,
+opens it as YAML, diffs server-side, and applies only after a second confirm:
+
+* `kubby.resources` — argv builders, `diff` exit-code classification, and
+  `sanitize()` (line-based removal of `status` and server-owned metadata).
+* `KubbyService` — `get_current_context`, `get_resource_yaml`,
+  `diff_resource`, `apply_resource`; YAML goes on stdin, output is captured
+  (never streamed to `on_log`), and mutations share the single job slot with
+  minikube jobs.
+* `kubby.tui.popups.EditorScreen` / `DiffConfirmModal` — `TextArea` editor and
+  text-only diff view; `e` is hidden from the keybar and listed in help.
+
+Phases 2–3 (create, delete, scale, restart) are **not started**.
 
 ## Scope, already decided
 
@@ -160,14 +172,12 @@ Narrow and safe compared to a full edit, and cheap once Phase 1 exists.
 
 ### The single job slot
 
-`knowledge.md` and `KubbyService` both pin **one global job slot**: minikube
-start/stop/delete share it, and a mutation must join it rather than run
-beside it. `_kick_job(action)` currently maps a verb to minikube argv
-internally, so it needs to accept a prebuilt argv plus a label.
-`_run_minikube_job` also hardcodes two things worth generalising: the
-`✓ minikube {action} succeeded` wording and the 15-minute timeout. A
-`kubectl apply` should not inherit a 15-minute budget meant for
-`minikube start`.
+`KubbyService` pins **one global job slot**: minikube start/stop/delete share
+it with kubectl diffs and applies. `_claim_mutation` takes it for a
+request/response kubectl call and `_release_mutation` returns it in a
+`finally`; `_kick_job` refuses a minikube job while a mutation holds it, and
+vice versa. Kubectl calls get short timeouts of their own (30 s read, 60 s
+write) rather than minikube's 15-minute budget for `start`.
 
 ### Captured output, not streamed
 
@@ -187,23 +197,21 @@ choose, a Secret's content must never reach the log panel or `history`.
 
 ## Open decisions — need a human
 
-1. **Context guard (blocks Phase 1).** kubby targets minikube, but `kubectl`
-   acts on whatever the *current context* is. If a kubeconfig points at
-   production, an `e` key is a footgun. Neither a minikube context name nor a
-   loopback API server host is sufficient to authorize mutations: names can
-   be reused, and a local proxy can reach a remote cluster. Require a stronger
-   check that the actual target cluster is the intended local minikube
-   cluster, or explicit user approval for that target. Otherwise keep
-   mutations disabled with a visible reason. This must be settled before
-   any mutation lands.
+1. **Context guard — resolved for Phase 1.** Editing asks for explicit
+   approval on **every** edit, naming the exact active context that
+   `kubectl` will act on; an unreadable context refuses the editor with a
+   visible error. A name like "minikube" or a loopback API server is never
+   treated as an implicit yes. Follow-up for Phase 2: the approved context is
+   displayed but not pinned with `--context`, so a kubeconfig change between
+   approval and apply could still retarget the call.
 2. **Helm-managed objects.** `kubectl apply` reassigns the field manager, so
    editing a Helm-managed resource can make a later `helm upgrade` conflict or
    silently revert it. Detect `app.kubernetes.io/managed-by: Helm` (and
    `meta.helm.sh/release-name`) and warn in the editor. This is not
-   hypothetical — it was observed on a live cluster.
-3. **`ResourceRef.name` is a display name, not a verified one.** Some boxes
-   are labelled with a hash-stripped stem. Verify with a `get` before acting
-   rather than trusting it; a failed fetch is the honest outcome.
+   hypothetical — it was observed on a live cluster. **Still open.**
+3. **`ResourceRef.name` is a display name, not a verified one — resolved.**
+   The fetch before editing is the existence check; a failed `get` refuses to
+   open the editor rather than editing a hash-stripped guess.
 
 ## House rules that will bite
 

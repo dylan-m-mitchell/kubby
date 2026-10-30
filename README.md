@@ -177,7 +177,9 @@ kubby/
   __init__.py
   __main__.py             # python -m kubby
   app.py                  # CLI: --check / --debug, launches the TUI
-  service.py              # UI-agnostic service layer (detect/driver/minikube)
+  service.py              # UI-agnostic service layer (cluster/minikube/kubectl)
+  cluster.py              # read-only cluster snapshot for the diagrams
+  resources.py            # one-object kubectl argv + editable-YAML sanitising
   images.py               # local podman image listing
   settings.py             # settings.json load/save
   installer/
@@ -187,8 +189,10 @@ kubby/
     minikube.py           # settings → minikube argv
   tui/
     app.py                # Textual shell: layout, bindings, workers
-    panels.py             # minikube / tools / cluster / images / log panels
-    popups.py             # settings, help, confirm and preflight modals
+    panels.py             # minikube / cluster / graph / images / log panels
+    popups.py             # settings, help, confirm, preflight, resource editor
+    diagram.py            # cluster snapshot → labelled graph
+    draw.py / paint.py / place.py  # drawing, styles, cursor geometry
     styles.tcss           # theme + widget styling
 kubby.spec                # PyInstaller spec (onefile build)
 build-binary.sh           # developer: produce dist/kubby
@@ -198,6 +202,8 @@ tests/                    # pytest suite (uv run pytest)
 
 ## Roadmap
 
-Step 1 covers tool presence detection and the cluster overview (nodes,
-namespaces, pods). Subsequent steps add helm release management, in-cluster
-resource editing, and multi-cluster support.
+Tool detection and the read-only cluster overview (nodes, namespaces, pods,
+the connection graph, local images) have shipped. Editing one existing
+resource from the graph is Phase 1 of `RESOURCE_EDITING.md`; creating,
+deleting, scaling and restarting resources (Phases 2–3), Helm release
+management, and multi-cluster support are still ahead.
